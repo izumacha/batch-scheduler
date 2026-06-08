@@ -1,0 +1,27 @@
+# A small ETL batch: extract -> transform -> load, then notify.
+# Commands use `sh -c` so the snippet runs as-is on Linux.
+name: etl
+
+jobs:
+  - id: extract
+    name: Extract raw data
+    command: ["sh", "-c", "echo extract"]
+
+  - id: transform
+    name: Transform extracted data
+    command: ["sh", "-c", "echo transform"]
+    dependsOn: [extract]
+    # Transforms can be flaky; allow a couple of extra attempts and a timeout.
+    retries: 2
+    timeoutSeconds: 30
+
+  - id: load
+    name: Load into warehouse
+    command: ["sh", "-c", "echo load"]
+    dependsOn: [transform]
+
+  - id: notify
+    command: ["sh", "-c", "echo done"]
+    dependsOn: [load]
+    env:
+      CHANNEL: "#etl"
