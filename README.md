@@ -1,5 +1,7 @@
 # batch-scheduler
 
+**English** | [日本語](README.ja.md)
+
 A small, robust MVP batch execution manager. You define a set of jobs in a YAML
 file, and the tool runs them honoring a dependency DAG (directed acyclic graph),
 retrying and timing out individual jobs as configured, skipping the dependents of
