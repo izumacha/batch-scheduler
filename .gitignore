@@ -1,0 +1,19 @@
+# Maven
+target/
+*.class
+dependency-reduced-pom.xml
+
+# Batch scheduler runtime state (default state dir)
+.batch-state/
+runs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
