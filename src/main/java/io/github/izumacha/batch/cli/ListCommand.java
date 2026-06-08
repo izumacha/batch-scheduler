@@ -25,7 +25,13 @@ public final class ListCommand implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        List<ExecutionResult> runs = new JsonExecutionStore(stateDir).findAll();
+        List<ExecutionResult> runs;
+        try {
+            runs = new JsonExecutionStore(stateDir).findAll();
+        } catch (RuntimeException e) {
+            System.err.println("error: failed to read run state: " + e.getMessage());
+            return BatchCli.EXIT_CONFIG;
+        }
 
         if (runs.isEmpty()) {
             System.out.println("no runs found");

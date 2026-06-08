@@ -53,6 +53,20 @@ public final class BatchCli implements Callable<Integer> {
 
     /** Convenience for launching the CLI programmatically. */
     public static int run(String... args) {
-        return new CommandLine(new BatchCli()).execute(args);
+        CommandLine cmd = new CommandLine(new BatchCli());
+        // Map picocli's defaults onto our documented codes so callers can
+        // distinguish a usage/config error (3) from a validation error (2) or a
+        // batch that ran but FAILED (1). Applied to every command, since parse
+        // errors are reported by the (sub)command where they occur.
+        applyExitCodes(cmd);
+        return cmd.execute(args);
+    }
+
+    private static void applyExitCodes(CommandLine cmd) {
+        cmd.getCommandSpec().exitCodeOnInvalidInput(EXIT_CONFIG);
+        cmd.getCommandSpec().exitCodeOnExecutionException(EXIT_CONFIG);
+        for (CommandLine sub : cmd.getSubcommands().values()) {
+            applyExitCodes(sub);
+        }
     }
 }

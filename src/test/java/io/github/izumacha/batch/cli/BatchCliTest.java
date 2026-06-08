@@ -20,9 +20,16 @@ class BatchCliTest {
     }
 
     @Test
-    void unknownSubcommandFails() {
-        // picocli reports its own usage exit code; the contract we care about is
-        // that it is not treated as success.
-        assertNotEquals(BatchCli.EXIT_OK, BatchCli.run("nope"));
+    void unknownSubcommandMapsToConfigExitCode() {
+        assertEquals(BatchCli.EXIT_CONFIG, BatchCli.run("nope"));
+    }
+
+    @Test
+    void missingRequiredArgumentMapsToConfigExitCode() {
+        // `run` without the required CONFIG is invalid input; it must map to
+        // EXIT_CONFIG (3), not collide with EXIT_VALIDATION (2).
+        int code = BatchCli.run("run");
+        assertEquals(BatchCli.EXIT_CONFIG, code);
+        assertNotEquals(BatchCli.EXIT_VALIDATION, code);
     }
 }

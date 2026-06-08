@@ -139,6 +139,18 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void savesRunWithVeryShortRunId(@TempDir Path dir) {
+        // A one-character runId must not blow up the temp-file prefix.
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        store.save(new ExecutionResult("a", "etl", JobStatus.SUCCEEDED, start,
+                start.plusSeconds(1), List.of()));
+
+        assertTrue(Files.isRegularFile(dir.resolve("a.json")));
+        assertEquals("a", store.findById("a").orElseThrow().runId());
+    }
+
+    @Test
     void createsBaseDirIfAbsent(@TempDir Path dir) {
         Path nested = dir.resolve("nested/store");
         assertFalse(Files.exists(nested));

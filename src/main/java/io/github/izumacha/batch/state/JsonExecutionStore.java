@@ -25,6 +25,8 @@ import java.util.stream.Stream;
 public final class JsonExecutionStore implements ExecutionStore {
 
     private static final String SUFFIX = ".json";
+    /** Fixed temp-file prefix; must be >= 3 chars for {@link Files#createTempFile}. */
+    private static final String TMP_PREFIX = "run-";
 
     private final Path baseDir;
     private final ObjectMapper mapper;
@@ -59,7 +61,9 @@ public final class JsonExecutionStore implements ExecutionStore {
             Path target = fileFor(result.runId());
             // Write to a temp file in the same directory, then move atomically
             // so readers never observe a half-written file.
-            Path tmp = Files.createTempFile(baseDir, result.runId() + "-", ".tmp");
+            // Prefix is independent of runId: createTempFile requires >= 3 chars,
+            // but a runId may be as short as one character.
+            Path tmp = Files.createTempFile(baseDir, TMP_PREFIX, ".tmp");
             try {
                 mapper.writeValue(tmp.toFile(), result);
                 try {
