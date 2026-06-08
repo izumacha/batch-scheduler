@@ -105,14 +105,19 @@ public final class JobRunner {
         if (job.workingDir() != null) {
             pb.directory(new java.io.File(job.workingDir()));
         }
-        Map<String, String> env = job.env();
-        if (!env.isEmpty()) {
-            pb.environment().putAll(env);
-        }
-
         Process process;
         try {
+            // Applying the environment can throw IllegalArgumentException for
+            // keys/values ProcessBuilder rejects (e.g. a key containing '=').
+            // Treat that as a failure-to-start so it is recorded as a FAILED
+            // job result rather than crashing the whole batch.
+            Map<String, String> env = job.env();
+            if (!env.isEmpty()) {
+                pb.environment().putAll(env);
+            }
             process = pb.start();
+        } catch (IllegalArgumentException e) {
+            return Attempt.failedToStart("failed to start: invalid environment (" + e.getMessage() + ")");
         } catch (IOException e) {
             return Attempt.failedToStart("failed to start: " + e.getMessage());
         }

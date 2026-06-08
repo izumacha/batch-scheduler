@@ -121,7 +121,24 @@ public final class JsonExecutionStore implements ExecutionStore {
         return results;
     }
 
+    /**
+     * Resolves the file for a run id, guarding against path traversal: a runId
+     * is untrusted input (the store is public and accepts externally-built
+     * {@link ExecutionResult}s), so a value like {@code "../escape"} must never
+     * read or write outside {@code baseDir}.
+     */
     private Path fileFor(String runId) {
-        return baseDir.resolve(runId + SUFFIX);
+        if (runId.contains("/") || runId.contains("\\")
+                || runId.contains("..") || runId.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(
+                    "invalid runId '" + runId + "': must not contain path separators or '..'");
+        }
+        Path base = baseDir.toAbsolutePath().normalize();
+        Path resolved = base.resolve(runId + SUFFIX).normalize();
+        if (!base.equals(resolved.getParent())) {
+            throw new IllegalArgumentException(
+                    "invalid runId '" + runId + "': resolves outside the state directory");
+        }
+        return resolved;
     }
 }

@@ -5,6 +5,8 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Spec;
 import picocli.CommandLine.Model.CommandSpec;
 
+import java.util.concurrent.Callable;
+
 /**
  * Top-level {@code batch} command. Acts purely as a container for the
  * sub-commands ({@code run}, {@code validate}, {@code list}); invoking it on its
@@ -22,7 +24,7 @@ import picocli.CommandLine.Model.CommandSpec;
                 ListCommand.class
         }
 )
-public final class BatchCli implements Runnable {
+public final class BatchCli implements Callable<Integer> {
 
     /** Exit code: the requested operation completed successfully. */
     public static final int EXIT_OK = 0;
@@ -37,13 +39,16 @@ public final class BatchCli implements Runnable {
     private CommandSpec spec;
 
     /**
-     * When no sub-command is given, print usage to stderr. Picocli still returns
-     * {@code 0} for a bare {@code --help}/{@code --version} invocation because
-     * those options are handled before {@code run()} is reached.
+     * When no sub-command is given, print usage to stderr and fail with
+     * {@link #EXIT_CONFIG} so scripts and CI see that no operation was selected.
+     * Picocli still returns {@code 0} for a bare {@code --help}/{@code --version}
+     * invocation because those options are handled before {@code call()} is
+     * reached.
      */
     @Override
-    public void run() {
+    public Integer call() {
         spec.commandLine().usage(System.err);
+        return EXIT_CONFIG;
     }
 
     /** Convenience for launching the CLI programmatically. */

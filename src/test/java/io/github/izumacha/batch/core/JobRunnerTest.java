@@ -99,6 +99,18 @@ class JobRunnerTest {
     }
 
     @Test
+    void invalidEnvKeyIsReportedAsFailureNotThrown() {
+        // A key containing '=' is rejected by ProcessBuilder; it must surface as
+        // a FAILED result rather than crashing the batch.
+        Job j = new Job("badenv", null, List.of("sh", "-c", "exit 0"),
+                List.of(), 0, 0, Map.of("A=B", "x"), null);
+        JobResult r = fastRunner().run(j);
+        assertEquals(JobStatus.FAILED, r.status());
+        assertEquals(JobResult.NO_EXIT_CODE, r.exitCode());
+        assertNotNull(r.message());
+    }
+
+    @Test
     void environmentVariableIsPassedToProcess() {
         Job j = new Job("env", null, List.of("sh", "-c", "test \"$MY_VAR\" = hello"),
                 List.of(), 0, 0, Map.of("MY_VAR", "hello"), null);

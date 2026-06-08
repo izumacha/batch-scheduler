@@ -15,6 +15,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JsonExecutionStoreTest {
@@ -119,6 +120,22 @@ class JsonExecutionStoreTest {
         ExecutionResult loaded = store.findById("run1").orElseThrow();
         assertEquals(JobStatus.SUCCEEDED, loaded.status());
         assertEquals(1, store.findAll().size());
+    }
+
+    @Test
+    void rejectsRunIdsWithPathSeparatorsToPreventTraversal(@TempDir Path dir) throws Exception {
+        JsonExecutionStore store = new JsonExecutionStore(dir.resolve("state"));
+        Instant start = Instant.now();
+
+        for (String evil : List.of("../escape", "a/b", "..", "a\\b")) {
+            ExecutionResult run = new ExecutionResult(evil, "etl", JobStatus.SUCCEEDED,
+                    start, start.plusSeconds(1), List.of());
+            assertThrows(IllegalArgumentException.class, () -> store.save(run), evil);
+            assertThrows(IllegalArgumentException.class, () -> store.findById(evil), evil);
+        }
+
+        // Nothing escaped the state directory.
+        assertFalse(Files.exists(dir.resolve("escape.json")));
     }
 
     @Test
