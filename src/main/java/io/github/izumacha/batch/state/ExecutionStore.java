@@ -6,17 +6,20 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Persists and retrieves {@link ExecutionResult}s so that the history and
- * current state of batch runs can be inspected after the fact.
+ * バッチ実行結果（{@link ExecutionResult}）を永続化・取得するインターフェース。
+ * 実行履歴を後から参照できるようにするための契約（Port）を定義する。
  */
 public interface ExecutionStore {
 
-    /** Persists (or overwrites) the given run report. */
+    /** 指定された実行結果を保存する（同じ runId が既にあれば上書きする） */
+    // バッチ実行結果を永続ストレージに書き込むメソッドの宣言（実装は各サブクラスが提供する）
     void save(ExecutionResult result);
 
-    /** Returns the run with the given id, if present. */
+    /** 指定された runId の実行結果を返す（存在しない場合は空の Optional を返す） */
+    // 特定の実行 ID に対応する結果を検索するメソッドの宣言
     Optional<ExecutionResult> findById(String runId);
 
-    /** Returns all stored runs, most recent first. */
+    /** 保存されたすべての実行結果を最新順で返す */
+    // すべての実行記録を取得するメソッドの宣言（最新順＝開始時刻の降順）
     List<ExecutionResult> findAll();
 }

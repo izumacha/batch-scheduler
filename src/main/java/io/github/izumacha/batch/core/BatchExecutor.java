@@ -16,65 +16,83 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Orchestrates the execution of a {@link Batch}: validates it into a
- * {@link DependencyGraph}, runs jobs in topological order via a
- * {@link JobRunner}, skips jobs whose dependencies did not succeed, and
- * aggregates everything into an {@link ExecutionResult}.
+ * {@link Batch} の実行をオーケストレーションするクラス。バッチを {@link DependencyGraph}
+ * に変換し、トポロジカル順で {@link JobRunner} を使ってジョブを実行する。依存ジョブが
+ * 成功しなかったジョブはスキップし、すべての結果を {@link ExecutionResult} にまとめる。
  */
 public final class BatchExecutor {
 
+    // 実行 ID に使うタイムスタンプフォーマット（UTC の「yyyyMMdd-HHmmss」形式）
     private static final DateTimeFormatter RUN_ID_FORMAT =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC);
+    // 実行 ID に付ける乱数部分を生成する暗号学的に安全な乱数生成器
     private static final SecureRandom RANDOM = new SecureRandom();
+    // 16 進数の文字テーブル（乱数を 16 進数文字列に変換するため）
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
+    // 実際にジョブを実行する JobRunner インスタンス
     private final JobRunner runner;
 
+    // デフォルトコンストラクタ：JobRunner をデフォルト設定で作成する
     public BatchExecutor() {
         this(new JobRunner());
     }
 
+    // runner を注入するコンストラクタ（テスト時にモックを使えるようにする）
     public BatchExecutor(JobRunner runner) {
+        // runner が null の場合は例外を投げる
         if (runner == null) {
             throw new IllegalArgumentException("runner must not be null");
         }
+        // JobRunner インスタンスを格納する
         this.runner = runner;
     }
 
     /**
-     * Executes the batch. Invalid batches surface a
-     * {@link io.github.izumacha.batch.config.ValidationException} before any job
-     * runs. Individual job failures are recorded, not thrown.
+     * バッチを実行する。不正なバッチは最初のジョブが実行される前に
+     * {@link io.github.izumacha.batch.config.ValidationException} をスローする。
+     * 個々のジョブの失敗は記録され、例外にはならない。
      */
     public ExecutionResult execute(Batch batch) {
-        // Validation happens here; ValidationException propagates to the caller.
+        // バッチを検証して依存グラフを構築する（不正なら ValidationException がスローされる）
         DependencyGraph graph = DependencyGraph.build(batch);
 
+        // バッチ実行の開始時刻を記録する
         Instant startedAt = Instant.now();
+        // 開始時刻を使って一意の実行 ID を生成する
         String runId = generateRunId(startedAt);
 
         try {
+            // トポロジカル順にジョブリストを取得する
             List<Job> order = graph.topologicalOrder();
+            // ジョブ ID をキー、実行結果を値とするマップ（宣言順を保持）
             Map<String, JobResult> results = new LinkedHashMap<>();
 
+            // ジョブをトポロジカル順に実行する
             for (Job job : order) {
+                // このジョブをブロックしている依存ジョブがあるか確認する
                 String blockingDep = firstBlockingDependency(graph, job, results);
+                // ブロックしている依存がある場合はジョブをスキップして結果を記録する
                 if (blockingDep != null) {
                     results.put(job.id(), JobResult.skipped(
                             job.id(),
                             "skipped: dependency '" + blockingDep + "' did not succeed"));
                     continue;
                 }
+                // ブロックがない場合は JobRunner でジョブを実行し、結果を記録する
                 results.put(job.id(), runner.run(job));
             }
 
-            // Results are inserted in execution (topological) order.
+            // 実行順（トポロジカル順）でジョブ結果リストを作成する
             List<JobResult> jobResults = new ArrayList<>(results.values());
+            // 全ジョブが成功した場合は SUCCEEDED、そうでなければ FAILED とする
             JobStatus overall = jobResults.stream().allMatch(r -> r.status() == JobStatus.SUCCEEDED)
                     ? JobStatus.SUCCEEDED
                     : JobStatus.FAILED;
 
+            // バッチ実行の終了時刻を記録する
             Instant finishedAt = Instant.now();
+            // バッチ全体の実行結果を組み立てて返す
             return new ExecutionResult(
                     runId,
                     batch.name(),
@@ -83,34 +101,42 @@ public final class BatchExecutor {
                     finishedAt,
                     jobResults);
         } catch (RuntimeException e) {
+            // 予期しない例外をオーケストレーション失敗として包んでスローする
             throw new BatchExecutionException("unexpected error while executing batch '"
                     + batch.name() + "' (runId=" + runId + ")", e);
         }
     }
 
     /**
-     * Returns the id of the first dependency (in declaration order) that blocks
-     * this job from running, or {@code null} if all dependencies succeeded.
-     * Because skipped results also block, skips propagate transitively.
+     * このジョブをブロックしている最初の依存ジョブ ID を返す。すべての依存が成功していれば
+     * {@code null} を返す。スキップされた依存もブロック扱いになるためスキップは推移的に伝播する。
      */
     private static String firstBlockingDependency(DependencyGraph graph,
                                                   Job job,
                                                   Map<String, JobResult> results) {
-        // job.dependsOn() preserves declaration order; graph.dependenciesOf is a Set.
+        // job.dependsOn() は宣言順を保持している（graph.dependenciesOf はセット）
         for (String dep : job.dependsOn()) {
+            // この依存ジョブの実行結果を取得する
             JobResult depResult = results.get(dep);
+            // 依存ジョブが後続をブロックする状態（FAILED または SKIPPED）なら依存 ID を返す
             if (depResult != null && depResult.status().blocksDependents()) {
                 return dep;
             }
         }
+        // ブロックしている依存がない場合は null を返す
         return null;
     }
 
+    // 開始時刻と乱数を組み合わせた一意の実行 ID を生成するメソッド
     private static String generateRunId(Instant when) {
+        // 6 桁の 16 進数乱数を格納するバッファを作成する
         StringBuilder hex = new StringBuilder(6);
+        // 6 桁分の乱数 16 進数文字を生成する
         for (int i = 0; i < 6; i++) {
+            // 0〜15 のランダムな整数を 16 進数文字に変換して追加する
             hex.append(HEX[RANDOM.nextInt(16)]);
         }
+        // 「yyyyMMdd-HHmmss-XXXXXX」形式の実行 ID を返す
         return RUN_ID_FORMAT.format(when) + "-" + hex;
     }
 }

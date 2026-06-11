@@ -9,10 +9,12 @@ package io.github.izumacha.batch.core;
 public class BatchExecutionException extends RuntimeException {
 
     public BatchExecutionException(String message) {
+        // エラーメッセージだけを持つ例外を生成して親クラスに渡す
         super(message);
     }
 
     public BatchExecutionException(String message, Throwable cause) {
+        // エラーメッセージと原因例外の両方を持つ例外を生成して親クラスに渡す
         super(message, cause);
     }
 }

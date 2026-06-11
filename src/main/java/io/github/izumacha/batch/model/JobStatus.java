@@ -22,11 +22,13 @@ public enum JobStatus {
 
     /** A terminal state is one a job will not transition out of. */
     public boolean isTerminal() {
+        // SUCCEEDED・FAILED・SKIPPED のいずれかであれば終端状態（それ以上状態が変わらない）と判定して true を返す
         return this == SUCCEEDED || this == FAILED || this == SKIPPED;
     }
 
     /** Whether this state should block dependent jobs from running. */
     public boolean blocksDependents() {
+        // FAILED または SKIPPED の場合は後続ジョブをブロックする（依存するジョブを実行しない）
         return this == FAILED || this == SKIPPED;
     }
 }

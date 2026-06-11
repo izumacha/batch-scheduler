@@ -18,76 +18,105 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Executes a single {@link Job} as an external process, with retries,
- * per-attempt timeouts, and bounded output capture. A {@code JobRunner} never
- * throws because a job failed: every outcome (success, non-zero exit, timeout,
- * failure to start) is reported as a {@link JobResult}.
+ * 単一の {@link Job} を外部プロセスとして実行し、リトライ・タイムアウト・
+ * 出力キャプチャを管理するクラス。ジョブの失敗時に例外は投げず、
+ * すべての結果（成功・非ゼロ終了・タイムアウト・起動失敗）を {@link JobResult} として返す。
  */
 public final class JobRunner {
 
+    // キャプチャするプロセス出力の最大行数（デフォルト値）
     private static final int DEFAULT_MAX_CAPTURED_OUTPUT_LINES = 50;
+    // リトライ前に待機する時間（デフォルト1秒）
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
-    /** How long to wait for the output reader to drain after a process ends. */
+    // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
 
+    // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
+    // リトライ間隔（コンストラクタで設定する）
     private final Duration retryBackoff;
+    // true にすると出力を標準出力にも表示する
     private final boolean echoOutput;
 
     public JobRunner() {
+        // デフォルト設定でインスタンスを生成する
         this(DEFAULT_MAX_CAPTURED_OUTPUT_LINES, DEFAULT_RETRY_BACKOFF, false);
     }
 
     public JobRunner(int maxCapturedOutputLines, Duration retryBackoff, boolean echoOutput) {
+        // 最大行数が負の値の場合は例外を投げる（0は出力キャプチャなしを意味するので許可）
         if (maxCapturedOutputLines < 0) {
             throw new IllegalArgumentException("maxCapturedOutputLines must be >= 0");
         }
+        // 最大行数フィールドを設定する
         this.maxCapturedOutputLines = maxCapturedOutputLines;
+        // リトライ間隔が null の場合はゼロ（待機なし）にする
         this.retryBackoff = retryBackoff == null ? Duration.ZERO : retryBackoff;
+        // 出力エコーフラグを設定する
         this.echoOutput = echoOutput;
     }
 
     /**
-     * Runs the job, retrying up to {@link Job#maxAttempts()} times until it
-     * exits with code 0. Returns a terminal {@link JobResult}; never throws on
-     * job failure.
+     * ジョブを実行し、終了コード 0 になるまで最大 {@link Job#maxAttempts()} 回リトライする。
+     * ジョブが失敗しても例外は投げず、常に終端 {@link JobResult} を返す。
      */
     public JobResult run(Job job) {
+        // ジョブ全体の開始時刻を記録する
         Instant startedAt = Instant.now();
+        // 実際に試行した回数を追跡する変数を初期化する
         int attempts = 0;
+        // 最後に取得した終了コードを「未取得」の番兵値で初期化する
         int lastExitCode = JobResult.NO_EXIT_CODE;
+        // 最後の試行のメッセージを初期化する
         String lastMessage = "did not run";
+        // 成功フラグを false で初期化する
         boolean succeeded = false;
+        // タイムアウトフラグを false で初期化する
         boolean lastTimedOut = false;
 
+        // ジョブの最大試行回数を取得する
         int maxAttempts = job.maxAttempts();
+        // 最大試行回数までループして試行する
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // 現在の試行回数をフィールドに記録する
             attempts = attempt;
+            // 1回分の試行を実行して結果を取得する
             Attempt result = runOnce(job);
+            // 最後の終了コードを更新する
             lastExitCode = result.exitCode;
+            // 最後のメッセージを更新する
             lastMessage = result.message;
+            // タイムアウトフラグを更新する
             lastTimedOut = result.timedOut;
 
+            // 終了コードが0でタイムアウトでも起動失敗でもない場合は成功とする
             if (result.exitCode == 0 && !result.timedOut && !result.failedToStart) {
+                // 成功フラグを立ててループを抜ける
                 succeeded = true;
                 break;
             }
 
-            // More attempts remaining: back off (unless zero) before retrying.
+            // 次の試行が残っており、バックオフが設定されている場合は待機する
             if (attempt < maxAttempts && !retryBackoff.isZero() && !retryBackoff.isNegative()) {
                 try {
+                    // 次のリトライまで指定の時間だけスリープする
                     Thread.sleep(retryBackoff.toMillis());
                 } catch (InterruptedException e) {
+                    // スリープが割り込まれた場合は割り込みフラグを復元してループを抜ける
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
         }
 
+        // ジョブ全体の終了時刻を記録する
         Instant finishedAt = Instant.now();
+        // 成功か失敗かに応じてジョブのステータスを決定する
         JobStatus status = succeeded ? JobStatus.SUCCEEDED : JobStatus.FAILED;
+        // 人間が読みやすいサマリーメッセージを組み立てる
         String message = summarize(succeeded, lastExitCode, attempts, lastTimedOut, lastMessage, job);
 
+        // 最終的な JobResult を生成して返す
         return new JobResult(
                 job.id(),
                 status,
@@ -100,77 +129,95 @@ public final class JobRunner {
     }
 
     private Attempt runOnce(Job job) {
+        // ジョブのコマンドリストを使って ProcessBuilder を生成する
         ProcessBuilder pb = new ProcessBuilder(job.command());
+        // 標準エラーを標準出力にマージする（まとめて一つのストリームとして読める）
         pb.redirectErrorStream(true);
+        // 作業ディレクトリが指定されている場合はそれを設定する
         if (job.workingDir() != null) {
             pb.directory(new java.io.File(job.workingDir()));
         }
+        // 起動したプロセスを格納する変数を宣言する
         Process process;
         try {
-            // Applying the environment can throw IllegalArgumentException for
-            // keys/values ProcessBuilder rejects (e.g. a key containing '=').
-            // Treat that as a failure-to-start so it is recorded as a FAILED
-            // job result rather than crashing the whole batch.
+            // ジョブに環境変数が設定されている場合はプロセスの環境に追加する
             Map<String, String> env = job.env();
             if (!env.isEmpty()) {
+                // プロセスビルダーの環境マップに一括で追加する
                 pb.environment().putAll(env);
             }
+            // プロセスを起動する
             process = pb.start();
         } catch (IllegalArgumentException e) {
+            // 環境変数のキーや値が無効な場合（例: '=' を含むキー）は起動失敗として返す
             return Attempt.failedToStart("failed to start: invalid environment (" + e.getMessage() + ")");
         } catch (IOException e) {
+            // コマンドが見つからない・実行権限がないなどの IO エラーは起動失敗として返す
             return Attempt.failedToStart("failed to start: " + e.getMessage());
         }
 
-        // Drain combined output on a separate thread so a full pipe buffer
-        // never blocks the process.
+        // パイプバッファが満杯になってプロセスがブロックしないよう、
+        // 別スレッドで出力を読み続ける OutputCollector を起動する
         OutputCollector collector = new OutputCollector(process, maxCapturedOutputLines, echoOutput);
+        // デーモンスレッドとして起動する（JVM 終了時に自動で終了させるため）
         Thread reader = new Thread(collector, "jobrunner-output-" + job.id());
         reader.setDaemon(true);
+        // スレッドを開始して出力の読み込みを始める
         reader.start();
 
         try {
+            // タイムアウトが設定されている場合は指定時間だけ待機する
             if (job.hasTimeout()) {
+                // プロセスが指定秒以内に終了したかどうかを確認する
                 boolean finished = process.waitFor(job.timeoutSeconds(), TimeUnit.SECONDS);
                 if (!finished) {
+                    // タイムアウトした場合はプロセスツリーを強制終了する
                     killTree(process);
-                    // Reap the process, but never block indefinitely: an orphaned
-                    // grandchild (e.g. the `sleep` under `sh -c`) can keep the
-                    // output pipe open and otherwise hang us for the job's full
-                    // runtime. We do not wait on the reader thread here for the
-                    // same reason; it is a daemon and will exit when the pipe
-                    // finally closes. Capture whatever output is available now.
+                    // プロセスが終了するまで短時間だけ待機する（孤立した子孫プロセス対策）
                     process.waitFor(READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    // リーダースレッドも少しだけ待機してキャプチャ済みの出力を取得する
                     joinQuietly(reader, Duration.ofMillis(200));
+                    // タイムアウト結果を返す
                     return Attempt.timedOut(
                             "timed out after " + job.timeoutSeconds() + "s",
                             collector.tail());
                 }
             } else {
+                // タイムアウトなしの場合はプロセスが終了するまで無制限に待機する
                 process.waitFor();
             }
         } catch (InterruptedException e) {
+            // 待機中に割り込まれた場合は割り込みフラグを復元してプロセスを強制終了する
             Thread.currentThread().interrupt();
             killTree(process);
+            // リーダースレッドの終了を待つ
             joinQuietly(reader, READER_JOIN_TIMEOUT);
+            // 割り込みによる起動失敗として返す
             return Attempt.failedToStart("interrupted while waiting for process");
         }
 
+        // リーダースレッドがすべての出力を読み終えるまで待機する
         joinQuietly(reader, READER_JOIN_TIMEOUT);
+        // プロセスの終了コードを取得する
         int exitCode = process.exitValue();
+        // 正常終了した試行結果を返す（出力の末尾も含める）
         return Attempt.completed(exitCode, collector.tail());
     }
 
-    /** Forcibly terminates the process together with any descendants it spawned. */
+    /** プロセスとその子孫プロセスをすべて強制終了する */
     private static void killTree(Process process) {
+        // 子孫プロセスをすべて強制終了する
         process.descendants().forEach(ProcessHandle::destroyForcibly);
+        // 親プロセス自身も強制終了する
         process.destroyForcibly();
     }
 
     private static void joinQuietly(Thread t, Duration timeout) {
         try {
+            // スレッドが終了するまで指定時間だけ待機する
             t.join(timeout.toMillis());
         } catch (InterruptedException e) {
+            // 割り込まれた場合は割り込みフラグを復元して続行する
             Thread.currentThread().interrupt();
         }
     }
@@ -181,122 +228,172 @@ public final class JobRunner {
                                     boolean timedOut,
                                     String lastMessage,
                                     Job job) {
+        // サマリーを組み立てる StringBuilder を作成する
         StringBuilder sb = new StringBuilder();
         if (succeeded) {
+            // 成功した場合は終了コード 0 を表示する
             sb.append("exit 0");
+            // 複数回試行した場合は試行回数も表示する
             if (attempts > 1) {
                 sb.append(" after ").append(attempts).append(" attempts");
             }
         } else if (timedOut) {
+            // タイムアウトした場合はタイムアウト情報を表示する
             sb.append("timed out after ").append(job.timeoutSeconds()).append("s");
+            // 複数回試行した場合は試行回数も表示する
             if (attempts > 1) {
                 sb.append(" (").append(attempts).append(" attempts)");
             }
         } else if (exitCode == JobResult.NO_EXIT_CODE) {
-            // Failed to start or never produced an exit code.
+            // 終了コードが取得できない場合（起動失敗など）は最後のメッセージを表示する
             sb.append(lastMessage);
+            // 複数回試行した場合は試行回数も表示する
             if (attempts > 1) {
                 sb.append(" (").append(attempts).append(" attempts)");
             }
         } else {
+            // 通常の失敗の場合は終了コードを表示する
             sb.append("exit ").append(exitCode);
+            // 複数回試行した場合は試行回数も表示する
             if (attempts > 1) {
                 sb.append(" after ").append(attempts).append(" attempts");
             }
         }
 
-        // Append a short output tail when it adds context.
+        // 最後のメッセージが出力キャプチャの場合は先頭行を追記してコンテキストを補足する
         String tail = lastMessage != null && lastMessage.startsWith("OUTPUT:")
                 ? lastMessage.substring("OUTPUT:".length())
                 : null;
+        // 失敗時かつ出力がある場合は最初の行をサマリーに付加する
         if (!succeeded && tail != null && !tail.isBlank()) {
             sb.append(": ").append(firstLine(tail));
         }
+        // 完成したサマリー文字列を返す
         return sb.toString();
     }
 
     private static String firstLine(String s) {
+        // 最初の改行文字の位置を探す
         int nl = s.indexOf('\n');
+        // 改行がない場合はトリムして返し、ある場合は最初の行だけ返す
         return nl < 0 ? s.trim() : s.substring(0, nl).trim();
     }
 
-    /** Outcome of a single process attempt. */
+    /** 1回のプロセス試行の結果を表すイミュータブルなレコード */
     private record Attempt(int exitCode, boolean timedOut, boolean failedToStart, String message) {
+        // 正常完了した試行の結果を生成するファクトリメソッド
         static Attempt completed(int exitCode, String tail) {
+            // 出力がある場合は "OUTPUT:" プレフィックスを付けてメッセージにする
             String msg = tail == null || tail.isBlank() ? null : "OUTPUT:" + tail;
+            // タイムアウトなし・起動失敗なしの試行結果を返す
             return new Attempt(exitCode, false, false, msg);
         }
 
+        // タイムアウトした試行の結果を生成するファクトリメソッド
         static Attempt timedOut(String message, String tail) {
+            // 出力がある場合は出力を、ない場合はタイムアウトメッセージをセットする
             String msg = tail == null || tail.isBlank() ? message : "OUTPUT:" + tail;
+            // 終了コードは番兵値、タイムアウトフラグを true にして返す
             return new Attempt(JobResult.NO_EXIT_CODE, true, false, msg);
         }
 
+        // プロセスの起動に失敗した試行の結果を生成するファクトリメソッド
         static Attempt failedToStart(String message) {
+            // 終了コードは番兵値、起動失敗フラグを true にして返す
             return new Attempt(JobResult.NO_EXIT_CODE, false, true, message);
         }
     }
 
-    /** Reads the combined stream, optionally echoing, keeping only the last N lines. */
+    /**
+     * プロセスの標準出力（標準エラーも統合済み）を別スレッドで読み込み、
+     * 最後の N 行だけを保持するリングバッファ方式の内部クラス
+     */
     private static final class OutputCollector implements Runnable {
-        /** Cap on a single captured line so one huge line cannot exhaust memory. */
+        // 1行の最大文字数（これを超える行は切り詰める）
         private static final int MAX_LINE_CHARS = 8 * 1024;
+        // 行が切り詰められたことを示すマーカー文字列
         private static final String TRUNCATION_MARK = "…[truncated]";
 
+        // 出力を読み込む対象のプロセス
         private final Process process;
+        // 保持する最大行数（リングバッファのサイズ）
         private final int maxLines;
+        // true の場合は標準出力にも出力をエコーする
         private final boolean echo;
+        // キャプチャした行を格納する両端キュー（最大 maxLines 行のリングバッファ）
         private final Deque<String> lines = new ArrayDeque<>();
 
         OutputCollector(Process process, int maxLines, boolean echo) {
+            // プロセスを保持する
             this.process = process;
+            // 最大行数を保持する
             this.maxLines = maxLines;
+            // エコーフラグを保持する
             this.echo = echo;
         }
 
         @Override
         public void run() {
-            // Split into lines manually (rather than BufferedReader.readLine) so a
-            // single unbounded line from a runaway process is capped instead of
-            // being read whole into memory. The full stream is still drained so the
-            // process never blocks on a full pipe.
+            // BufferedReader.readLine() を使わずに手動で行を区切る。
+            // これにより、暴走プロセスが超長い行を出力してもメモリを食い尽くさないよう
+            // 1行の文字数を MAX_LINE_CHARS で上限を設ける。
+            // ただしパイプはすべてドレインするのでプロセスがブロックすることはない。
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                // 4KB の読み込みバッファを用意する
                 char[] buf = new char[4096];
+                // 現在構築中の行を格納する StringBuilder を作成する
                 StringBuilder line = new StringBuilder();
+                // 現在の行が切り詰められたかどうかのフラグ
                 boolean lineTruncated = false;
+                // 読み込んだ文字数を格納する変数
                 int n;
+                // ストリームの終端まで読み続ける
                 while ((n = br.read(buf)) != -1) {
+                    // 読み込んだバッファの各文字を処理する
                     for (int i = 0; i < n; i++) {
+                        // 現在の文字を取り出す
                         char c = buf[i];
                         if (c == '\n') {
+                            // 改行文字の場合は行を確定してバッファに追加する
                             emit(line.toString());
+                            // 行バッファをリセットする
                             line.setLength(0);
+                            // 切り詰めフラグをリセットする
                             lineTruncated = false;
                         } else if (c != '\r' && !lineTruncated) {
+                            // CR 以外の文字で、まだ切り詰めていない場合は行に追加する
                             line.append(c);
+                            // 行の文字数が上限に達した場合は切り詰めマーカーを付ける
                             if (line.length() >= MAX_LINE_CHARS) {
                                 line.append(TRUNCATION_MARK);
+                                // 以降の文字は無視する（パイプはドレインし続ける）
                                 lineTruncated = true;
                             }
                         }
                     }
                 }
+                // ストリーム終端に改行のない最後の行を出力する
                 if (line.length() > 0) {
                     emit(line.toString());
                 }
             } catch (IOException e) {
-                // Stream closed (e.g. process destroyed); nothing more to read.
+                // ストリームが閉じられた場合（プロセスが強制終了されたなど）は何もしない
             }
         }
 
         private void emit(String line) {
+            // エコーが有効な場合は標準出力にも表示する
             if (echo) {
                 System.out.println(line);
             }
+            // 最大行数が 0 より大きい場合のみリングバッファに格納する
             if (maxLines > 0) {
+                // 複数スレッドからの同時アクセスを防ぐために synchronized で保護する
                 synchronized (lines) {
+                    // 行をリングバッファの末尾に追加する
                     lines.addLast(line);
+                    // 上限を超えた場合は古い行（先頭）を削除してリングバッファを維持する
                     while (lines.size() > maxLines) {
                         lines.removeFirst();
                     }
@@ -305,7 +402,9 @@ public final class JobRunner {
         }
 
         String tail() {
+            // 複数スレッドからの同時アクセスを防ぐために synchronized で保護する
             synchronized (lines) {
+                // 格納している行をリストにコピーして改行でつなぎ文字列として返す
                 return String.join("\n", new ArrayList<>(lines));
             }
         }
