@@ -19,243 +19,314 @@ import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
- * A validated, acyclic view of the jobs in a {@link Batch} and their
- * dependencies. Construct one with {@link #build(Batch)}, which performs all
- * structural validation up front and throws a single
- * {@link ValidationException} carrying every detected problem. Once built, the
- * query methods operate on already-validated state and never fail.
+ * {@link Batch} 内のジョブとその依存関係を検証済み・非循環の形で表すクラス。
+ * {@link #build(Batch)} で構築し、すべての構造上の問題を一度に検出して
+ * {@link ValidationException} として報告する。構築後のクエリは常に成功する。
  */
 public final class DependencyGraph {
 
+    // バッチ定義本体を保持するフィールド
     private final Batch batch;
-    /** jobId -> validated set of dependency ids (declaration order preserved). */
+    /** jobId → 検証済みの依存IDセット（宣言順を保持）。 */
+    // ジョブ ID をキー、そのジョブが依存するジョブ ID のセットを値とするマップ
     private final Map<String, Set<String>> dependencies;
-    /** jobId -> declaration index, used for deterministic tie-breaking. */
+    /** jobId → 宣言インデックス（同順位のタイブレークに使用）。 */
+    // ジョブ ID をキー、そのジョブがバッチ内で何番目に宣言されたかを値とするマップ
     private final Map<String, Integer> declarationIndex;
 
+    // プライベートコンストラクタ：buildメソッド経由でのみインスタンスを生成する
     private DependencyGraph(Batch batch,
                             Map<String, Set<String>> dependencies,
                             Map<String, Integer> declarationIndex) {
+        // バッチ定義を格納する
         this.batch = batch;
+        // 依存関係マップを格納する
         this.dependencies = dependencies;
+        // 宣言順インデックスマップを格納する
         this.declarationIndex = declarationIndex;
     }
 
     /**
-     * Validates the given batch and builds a dependency graph from it. Collects
-     * every structural problem and, if any are found, throws a single
-     * {@link ValidationException} containing all of them.
+     * 指定したバッチを検証して依存グラフを構築する。すべての構造上の問題を収集し、
+     * 1 つでも見つかった場合は {@link ValidationException} をスローする。
      */
     public static DependencyGraph build(Batch batch) {
+        // batch が null の場合はすぐに例外を投げる
         if (batch == null) {
             throw new ValidationException(List.of("batch is null"));
         }
 
+        // 検証エラーを蓄積するリストを作成する
         List<String> errors = new ArrayList<>();
+        // バッチ内のジョブ一覧を取得する
         List<Job> jobs = batch.jobs();
 
+        // ジョブが 1 件もない場合はエラーを記録してすぐに例外を投げる
         if (jobs.isEmpty()) {
             errors.add("batch contains no jobs");
             throw new ValidationException(errors);
         }
 
-        // Detect duplicate ids and record declaration order of the first occurrence.
+        // 重複ID の検出と、最初に出現した宣言順インデックスの記録
+        // LinkedHashMap を使って宣言順を保持する
         Map<String, Integer> declarationIndex = new LinkedHashMap<>();
+        // 重複エラーを 1 度だけ記録するための追跡セット
         Set<String> reportedDuplicates = new HashSet<>();
+        // ジョブを宣言順に走査して重複 ID を検出する
         for (int i = 0; i < jobs.size(); i++) {
+            // 現在のインデックス i にあるジョブの ID を取得する
             String id = jobs.get(i).id();
+            // 同じ ID がすでに存在するか確認する
             if (declarationIndex.containsKey(id)) {
+                // まだ報告していなければエラーに追加する（同一 ID の重複報告を防ぐ）
                 if (reportedDuplicates.add(id)) {
                     errors.add("duplicate job id: '" + id + "'");
                 }
             } else {
+                // 初めて出現した ID は宣言インデックスに登録する
                 declarationIndex.put(id, i);
             }
         }
 
-        // Per-job checks: empty command, unknown deps, self-deps.
+        // ジョブごとの検証：空コマンド・存在しない依存・自己依存
+        // LinkedHashMap を使って宣言順に依存関係マップを構築する
         Map<String, Set<String>> dependencies = new LinkedHashMap<>();
+        // 各ジョブを走査して依存関係を検証する
         for (Job job : jobs) {
+            // 現在のジョブの ID を取得する
             String id = job.id();
-            // Only build the dependency map for the first declaration of an id.
+            // 重複 ID は最初の宣言のみを対象にする
             if (dependencies.containsKey(id)) {
                 continue;
             }
+            // コマンドが空のジョブはエラーとして記録する
             if (job.command().isEmpty()) {
                 errors.add("job '" + id + "' has an empty command");
             }
+            // このジョブの検証済み依存セットを作成する（宣言順を保持）
             Set<String> deps = new LinkedHashSet<>();
+            // 各依存 ID を検証する
             for (String dep : job.dependsOn()) {
+                // 自分自身への依存はエラーとして記録し、このエントリをスキップする
                 if (dep.equals(id)) {
                     errors.add("job '" + id + "' depends on itself");
                     continue;
                 }
+                // 宣言されていない ID への依存はエラーとして記録し、スキップする
                 if (!declarationIndex.containsKey(dep)) {
                     errors.add("job '" + id + "' depends on unknown job '" + dep + "'");
                     continue;
                 }
+                // 検証済みの依存 ID をセットに追加する
                 deps.add(dep);
             }
+            // このジョブの依存セットをマップに登録する
             dependencies.put(id, deps);
         }
 
-        // Cycle detection only makes sense once edges are known to be valid.
-        // Run it on the dependency map we built (which excludes self/unknown deps).
+        // 循環検出は辺が有効であることが確認されてから行う
+        // （自己依存・不明な依存を除外した dependencies マップ上で実行する）
         detectCycles(declarationIndex, dependencies, errors);
 
+        // エラーが 1 件以上あれば ValidationException をスローする
         if (!errors.isEmpty()) {
             throw new ValidationException(errors);
         }
 
+        // 検証済みのグラフインスタンスを返す
         return new DependencyGraph(batch, dependencies, declarationIndex);
     }
 
+    // 繰り返し DFS（深さ優先探索）で循環を検出するプライベートメソッド
     private static void detectCycles(Map<String, Integer> declarationIndex,
                                      Map<String, Set<String>> dependencies,
                                      List<String> errors) {
-        // 0 = unvisited, 1 = in progress (on the current DFS path), 2 = done.
-        // Iterative DFS (explicit stacks) so a deeply-nested or very long
-        // dependency chain cannot overflow the call stack.
+        // 0 = 未訪問、1 = 処理中（現在の DFS パス上）、2 = 完了
+        // スタックオーバーフローを防ぐために再帰ではなく明示的なスタックを使う
         Map<String, Integer> state = new HashMap<>();
+        // 同じ循環を複数回報告しないための追跡セット
         Set<String> reportedCycles = new HashSet<>();
-        // Iterate in declaration order for deterministic cycle reporting.
+        // 決定的な循環報告のために宣言順で走査する
         for (String start : declarationIndex.keySet()) {
+            // すでに処理済みのノードはスキップする
             if (state.getOrDefault(start, 0) != 0) {
                 continue;
             }
+            // DFS のスタック（各要素は現在ノードの依存イテレータ）
             Deque<Iterator<String>> iterators = new ArrayDeque<>();
-            Deque<String> path = new ArrayDeque<>(); // top = node currently being explored
+            // 現在探索中のパス（先頭が最も深いノード）
+            Deque<String> path = new ArrayDeque<>();
 
+            // 開始ノードを「処理中」に設定してスタックに積む
             state.put(start, 1);
             path.push(start);
+            // 開始ノードの依存イテレータをスタックに積む
             iterators.push(dependencies.getOrDefault(start, Set.of()).iterator());
 
+            // スタックが空になるまで DFS を継続する
             while (!iterators.isEmpty()) {
+                // 現在処理中のイテレータを取得する（pop はしない）
                 Iterator<String> it = iterators.peek();
+                // 次の依存ノードがある場合
                 if (it.hasNext()) {
+                    // 次の依存 ID を取得する
                     String dep = it.next();
+                    // その依存ノードの状態を確認する
                     int depState = state.getOrDefault(dep, 0);
+                    // 未訪問なら処理中に設定してスタックに積む
                     if (depState == 0) {
                         state.put(dep, 1);
                         path.push(dep);
                         iterators.push(dependencies.getOrDefault(dep, Set.of()).iterator());
                     } else if (depState == 1) {
-                        // Back-edge: dep is on the current path. Extract the cycle.
+                        // 後退辺（バックエッジ）: dep は現在のパス上にあるので循環を報告する
                         reportCycle(dep, path, reportedCycles, errors);
                     }
+                    // depState == 2 は処理完了済みのため何もしない
                 } else {
+                    // このノードの依存をすべて処理し終えたのでスタックから取り出す
                     iterators.pop();
+                    // パスからも取り出して「完了」状態にする
                     state.put(path.pop(), 2);
                 }
             }
         }
     }
 
-    /** Records the cycle closed by a back-edge to {@code dep} from the current DFS path. */
+    /** 現在の DFS パスから dep への後退辺で閉じる循環を errors に記録する。 */
     private static void reportCycle(String dep,
                                     Deque<String> path,
                                     Set<String> reportedCycles,
                                     List<String> errors) {
-        // path is top-first: [current, ..., dep, ...]. Collect current..dep, then
-        // reverse to dep..current and close the loop with dep.
+        // path は先頭が最も深いノード: [current, ..., dep, ...]
+        // current から dep までを収集してから逆順にして dep..current とし、最後に dep を追加して閉じる
         List<String> collected = new ArrayList<>();
+        // path の先頭（最も深いノード）から dep まで収集する
         for (String node : path) {
             collected.add(node);
+            // dep に到達したら収集を終了する
             if (node.equals(dep)) {
                 break;
             }
         }
+        // 循環パスのリストを作成する（サイズ +1 は閉じるための dep の分）
         List<String> cycle = new ArrayList<>(collected.size() + 1);
+        // 収集リストを逆順にして循環を時系列順にする
         for (int i = collected.size() - 1; i >= 0; i--) {
             cycle.add(collected.get(i));
         }
+        // 循環を閉じるために dep を再度追加する
         cycle.add(dep);
+        // 正規化キーが未報告であればエラーとして記録する
         if (reportedCycles.add(canonicalCycleKey(cycle))) {
             errors.add("dependency cycle detected: " + String.join(" -> ", cycle));
         }
     }
 
-    /** Produces a rotation-independent key so a cycle is reported only once. */
+    /** 回転に依存しないキーを生成して同じ循環を 1 度だけ報告するようにする。 */
     private static String canonicalCycleKey(List<String> path) {
-        // Drop the duplicated closing node, then rotate so the smallest id leads.
+        // 末尾の重複（閉じるための dep）を除いたノードリストを作成する
         List<String> nodes = new ArrayList<>(path.subList(0, path.size() - 1));
+        // ノードが空ならそのまま空文字を返す
         if (nodes.isEmpty()) {
             return "";
         }
+        // 辞書順で最も小さい ID のインデックスを探す
         int minIdx = 0;
         for (int i = 1; i < nodes.size(); i++) {
+            // 現在の最小より小さければ最小インデックスを更新する
             if (nodes.get(i).compareTo(nodes.get(minIdx)) < 0) {
                 minIdx = i;
             }
         }
+        // 最小 ID を先頭にした回転済みリストを作成する
         List<String> rotated = new ArrayList<>(nodes.size());
         for (int i = 0; i < nodes.size(); i++) {
+            // minIdx を基点に循環インデックスで要素を並べる
             rotated.add(nodes.get((minIdx + i) % nodes.size()));
         }
+        // 回転済みリストを "->" で結合してキーとして返す
         return String.join("->", rotated);
     }
 
     /**
-     * Returns the jobs in a deterministic topological order (Kahn's algorithm).
-     * When several jobs are simultaneously ready, they are emitted in original
-     * declaration order.
+     * カーン法（Kahn's algorithm）による決定的なトポロジカル順を返す。
+     * 同時に実行可能なジョブが複数ある場合は宣言順に並べる。
      */
     public List<Job> topologicalOrder() {
+        // 各ジョブの入次数（依存されているジョブ数）を計算するマップ
         Map<String, Integer> inDegree = new LinkedHashMap<>();
-        // dependents.get(x) = jobs that depend on x.
+        // 各ジョブに依存するジョブのリスト（ジョブ x が完了したら通知するジョブたち）
+        // dependents.get(x) = x に依存するジョブのリスト
         Map<String, List<String>> dependents = new LinkedHashMap<>();
+        // 全ジョブの入次数を 0 に初期化し、dependents の空リストも用意する
         for (String id : declarationIndex.keySet()) {
             inDegree.put(id, 0);
             dependents.put(id, new ArrayList<>());
         }
+        // 依存関係マップを走査して入次数と dependents を計算する
         for (Map.Entry<String, Set<String>> e : dependencies.entrySet()) {
+            // このジョブ（e.getKey()）の依存先（e.getValue()）ごとに処理する
             String id = e.getKey();
             for (String dep : e.getValue()) {
+                // id の入次数を 1 増やす（dep の完了を待っているため）
                 inDegree.merge(id, 1, Integer::sum);
+                // dep が完了したときに通知するリストに id を追加する
                 dependents.get(dep).add(id);
             }
         }
 
-        // Ready set ordered by declaration index for determinism. A priority
-        // queue keeps the ordering as nodes become ready without re-sorting and
-        // without O(n) head removals.
+        // 宣言順で優先度付きキューを使って「実行可能なジョブ」を管理する
+        // 優先度は宣言インデックスで決定し、小さいほど優先される
         PriorityQueue<String> ready =
                 new PriorityQueue<>(Comparator.comparingInt(declarationIndex::get));
+        // 入次数が 0 のジョブ（依存がない、または依存がすべて完了）を最初に追加する
         for (String id : declarationIndex.keySet()) {
             if (inDegree.get(id) == 0) {
                 ready.add(id);
             }
         }
 
+        // トポロジカル順に並べたジョブリストを作成する
         List<Job> order = new ArrayList<>();
+        // 実行可能なジョブがなくなるまでループする
         while (!ready.isEmpty()) {
+            // 最も優先度の高い（宣言順が最も早い）ジョブを取り出す
             String id = ready.poll();
+            // そのジョブを実行順リストに追加する
             order.add(batch.job(id).orElseThrow());
+            // このジョブが完了したことで入次数が 0 になる依存ジョブをキューに追加する
             for (String dependent : dependents.get(id)) {
+                // 入次数を 1 減らし、0 になったら実行可能キューに追加する
                 if (inDegree.merge(dependent, -1, Integer::sum) == 0) {
                     ready.add(dependent);
                 }
             }
         }
 
-        // Graph is validated acyclic, so this always holds.
+        // グラフは検証済みで非循環のため、常にすべてのジョブが処理されるはず
         if (order.size() != declarationIndex.size()) {
             throw new IllegalStateException("topological sort failed on a validated graph");
         }
+        // トポロジカル順に並べたジョブリストを返す
         return order;
     }
 
-    /** The validated set of dependency ids for the given job. */
+    /** 指定したジョブの検証済み依存 ID セットを返す。 */
     public Set<String> dependenciesOf(String jobId) {
+        // 依存マップからジョブの依存セットを取得する
         Set<String> deps = dependencies.get(jobId);
+        // jobId が存在しない場合は例外を投げる
         if (deps == null) {
             throw new IllegalArgumentException("unknown job id: '" + jobId + "'");
         }
+        // 変更不可なコピーとして返す（外部からの変更を防ぐ）
         return Set.copyOf(deps);
     }
 
-    /** The batch this graph was built from. */
+    /** このグラフの元となったバッチを返す。 */
     public Batch batch() {
+        // バッチ定義をそのまま返す
         return batch;
     }
 }

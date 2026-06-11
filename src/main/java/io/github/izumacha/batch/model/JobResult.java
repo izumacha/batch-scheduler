@@ -25,22 +25,28 @@ public record JobResult(
         String message
 ) {
 
+    // プロセスが終了コードを返さなかった場合（スキップ・タイムアウト・起動失敗）に使う番兵値
     public static final int NO_EXIT_CODE = -1;
 
     /** Wall-clock duration of the job, or {@link Duration#ZERO} when it did not run. */
     public Duration duration() {
+        // 開始時刻または終了時刻が null なら所要時間ゼロを返す（スキップされたジョブなど）
         if (startedAt == null || finishedAt == null) {
             return Duration.ZERO;
         }
+        // 開始時刻と終了時刻の差分として実際の所要時間を計算して返す
         return Duration.between(startedAt, finishedAt);
     }
 
     public boolean succeeded() {
+        // ジョブのステータスが SUCCEEDED かどうかを返す
         return status == JobStatus.SUCCEEDED;
     }
 
     /** Result for a job that was skipped because a dependency did not succeed. */
     public static JobResult skipped(String jobId, String message) {
+        // 依存ジョブが成功しなかったためスキップされたジョブの結果を生成して返す
+        // 試行回数は 0、開始・終了時刻は null、終了コードは NO_EXIT_CODE を設定する
         return new JobResult(jobId, JobStatus.SKIPPED, NO_EXIT_CODE, 0, null, null, message);
     }
 }
