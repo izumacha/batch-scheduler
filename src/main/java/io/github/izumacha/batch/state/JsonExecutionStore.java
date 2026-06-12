@@ -16,6 +16,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /**
@@ -26,6 +27,9 @@ import java.util.stream.Stream;
  * tolerate unparseable files by skipping them.
  */
 public final class JsonExecutionStore implements ExecutionStore {
+
+    // このクラスのログ出力用 Logger（ファイル読み込み失敗時の警告に使う）
+    private static final Logger LOGGER = Logger.getLogger(JsonExecutionStore.class.getName());
 
     // JSON ファイルの拡張子（runId.json という形式で保存する）
     private static final String SUFFIX = ".json";
@@ -151,10 +155,10 @@ public final class JsonExecutionStore implements ExecutionStore {
                         try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
                             // ファイルを読み込んで ExecutionResult に変換してリストに追加する
                             results.add(mapper.readValue(in, ExecutionResult.class));
-                        } catch (IOException ignored) {
-                            // Skip files that fail to parse; they may be partial
-                            // writes or unrelated documents.
-                            // パースに失敗したファイルはスキップする（途中書き込みや無関係なファイルの可能性）
+                        } catch (IOException e) {
+                            // パースに失敗したファイルはスキップするが、原因を警告ログに残す
+                            // （途中書き込みや無関係なファイルの可能性があるが、予期しないエラーの診断に役立てる）
+                            LOGGER.warning("Skipping unreadable execution result file '" + p + "': " + e.getMessage());
                         }
                     });
         } catch (IOException e) {

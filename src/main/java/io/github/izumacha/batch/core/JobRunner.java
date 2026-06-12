@@ -16,6 +16,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /**
  * 単一の {@link Job} を外部プロセスとして実行し、リトライ・タイムアウト・
@@ -23,6 +24,9 @@ import java.util.concurrent.TimeUnit;
  * すべての結果（成功・非ゼロ終了・タイムアウト・起動失敗）を {@link JobResult} として返す。
  */
 public final class JobRunner {
+
+    // このクラス専用のロガー（java.util.logging を使用する）
+    private static final Logger LOGGER = Logger.getLogger(JobRunner.class.getName());
 
     // キャプチャするプロセス出力の最大行数（デフォルト値）
     private static final int DEFAULT_MAX_CAPTURED_OUTPUT_LINES = 50;
@@ -174,7 +178,12 @@ public final class JobRunner {
                     // タイムアウトした場合はプロセスツリーを強制終了する
                     killTree(process);
                     // プロセスが終了するまで短時間だけ待機する（孤立した子孫プロセス対策）
-                    process.waitFor(READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    // waitFor の戻り値: true=タイムアウト前に終了、false=まだ終了していない
+                    boolean cleanedUp = process.waitFor(READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    // 短時間待ちでも終了しなかった場合はログに残す（孤立プロセスの可能性）
+                    if (!cleanedUp) {
+                        LOGGER.warning("Process did not exit within cleanup window after kill for job: " + job.id());
+                    }
                     // リーダースレッドも少しだけ待機してキャプチャ済みの出力を取得する
                     joinQuietly(reader, Duration.ofMillis(200));
                     // タイムアウト結果を返す
@@ -309,6 +318,8 @@ public final class JobRunner {
      * 最後の N 行だけを保持するリングバッファ方式の内部クラス
      */
     private static final class OutputCollector implements Runnable {
+        // この内部クラス専用のロガー（出力読み込み中の異常を記録するため）
+        private static final Logger COLLECTOR_LOGGER = Logger.getLogger(OutputCollector.class.getName());
         // 1行の最大文字数（これを超える行は切り詰める）
         private static final int MAX_LINE_CHARS = 8 * 1024;
         // 行が切り詰められたことを示すマーカー文字列
@@ -378,7 +389,9 @@ public final class JobRunner {
                     emit(line.toString());
                 }
             } catch (IOException e) {
-                // ストリームが閉じられた場合（プロセスが強制終了されたなど）は何もしない
+                // ストリームが閉じられた場合（プロセスが強制終了されたなど）は警告をログに残す
+                // 正常な kill シナリオでは "Stream closed" が多いが、予期しない IO エラーの場合もあるため記録する
+                COLLECTOR_LOGGER.warning("Output stream read interrupted for process: " + e.getMessage());
             }
         }
 
