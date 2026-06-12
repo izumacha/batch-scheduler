@@ -30,6 +30,8 @@ public final class JobRunner {
 
     // キャプチャするプロセス出力の最大行数（デフォルト値）
     private static final int DEFAULT_MAX_CAPTURED_OUTPUT_LINES = 50;
+    // 読み取りバッファサイズ（4KiB）。マジックナンバー 4096 を定数化して意図を明示する
+    private static final int READ_BUFFER_CHARS = 4 * 1024;
     // リトライ前に待機する時間（デフォルト1秒）
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
@@ -354,8 +356,8 @@ public final class JobRunner {
             // ただしパイプはすべてドレインするのでプロセスがブロックすることはない。
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                // 4KB の読み込みバッファを用意する
-                char[] buf = new char[4096];
+                // READ_BUFFER_CHARS 文字分の読み込みバッファを用意する（4KiB）
+                char[] buf = new char[READ_BUFFER_CHARS];
                 // 現在構築中の行を格納する StringBuilder を作成する
                 StringBuilder line = new StringBuilder();
                 // 現在の行が切り詰められたかどうかのフラグ

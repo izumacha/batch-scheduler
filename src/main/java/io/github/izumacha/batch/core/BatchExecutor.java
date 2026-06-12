@@ -31,8 +31,6 @@ public final class BatchExecutor {
     private static final char[] HEX = "0123456789abcdef".toCharArray();
     // 実行 ID の乱数部分として生成する 16 進数文字の桁数（6桁 = 約 1677 万通りの組み合わせ）
     private static final int RUN_ID_LENGTH = 6;
-    // 16 進数の基数（HEX 配列の要素数と一致する）
-    private static final int HEX_RADIX = 16;
 
     // 実際にジョブを実行する JobRunner インスタンス
     private final JobRunner runner;
@@ -137,8 +135,9 @@ public final class BatchExecutor {
         StringBuilder hex = new StringBuilder(RUN_ID_LENGTH);
         // RUN_ID_LENGTH 桁分の乱数 16 進数文字を生成する
         for (int i = 0; i < RUN_ID_LENGTH; i++) {
-            // 0〜(HEX_RADIX-1) のランダムな整数を 16 進数文字に変換して追加する
-            hex.append(HEX[RANDOM.nextInt(HEX_RADIX)]);
+            // 0〜(HEX.length-1) のランダムな整数を添字として HEX 配列から 16 進数文字を取り出して追加する
+            // HEX.length を使うことで HEX 配列の要素数と常に整合し、定数の値ずれを防ぐ
+            hex.append(HEX[RANDOM.nextInt(HEX.length)]);
         }
         // 「yyyyMMdd-HHmmss-XXXXXX」形式の実行 ID を返す
         return RUN_ID_FORMAT.format(when) + "-" + hex;
