@@ -36,9 +36,6 @@ public final class JobRunner {
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
-    // killTree 後にリーダースレッドが終了するのを待つ短い猶予時間（ミリ秒）
-    // プロセスを強制終了した直後に残りの出力を読み取るための短い待機時間
-    private static final long KILL_WAIT_MILLIS = 200L;
 
     // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
@@ -189,8 +186,11 @@ public final class JobRunner {
                     if (!cleanedUp) {
                         LOGGER.warning("Process did not exit within cleanup window after kill for job: " + job.id());
                     }
-                    // リーダースレッドも KILL_WAIT_MILLIS ミリ秒だけ待機してキャプチャ済みの出力を取得する
-                    joinQuietly(reader, Duration.ofMillis(KILL_WAIT_MILLIS));
+                    // リーダースレッドが残りの出力を読み終えるまで待機する。
+                    // プロセスは上の waitFor で終了確認済みなのでパイプは閉じており通常は即座に返るが、
+                    // 負荷の高い環境で末尾のバッファ排出が遅れても出力が欠けないよう、
+                    // 成功パスと同じ READER_JOIN_TIMEOUT を上限にする（短すぎると末尾の出力が切れる）。
+                    joinQuietly(reader, READER_JOIN_TIMEOUT);
                     // タイムアウト結果を返す
                     return Attempt.timedOut(
                             "timed out after " + job.timeoutSeconds() + "s",
