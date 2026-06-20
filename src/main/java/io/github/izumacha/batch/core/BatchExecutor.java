@@ -73,7 +73,7 @@ public final class BatchExecutor {
             // ジョブをトポロジカル順に実行する
             for (Job job : order) {
                 // このジョブをブロックしている依存ジョブがあるか確認する
-                String blockingDep = firstBlockingDependency(graph, job, results);
+                String blockingDep = firstBlockingDependency(job, results);
                 // ブロックしている依存がある場合はジョブをスキップして結果を記録する
                 if (blockingDep != null) {
                     results.put(job.id(), JobResult.skipped(
@@ -113,10 +113,10 @@ public final class BatchExecutor {
      * このジョブをブロックしている最初の依存ジョブ ID を返す。すべての依存が成功していれば
      * {@code null} を返す。スキップされた依存もブロック扱いになるためスキップは推移的に伝播する。
      */
-    private static String firstBlockingDependency(DependencyGraph graph,
-                                                  Job job,
+    private static String firstBlockingDependency(Job job,
                                                   Map<String, JobResult> results) {
-        // job.dependsOn() は宣言順を保持している（graph.dependenciesOf はセット）
+        // job.dependsOn() は宣言順を保持している（graph.dependenciesOf はセットで順序が不定）
+        // ため、ブロック元として「宣言順で最初の」依存 ID を決定的に返せるこちらを使う
         for (String dep : job.dependsOn()) {
             // この依存ジョブの実行結果を取得する
             JobResult depResult = results.get(dep);
