@@ -36,18 +36,24 @@ final class CliFormat {
         if (millis < 1000) {
             return millis + "ms";
         }
-        // 合計秒数を取得する
-        long totalSeconds = duration.getSeconds();
-        // 分の部分を計算する
-        long minutes = totalSeconds / 60;
-        // 秒の部分（小数点付き）を計算する
-        double seconds = (totalSeconds % 60) + (millis % 1000) / 1000.0;
-        // 1分以上の場合は「Xm00.0s」形式で返す
+        // 先に 0.1 秒(=100ms)単位へ四捨五入してから分・秒へ分解する。
+        // %.1f に丸めを任せると 59.95 秒が 60.0 に丸め上がっても分桁へ繰り上がらず
+        // "1m60.0s" のような不正表示になるため、整数演算で丸めて桁上がりを正しく扱う。
+        long tenths = (millis + 50) / 100;
+        // 分の部分を計算する（600 個の 0.1 秒 = 60 秒 = 1 分）
+        long minutes = tenths / 600;
+        // 分を除いた残りを 0.1 秒単位で求める
+        long secondTenths = tenths % 600;
+        // 秒の整数部を求める
+        long wholeSeconds = secondTenths / 10;
+        // 秒の小数第 1 位を求める
+        long fraction = secondTenths % 10;
+        // 1分以上の場合は「Xm00.0s」形式で返す（秒の整数部は 2 桁ゼロ埋め）
         if (minutes > 0) {
-            return String.format("%dm%04.1fs", minutes, seconds);
+            return String.format("%dm%02d.%01ds", minutes, wholeSeconds, fraction);
         }
         // 1分未満の場合は「X.Xs」形式で返す
-        return String.format("%.1fs", seconds);
+        return String.format("%d.%01ds", wholeSeconds, fraction);
     }
 
     /** テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める */
