@@ -37,6 +37,11 @@ public final class JobRunner {
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
 
+    // Attempt.message が「プレーンなメッセージ」か「キャプチャした出力の末尾」かを
+    // 区別するための内部プレフィックス。Attempt 生成側と summarize の剥がし側で
+    // 同一文字列を共有するため、1 箇所に定数化する（綴り違いで出力末尾が黙って消える事故を防ぐ）。
+    private static final String OUTPUT_PREFIX = "OUTPUT:";
+
     // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
     // リトライ間隔（コンストラクタで設定する）
@@ -275,8 +280,8 @@ public final class JobRunner {
         }
 
         // 最後のメッセージが出力キャプチャの場合は先頭行を追記してコンテキストを補足する
-        String tail = lastMessage != null && lastMessage.startsWith("OUTPUT:")
-                ? lastMessage.substring("OUTPUT:".length())
+        String tail = lastMessage != null && lastMessage.startsWith(OUTPUT_PREFIX)
+                ? lastMessage.substring(OUTPUT_PREFIX.length())
                 : null;
         // 失敗時かつ出力がある場合は最初の行をサマリーに付加する
         if (!succeeded && tail != null && !tail.isBlank()) {
@@ -297,8 +302,8 @@ public final class JobRunner {
     private record Attempt(int exitCode, boolean timedOut, boolean failedToStart, String message) {
         // 正常完了した試行の結果を生成するファクトリメソッド
         static Attempt completed(int exitCode, String tail) {
-            // 出力がある場合は "OUTPUT:" プレフィックスを付けてメッセージにする
-            String msg = tail == null || tail.isBlank() ? null : "OUTPUT:" + tail;
+            // 出力がある場合は OUTPUT_PREFIX を付けてメッセージにする
+            String msg = tail == null || tail.isBlank() ? null : OUTPUT_PREFIX + tail;
             // タイムアウトなし・起動失敗なしの試行結果を返す
             return new Attempt(exitCode, false, false, msg);
         }
@@ -306,7 +311,7 @@ public final class JobRunner {
         // タイムアウトした試行の結果を生成するファクトリメソッド
         static Attempt timedOut(String message, String tail) {
             // 出力がある場合は出力を、ない場合はタイムアウトメッセージをセットする
-            String msg = tail == null || tail.isBlank() ? message : "OUTPUT:" + tail;
+            String msg = tail == null || tail.isBlank() ? message : OUTPUT_PREFIX + tail;
             // 終了コードは番兵値、タイムアウトフラグを true にして返す
             return new Attempt(JobResult.NO_EXIT_CODE, true, false, msg);
         }
