@@ -29,8 +29,12 @@ public final class BatchExecutor {
     private static final SecureRandom RANDOM = new SecureRandom();
     // 16 進数の文字テーブル（乱数を 16 進数文字列に変換するため）
     private static final char[] HEX = "0123456789abcdef".toCharArray();
-    // 実行 ID の乱数部分として生成する 16 進数文字の桁数（6桁 = 約 1677 万通りの組み合わせ）
-    private static final int RUN_ID_LENGTH = 6;
+    // 実行 ID の乱数部分として生成する 16 進数文字の桁数（12桁 = 48ビット ≒ 約 281 兆通りの組み合わせ）
+    // タイムスタンプ部の解像度は 1 秒のため、同じ秒に開始した複数実行は乱数部だけで区別する。
+    // 6桁(24ビット)では同一秒に多数実行すると誕生日問題で衝突し、JsonExecutionStore が
+    // 同名ファイルを無警告で上書きして過去の実行履歴を失う恐れがあった。12桁に広げて
+    // 同一秒内の衝突確率を実質ゼロにし、履歴の消失を防ぐ。
+    private static final int RUN_ID_LENGTH = 12;
 
     // 実際にジョブを実行する JobRunner インスタンス
     private final JobRunner runner;

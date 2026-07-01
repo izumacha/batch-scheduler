@@ -97,8 +97,8 @@ class BatchExecutorTest {
         Batch batch = new Batch("idshape", List.of(ok("a", List.of())));
         ExecutionResult result = executor().execute(batch);
         assertNotNull(result.runId());
-        // yyyyMMdd-HHmmss-<6 hex>
-        assertTrue(result.runId().matches("\\d{8}-\\d{6}-[0-9a-f]{6}"),
+        // yyyyMMdd-HHmmss-<12 hex>（乱数部は同一秒内の衝突を避けるため 12 桁）
+        assertTrue(result.runId().matches("\\d{8}-\\d{6}-[0-9a-f]{12}"),
                 "unexpected runId: " + result.runId());
     }
 
