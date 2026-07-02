@@ -91,7 +91,25 @@ class BatchConfigLoaderTest {
                     retries: -1
                 """;
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
-        assertTrue(ex.getMessage().contains("retries must be >= 0"),
+        assertTrue(ex.getMessage().contains("retries must be between 0 and"),
+                "message should mention the validation issue, was: " + ex.getMessage());
+    }
+
+    @Test
+    void overLimitRetriesSurfacesConfigException() {
+        // retries が上限 MAX_RETRIES を超える値だと maxAttempts() が桁あふれし
+        // ジョブが 1 度も実行されなくなるため、設定読み込み時点で拒否されることを確認する
+        String yaml = """
+                name: bad
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo x"]
+                    retries: 2147483647
+                """;
+        // 上限超過の retries は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが範囲チェックの内容を含むことを検証する
+        assertTrue(ex.getMessage().contains("retries must be between 0 and"),
                 "message should mention the validation issue, was: " + ex.getMessage());
     }
 

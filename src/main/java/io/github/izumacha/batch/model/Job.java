@@ -19,7 +19,7 @@ import java.util.Map;
  * @param name           human-friendly label; defaults to {@code id} when blank
  * @param command        the command and its arguments to execute (required, non-empty)
  * @param dependsOn      ids of jobs that must succeed before this one runs
- * @param retries        number of <em>additional</em> attempts after the first failure ({@code >= 0})
+ * @param retries        number of <em>additional</em> attempts after the first failure ({@code 0..}{@value #MAX_RETRIES})
  * @param timeoutSeconds per-attempt timeout in seconds; {@code 0} means no timeout
  * @param env            extra environment variables for the spawned process
  * @param workingDir     working directory for the process; {@code null} inherits the launcher's
@@ -36,6 +36,14 @@ public record Job(
         Map<String, String> env,
         String workingDir
 ) {
+
+    /**
+     * リトライ回数の上限（この値までを許容する）。
+     * <p>{@code maxAttempts()} が {@code retries + 1} を int で計算するため、
+     * {@code Integer.MAX_VALUE} 付近の値だと桁あふれ（オーバーフロー）して
+     * 最大試行回数が負になり、ジョブが 1 度も実行されなくなる。それを防ぐ現実的な上限。
+     */
+    public static final int MAX_RETRIES = 1_000_000;
 
     public Job {
         // id が null または空白の場合は例外を投げる（ジョブ ID は必須）
@@ -54,9 +62,11 @@ public record Job(
         env = env == null ? Map.of() : Map.copyOf(env);
         // workingDir が空白なら null に、そうでなければ前後の空白を除去する
         workingDir = (workingDir == null || workingDir.isBlank()) ? null : workingDir.trim();
-        // retries が負の値の場合は例外を投げる（リトライ回数は 0 以上が必須）
-        if (retries < 0) {
-            throw new IllegalArgumentException("retries must be >= 0 (job '" + id + "')");
+        // retries が負の値、または上限 MAX_RETRIES を超える場合は例外を投げる
+        // （下限 0 は既存要件、上限は maxAttempts() の int オーバーフロー防止のため）
+        if (retries < 0 || retries > MAX_RETRIES) {
+            throw new IllegalArgumentException(
+                    "retries must be between 0 and " + MAX_RETRIES + " (job '" + id + "')");
         }
         // timeoutSeconds が負の値の場合は例外を投げる（タイムアウト秒数は 0 以上が必須）
         if (timeoutSeconds < 0) {
