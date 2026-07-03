@@ -33,17 +33,25 @@ public final class DependencyGraph {
     /** jobId → 宣言インデックス（同順位のタイブレークに使用）。 */
     // ジョブ ID をキー、そのジョブがバッチ内で何番目に宣言されたかを値とするマップ
     private final Map<String, Integer> declarationIndex;
+    /** jobId → Job 本体（{@link #topologicalOrder()} での O(1) 参照用）。 */
+    // ジョブ ID をキー、Job 本体を値とするマップ。Batch#job(String) は毎回リストを
+    // 線形走査するため、これを使わず事前にマップ化しておくことでトポロジカル順の
+    // 組み立てを O(n) に保つ（大量ジョブでの O(n^2) 劣化を防ぐ）。
+    private final Map<String, Job> jobsById;
 
     // プライベートコンストラクタ：buildメソッド経由でのみインスタンスを生成する
     private DependencyGraph(Batch batch,
                             Map<String, Set<String>> dependencies,
-                            Map<String, Integer> declarationIndex) {
+                            Map<String, Integer> declarationIndex,
+                            Map<String, Job> jobsById) {
         // バッチ定義を格納する
         this.batch = batch;
         // 依存関係マップを格納する
         this.dependencies = dependencies;
         // 宣言順インデックスマップを格納する
         this.declarationIndex = declarationIndex;
+        // ジョブ ID → Job 本体のマップを格納する
+        this.jobsById = jobsById;
     }
 
     /**
@@ -91,6 +99,8 @@ public final class DependencyGraph {
         // ジョブごとの検証：空コマンド・存在しない依存・自己依存
         // LinkedHashMap を使って宣言順に依存関係マップを構築する
         Map<String, Set<String>> dependencies = new LinkedHashMap<>();
+        // ジョブ ID → Job 本体のマップも同じ 1 パスで組み立てる（topologicalOrder の O(1) 参照用）
+        Map<String, Job> jobsById = new LinkedHashMap<>();
         // 各ジョブを走査して依存関係を検証する
         for (Job job : jobs) {
             // 現在のジョブの ID を取得する
@@ -122,6 +132,8 @@ public final class DependencyGraph {
             }
             // このジョブの依存セットをマップに登録する
             dependencies.put(id, deps);
+            // このジョブ本体を ID 引きできるように登録する（最初の宣言のみ、重複時は上と同様スキップ済み）
+            jobsById.put(id, job);
         }
 
         // 循環検出は辺が有効であることが確認されてから行う
@@ -134,7 +146,7 @@ public final class DependencyGraph {
         }
 
         // 検証済みのグラフインスタンスを返す
-        return new DependencyGraph(batch, dependencies, declarationIndex);
+        return new DependencyGraph(batch, dependencies, declarationIndex, jobsById);
     }
 
     // DFS ノードの訪問状態を表す名前付き定数（int で管理してスタック使用量を最小化する）
@@ -301,8 +313,19 @@ public final class DependencyGraph {
         while (!ready.isEmpty()) {
             // 最も優先度の高い（宣言順が最も早い）ジョブを取り出す
             String id = ready.poll();
+            // ID に対応する Job 本体を取得する（jobsById での O(1) 参照。
+            // batch.job(id) はリストを毎回線形走査するため大量ジョブで O(n^2) になり使わない）
+            Job job = jobsById.get(id);
+            // jobsById は declarationIndex と同じ「宣言順で最初に出現した ID」の集合を
+            // キーに持つはずなので本来 null にはならないが、内部不変条件が壊れた場合に
+            // null を order へ静かに混入させると呼び出し側で原因不明な
+            // NullPointerException になるため、ここで明確なエラーとして検出する
+            if (job == null) {
+                throw new IllegalStateException(
+                        "internal error: no Job registered for id '" + id + "' in jobsById");
+            }
             // そのジョブを実行順リストに追加する
-            order.add(batch.job(id).orElseThrow());
+            order.add(job);
             // このジョブが完了したことで入次数が 0 になる依存ジョブをキューに追加する
             for (String dependent : dependents.get(id)) {
                 // 入次数を 1 減らし、0 になったら実行可能キューに追加する
