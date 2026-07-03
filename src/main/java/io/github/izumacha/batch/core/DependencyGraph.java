@@ -313,9 +313,19 @@ public final class DependencyGraph {
         while (!ready.isEmpty()) {
             // 最も優先度の高い（宣言順が最も早い）ジョブを取り出す
             String id = ready.poll();
-            // そのジョブを実行順リストに追加する（jobsById での O(1) 参照。
+            // ID に対応する Job 本体を取得する（jobsById での O(1) 参照。
             // batch.job(id) はリストを毎回線形走査するため大量ジョブで O(n^2) になり使わない）
-            order.add(jobsById.get(id));
+            Job job = jobsById.get(id);
+            // jobsById は declarationIndex と同じ「宣言順で最初に出現した ID」の集合を
+            // キーに持つはずなので本来 null にはならないが、内部不変条件が壊れた場合に
+            // null を order へ静かに混入させると呼び出し側で原因不明な
+            // NullPointerException になるため、ここで明確なエラーとして検出する
+            if (job == null) {
+                throw new IllegalStateException(
+                        "internal error: no Job registered for id '" + id + "' in jobsById");
+            }
+            // そのジョブを実行順リストに追加する
+            order.add(job);
             // このジョブが完了したことで入次数が 0 になる依存ジョブをキューに追加する
             for (String dependent : dependents.get(id)) {
                 // 入次数を 1 減らし、0 になったら実行可能キューに追加する
