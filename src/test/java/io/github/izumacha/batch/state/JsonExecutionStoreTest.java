@@ -73,6 +73,16 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdSkipsUnparseableFile(@TempDir Path dir) throws Exception {
+        // 壊れた JSON を runId 名のファイルとして直接置く（途中書き込みや手動改変を模擬）
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Files.writeString(dir.resolve("broken.json"), "{ this is not valid json");
+
+        // findById は findAll と同じく壊れたファイルを読み飛ばし、例外を投げず空を返すべき
+        assertTrue(store.findById("broken").isEmpty());
+    }
+
+    @Test
     void findAllReturnsSavedRun(@TempDir Path dir) {
         JsonExecutionStore store = new JsonExecutionStore(dir);
         ExecutionResult run = sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS));

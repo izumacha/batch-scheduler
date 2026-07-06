@@ -133,9 +133,11 @@ public final class JsonExecutionStore implements ExecutionStore {
             // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
             return Optional.of(mapper.readValue(in, ExecutionResult.class));
         } catch (IOException e) {
-            // 読み込みに失敗した場合はチェックなし例外に包んで投げる
-            throw new UncheckedIOException(
-                    "failed to read execution result '" + runId + "' from " + file, e);
+            // パースに失敗したファイルはスキップして空 Optional を返す（findAll と同じ寛容な挙動）。
+            // クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、途中書き込みや
+            // 手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
+            LOGGER.warning("Skipping unreadable execution result '" + runId + "' at " + file + ": " + e.getMessage());
+            return Optional.empty();
         }
     }
 
