@@ -174,6 +174,7 @@ public final class JobRunner {
         // 閉じずに放置するとプロセスごとにパイプのファイルディスクリプタも消費し続ける
         // （§8 リソースを確実に解放する）。
         try {
+            // 子プロセスの標準入力（親から見た書き込み側パイプ）を閉じて EOF を通知する
             process.getOutputStream().close();
         } catch (IOException e) {
             // クローズ失敗はジョブの成否に影響しないため警告ログのみ残して処理を続行する
