@@ -167,6 +167,20 @@ public final class JobRunner {
             return Attempt.failedToStart("failed to start: " + e.getMessage());
         }
 
+        // JobRunner はジョブへの標準入力供給に対応していないため、起動直後に子プロセスの
+        // 標準入力（親から見た書き込み側パイプ）を閉じて EOF を通知する。閉じないままだと、
+        // 標準入力を読もうとするコマンド（`read`・`cat`・対話的なプロンプト等）が入力を
+        // 待って無期限にブロックし、タイムアウト未設定のジョブはバッチ全体を止めてしまう。
+        // 閉じずに放置するとプロセスごとにパイプのファイルディスクリプタも消費し続ける
+        // （§8 リソースを確実に解放する）。
+        try {
+            // 子プロセスの標準入力（親から見た書き込み側パイプ）を閉じて EOF を通知する
+            process.getOutputStream().close();
+        } catch (IOException e) {
+            // クローズ失敗はジョブの成否に影響しないため警告ログのみ残して処理を続行する
+            LOGGER.warning("failed to close stdin for job '" + job.id() + "': " + e.getMessage());
+        }
+
         // パイプバッファが満杯になってプロセスがブロックしないよう、
         // 別スレッドで出力を読み続ける OutputCollector を起動する
         OutputCollector collector = new OutputCollector(process, maxCapturedOutputLines, echoOutput);

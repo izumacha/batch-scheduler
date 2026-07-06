@@ -129,4 +129,20 @@ class JobRunnerTest {
         JobResult r = fastRunner().run(j);
         assertEquals(JobStatus.SUCCEEDED, r.status(), r.message());
     }
+
+    @Test
+    void childStdinIsClosedSoReadDoesNotHangUntilTimeout() {
+        // JobRunner はジョブに標準入力を供給しないため、子プロセスの標準入力は起動直後に
+        // 閉じられ、`read` は即座に EOF を検知して失敗するはず。閉じ忘れていると `read` が
+        // 入力を待って無期限にブロックし、このジョブは (実際には一瞬で終わるべきところ)
+        // タイムアウト秒数いっぱいまで待たされて TIMED OUT として終端する。
+        JobResult r = fastRunner().run(
+                job("stdin", List.of("sh", "-c", "read x; exit 7"), 0, 3));
+        // read が即座に EOF で終わり、後続の "exit 7" がそのまま実行されることを確認する
+        assertEquals(JobStatus.FAILED, r.status());
+        assertEquals(7, r.exitCode());
+        // タイムアウト(3秒)を待たされていない、つまり標準入力がブロックしていないことを確認する
+        assertTrue(r.duration().compareTo(Duration.ofSeconds(2)) < 0,
+                "expected stdin EOF to unblock 'read' almost immediately, was " + r.duration());
+    }
 }
