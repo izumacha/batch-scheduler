@@ -89,6 +89,14 @@ public final class JobRunner {
         int maxAttempts = job.maxAttempts();
         // 最大試行回数までループして試行する
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // スレッドが割り込まれていたら、これ以上リトライせずにループを抜ける。
+            // 割り込み(interrupt)はグレースフルシャットダウンや Future.cancel(true) などの
+            // 「もう中断してよい」という合図。バックオフ(リトライ間隔)が 0 のときは下の
+            // Thread.sleep が呼ばれず割り込みを検知できないため、ここで毎回確認しないと
+            // 割り込み後も残り試行分だけ子プロセスを起動＆即中断する空回りが続いてしまう。
+            if (Thread.currentThread().isInterrupted()) {
+                break;
+            }
             // 現在の試行回数をフィールドに記録する
             attempts = attempt;
             // 1回分の試行を実行して結果を取得する
