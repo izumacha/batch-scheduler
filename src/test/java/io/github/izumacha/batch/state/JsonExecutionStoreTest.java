@@ -185,4 +185,42 @@ class JsonExecutionStoreTest {
         new JsonExecutionStore(nested);
         assertTrue(Files.isDirectory(nested));
     }
+
+    @Test
+    void findRecentReturnsOnlyNewestUpToLimit(@TempDir Path dir) {
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        // 5 件を古い順に保存する（開始時刻を 1 日ずつずらす）
+        for (int i = 0; i < 5; i++) {
+            store.save(sampleRun("run" + i, base.plus(i, ChronoUnit.DAYS)));
+        }
+
+        // 上限 2 件を要求すると、最新順（開始時刻の降順）で先頭 2 件だけが返る
+        List<ExecutionResult> recent = store.findRecent(2);
+        assertEquals(2, recent.size());
+        assertEquals("run4", recent.get(0).runId());
+        assertEquals("run3", recent.get(1).runId());
+    }
+
+    @Test
+    void findRecentWithZeroOrNegativeLimitReturnsAll(@TempDir Path dir) {
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        for (int i = 0; i < 3; i++) {
+            store.save(sampleRun("run" + i, base.plus(i, ChronoUnit.DAYS)));
+        }
+
+        // 0 と負の上限はどちらも「上限なし」として全件を返す（境界値）
+        assertEquals(3, store.findRecent(0).size());
+        assertEquals(3, store.findRecent(-1).size());
+    }
+
+    @Test
+    void findRecentWithLimitAboveCountReturnsAll(@TempDir Path dir) {
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("only", Instant.parse("2024-01-01T00:00:00Z")));
+
+        // 保存件数より大きい上限では全件がそのまま返る
+        assertEquals(1, store.findRecent(10).size());
+    }
 }

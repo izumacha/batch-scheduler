@@ -52,6 +52,8 @@ Useful options:
 - `run --state-dir <dir>` / `list --state-dir <dir>` — directory where run state
   is stored (default: `.batch-state`).
 - `run -q` / `run --quiet` — suppress the per-job summary table.
+- `list -n <n>` / `list --limit <n>` — show at most `n` of the most recent runs
+  (default: `20`); pass `0` or a negative number to list all.
 - `--help`, `--version` — standard help and version output (also available on each
   sub-command).
 

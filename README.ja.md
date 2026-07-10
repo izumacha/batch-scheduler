@@ -51,6 +51,8 @@ java -jar target/batch-scheduler.jar list
 - `run --state-dir <dir>` / `list --state-dir <dir>` — 実行状態を保存する
   ディレクトリ（デフォルト: `.batch-state`）。
 - `run -q` / `run --quiet` — ジョブごとのサマリーテーブルの表示を抑制する。
+- `list -n <n>` / `list --limit <n>` — 最新の実行を最大 `n` 件だけ表示する
+  （デフォルト: `20`）。`0` または負の値を渡すと全件を表示する。
 - `--help`、`--version` — 標準のヘルプとバージョン出力（各サブコマンドでも利用可能）。
 
 ## YAML スキーマ

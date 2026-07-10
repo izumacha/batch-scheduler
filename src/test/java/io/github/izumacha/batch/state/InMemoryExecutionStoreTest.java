@@ -97,4 +97,23 @@ class InMemoryExecutionStoreTest {
         InMemoryExecutionStore store = new InMemoryExecutionStore();
         assertTrue(store.findAll().isEmpty());
     }
+
+    @Test
+    void findRecentLimitsToNewestViaDefaultMethod() {
+        // findRecent は ExecutionStore の default 実装。InMemory ストアで最新順に
+        // 上限が掛かることを確認する（最新順は findAll の並びに従う）。
+        InMemoryExecutionStore store = new InMemoryExecutionStore();
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        store.save(run("old", base, JobStatus.SUCCEEDED));
+        store.save(run("new", base.plusSeconds(120), JobStatus.SUCCEEDED));
+        store.save(run("mid", base.plusSeconds(60), JobStatus.SUCCEEDED));
+
+        List<ExecutionResult> recent = store.findRecent(2);
+        assertEquals(2, recent.size());
+        assertEquals("new", recent.get(0).runId());
+        assertEquals("mid", recent.get(1).runId());
+
+        // 0 以下は上限なしで全件を返す（境界値）
+        assertEquals(3, store.findRecent(0).size());
+    }
 }
