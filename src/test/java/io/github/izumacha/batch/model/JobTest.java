@@ -84,4 +84,18 @@ class JobTest {
         // メッセージが env のキー/値の null 拒否である旨を含むことを検証する
         assertEquals(true, ex.getMessage().contains("env key/value must not be null"));
     }
+
+    @Test
+    void rejectsNullEnvKey() {
+        // env のマップに null キーが混入していた場合も明示的に弾く（値だけでなくキー側も
+        // 同じチェック条件（e.getKey() == null）でカバーしていることを固定するテスト。
+        // HashMap は null キーを 1 つだけ許容するため、素の Map.copyOf 任せだと
+        // NPE がそのまま伝播する）
+        Map<String, String> envWithNullKey = new java.util.HashMap<>();
+        envWithNullKey.put(null, "value");
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> new Job("j", null, List.of("sh", "-c", "echo x"), List.of(), 0, 0, envWithNullKey, null));
+        // メッセージが env のキー/値の null 拒否である旨を含むことを検証する
+        assertEquals(true, ex.getMessage().contains("env key/value must not be null"));
+    }
 }
