@@ -54,6 +54,12 @@ public record Job(
         id = id.trim();
         // name が空白なら id をデフォルトの表示名として使う
         name = (name == null || name.isBlank()) ? id : name.trim();
+        // command の要素に null が混入していないか確認する。dependsOn（下）と同じ理由で、
+        // List.copyOf の NPE 任せにすると BatchConfigLoader を経由しない呼び出し元で
+        // 未捕捉 NPE＋スタックトレース露出になるため、ジョブ ID 付きの分かりやすい例外にする
+        if (command != null && command.stream().anyMatch(c -> c == null)) {
+            throw new IllegalArgumentException("command entry must not be null (job '" + id + "')");
+        }
         // command が null なら空リストに、そうでなければ変更不可のコピーにする
         command = command == null ? List.of() : List.copyOf(command);
         // dependsOn が null なら空リストにする。null でなければ各依存 ID の前後の空白を
@@ -69,6 +75,11 @@ public record Job(
         }
         dependsOn = dependsOn == null ? List.of()
                 : dependsOn.stream().map(String::trim).toList();
+        // env のキー・値に null が混入していないか確認する（command/dependsOn と同じ理由）。
+        // Map.copyOf は null キー・null 値のどちらでも NPE を投げるため、ここで先に検出する
+        if (env != null && env.entrySet().stream().anyMatch(e -> e.getKey() == null || e.getValue() == null)) {
+            throw new IllegalArgumentException("env key/value must not be null (job '" + id + "')");
+        }
         // env が null なら空マップに、そうでなければ変更不可のコピーにする
         env = env == null ? Map.of() : Map.copyOf(env);
         // workingDir が空白なら null に、そうでなければ前後の空白を除去する
