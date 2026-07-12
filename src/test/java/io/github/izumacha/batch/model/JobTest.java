@@ -48,4 +48,17 @@ class JobTest {
         // 上限 + 1 も同様に拒否される
         assertThrows(IllegalArgumentException.class, () -> jobWithRetries(Job.MAX_RETRIES + 1));
     }
+
+    @Test
+    void rejectsNullDependencyEntry() {
+        // 依存リスト内の null 要素はコンストラクタで明示的に弾く。
+        // 弾かないと後段の DependencyGraph.build で未捕捉 NPE＋スタックトレース露出になる。
+        // 一部の依存 ID を null にした依存リストを用意する（Arrays.asList は null 要素を許容する）
+        List<String> depsWithNull = java.util.Arrays.asList("a", null);
+        // Job 構築時に IllegalArgumentException が投げられることを検証する
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> new Job("j", null, List.of("sh", "-c", "echo x"), depsWithNull, 0, 0, Map.of(), null));
+        // メッセージが依存要素の null 拒否である旨を含むことを検証する
+        assertEquals(true, ex.getMessage().contains("dependsOn entry must not be null"));
+    }
 }
