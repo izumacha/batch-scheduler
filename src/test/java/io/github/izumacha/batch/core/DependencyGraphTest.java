@@ -95,6 +95,19 @@ class DependencyGraphTest {
     }
 
     @Test
+    void dependencyIdsAreTrimmedToMatchTrimmedJobIds() {
+        // Job は id を trim して正規化する。依存側の空白も trim されないと、
+        // 前後に空白を含む依存指定が正規化済み ID と一致せず、自己整合なバッチが
+        // unknown job として誤って弾かれる。両者が突き合うことを検証する。
+        Batch batch = new Batch("ws", List.of(
+                job(" a ", List.of()),
+                job("b", List.of(" a "))));
+        DependencyGraph g = DependencyGraph.build(batch);
+        // 依存 ID が trim され、正規化後の "a" と一致していること
+        assertEquals(java.util.Set.of("a"), g.dependenciesOf("b"));
+    }
+
+    @Test
     void emptyBatchIsRejected() {
         Batch batch = new Batch("empty", List.of());
         ValidationException ex = assertThrows(ValidationException.class,

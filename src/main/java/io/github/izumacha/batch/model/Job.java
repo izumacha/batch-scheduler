@@ -56,8 +56,19 @@ public record Job(
         name = (name == null || name.isBlank()) ? id : name.trim();
         // command が null なら空リストに、そうでなければ変更不可のコピーにする
         command = command == null ? List.of() : List.copyOf(command);
-        // dependsOn が null なら空リストに、そうでなければ変更不可のコピーにする
-        dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
+        // dependsOn が null なら空リストにする。null でなければ各依存 ID の前後の空白を
+        // 除去して変更不可のコピーにする。id を trim して正規化している（54 行目）のに対し
+        // 依存側を trim しないと、DependencyGraph.build が trim 済み ID と突き合わせる際に
+        // 「build 」→「build」が一致せず、自己整合なバッチが unknown job として誤って弾かれる。
+        // 依存要素の null は他フィールドと同様ここで明示的に弾く。旧実装の List.copyOf は
+        // null 要素を NPE で拒否し BatchConfigLoader が ConfigException に変換していたため、
+        // Stream.toList()（null 許容）へ置き換えると null が DependencyGraph まで素通りして
+        // 未捕捉 NPE＋スタックトレース露出になる（§6/§9 違反）。それを防ぐ。
+        if (dependsOn != null && dependsOn.stream().anyMatch(d -> d == null)) {
+            throw new IllegalArgumentException("dependsOn entry must not be null (job '" + id + "')");
+        }
+        dependsOn = dependsOn == null ? List.of()
+                : dependsOn.stream().map(String::trim).toList();
         // env が null なら空マップに、そうでなければ変更不可のコピーにする
         env = env == null ? Map.of() : Map.copyOf(env);
         // workingDir が空白なら null に、そうでなければ前後の空白を除去する
