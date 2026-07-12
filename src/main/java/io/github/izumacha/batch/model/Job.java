@@ -56,8 +56,12 @@ public record Job(
         name = (name == null || name.isBlank()) ? id : name.trim();
         // command が null なら空リストに、そうでなければ変更不可のコピーにする
         command = command == null ? List.of() : List.copyOf(command);
-        // dependsOn が null なら空リストに、そうでなければ変更不可のコピーにする
-        dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
+        // dependsOn が null なら空リストにする。null でなければ各依存 ID の前後の空白を
+        // 除去して変更不可のコピーにする。id を trim して正規化している（54 行目）のに対し
+        // 依存側を trim しないと、DependencyGraph.build が trim 済み ID と突き合わせる際に
+        // 「build 」→「build」が一致せず、自己整合なバッチが unknown job として誤って弾かれる。
+        dependsOn = dependsOn == null ? List.of()
+                : dependsOn.stream().map(d -> d == null ? null : d.trim()).toList();
         // env が null なら空マップに、そうでなければ変更不可のコピーにする
         env = env == null ? Map.of() : Map.copyOf(env);
         // workingDir が空白なら null に、そうでなければ前後の空白を除去する
