@@ -61,4 +61,27 @@ class JobTest {
         // メッセージが依存要素の null 拒否である旨を含むことを検証する
         assertEquals(true, ex.getMessage().contains("dependsOn entry must not be null"));
     }
+
+    @Test
+    void rejectsNullCommandEntry() {
+        // command 内の null 要素も dependsOn と同じ理由で明示的に弾く
+        // （弾かないと List.copyOf の素の NPE がそのまま呼び出し元まで伝播する）
+        List<String> commandWithNull = java.util.Arrays.asList("sh", null);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> new Job("j", null, commandWithNull, List.of(), 0, 0, Map.of(), null));
+        // メッセージが command 要素の null 拒否である旨を含むことを検証する
+        assertEquals(true, ex.getMessage().contains("command entry must not be null"));
+    }
+
+    @Test
+    void rejectsNullEnvValue() {
+        // env のマップに null 値が混入していた場合も明示的に弾く
+        // （HashMap は null 値を許容するため、素の Map.copyOf 任せだと NPE がそのまま伝播する）
+        Map<String, String> envWithNullValue = new java.util.HashMap<>();
+        envWithNullValue.put("KEY", null);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> new Job("j", null, List.of("sh", "-c", "echo x"), List.of(), 0, 0, envWithNullValue, null));
+        // メッセージが env のキー/値の null 拒否である旨を含むことを検証する
+        assertEquals(true, ex.getMessage().contains("env key/value must not be null"));
+    }
 }

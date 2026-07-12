@@ -115,9 +115,11 @@ public final class RunCommand implements Callable<Integer> {
                 // 終了コードが取得できない場合は "-" を表示する
                 String exit = job.exitCode() == JobResult.NO_EXIT_CODE
                         ? "-" : Integer.toString(job.exitCode());
-                // ジョブ ID・ステータス・終了コード・実行時間・メッセージを整形して出力する
+                // ジョブ ID・ステータス・終了コード・実行時間・メッセージを整形して出力する。
+                // jobId は %-20s の固定幅列のため、ListCommand の batchName 表示と同様に
+                // shortMessage で 20 文字に切り詰めて表の桁ずれを防ぐ
                 System.out.printf("%-20s  %-9s  %5s  %10s  %s%n",
-                        job.jobId(),
+                        CliFormat.shortMessage(job.jobId(), 20),
                         job.status(),
                         exit,
                         CliFormat.duration(job.duration()),

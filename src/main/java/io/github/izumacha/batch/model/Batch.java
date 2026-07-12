@@ -20,6 +20,12 @@ public record Batch(String name, List<Job> jobs) {
     public Batch {
         // name が空白なら "batch" をデフォルト名として使い、そうでなければ前後の空白を除去する
         name = (name == null || name.isBlank()) ? "batch" : name.trim();
+        // jobs の要素に null が混入していないか確認する。List.copyOf の NPE 任せにすると
+        // BatchConfigLoader を経由しない呼び出し元で未捕捉 NPE＋スタックトレース露出になる
+        // ため（Job.java の command/dependsOn/env と同じ理由）、ここで明示的に検出する
+        if (jobs != null && jobs.stream().anyMatch(j -> j == null)) {
+            throw new IllegalArgumentException("jobs entry must not be null");
+        }
         // jobs が null なら空リストに、そうでなければ変更不可のコピーにする
         jobs = jobs == null ? List.of() : List.copyOf(jobs);
     }
