@@ -14,6 +14,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.logging.Logger;
@@ -171,6 +172,65 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 結果を開始日時の降順（最新順）に並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         // 並べ替え済みのリストを返す
+        return results;
+    }
+
+    /**
+     * Overrides the {@link ExecutionStore} default, which builds the bounded
+     * result by calling {@link #findAll()} first and truncating afterward --
+     * that still parses every stored run just to return a handful, defeating
+     * the point of a limit (§8: list retrieval itself must be bounded, not
+     * just its rendered output). Instead, list only the file names, sort by
+     * name descending, and parse just the {@code limit} candidates.
+     *
+     * <p>This relies on {@code runId} being generated as
+     * {@code yyyyMMdd-HHmmss-<hex>} ({@code BatchExecutor.generateRunId}), so
+     * filenames sort lexicographically in chronological order. The selected
+     * candidates are still re-sorted by {@link ExecutionResults#BY_STARTED_AT_DESC}
+     * after parsing so the returned order matches the documented "most
+     * recent first" contract exactly, even if a file was manually edited.
+     */
+    @Override
+    public List<ExecutionResult> findRecent(int limit) {
+        // limit <= 0 は「上限なし」を意味するため、この場合は素直に全件取得の経路を使う
+        if (limit <= 0) {
+            return findAll();
+        }
+        // ベースディレクトリが存在しない場合は空リストを返す
+        if (!Files.isDirectory(baseDir)) {
+            return List.of();
+        }
+        // 中身をパースせず、ファイル名だけを集めて絞り込む候補パスのリスト
+        List<Path> candidates;
+        try (Stream<Path> files = Files.list(baseDir)) {
+            candidates = files
+                    .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
+                    .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
+                    // runId が "yyyyMMdd-HHmmss-XXXXXX" 形式で辞書順=時系列順になることを利用し、
+                    // ファイル名の降順（新しい実行が先頭）だけで並べ替える。中身を読まずに絞り込める
+                    .sorted(Comparator.comparing((Path p) -> p.getFileName().toString()).reversed())
+                    // 降順に並んだ先頭から limit 件だけを候補として残す
+                    .limit(limit)
+                    .toList();
+        } catch (IOException e) {
+            // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
+            throw new UncheckedIOException(
+                    "failed to list execution results under " + baseDir, e);
+        }
+        // 絞り込んだ候補ファイルだけを実際にパースする（全件パースを避けて資源枯渇を防ぐ）
+        List<ExecutionResult> results = new ArrayList<>();
+        for (Path p : candidates) {
+            try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
+                // ファイルを読み込んで ExecutionResult に変換してリストに追加する
+                results.add(mapper.readValue(in, ExecutionResult.class));
+            } catch (IOException e) {
+                // パースに失敗したファイルはスキップするが、原因を警告ログに残す（findAll と同じ寛容な挙動）
+                LOGGER.warning("Skipping unreadable execution result file '" + p + "': " + e.getMessage());
+            }
+        }
+        // ファイル名の降順とstartedAtの降順は通常一致するが、契約どおりの順序を厳密に保証するため
+        // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
+        results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         return results;
     }
 
