@@ -4,6 +4,7 @@ import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
 import io.github.izumacha.batch.config.ValidationException;
 import io.github.izumacha.batch.core.BatchExecutor;
+import io.github.izumacha.batch.core.DependencyGraph;
 import io.github.izumacha.batch.model.Batch;
 import io.github.izumacha.batch.model.ExecutionResult;
 import io.github.izumacha.batch.model.JobResult;
@@ -52,6 +53,20 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_CONFIG;
         }
 
+        try {
+            // 保存先ディレクトリを作る前にバッチの構造（依存 DAG）を明示的に検証する。
+            // 検証をストア構築より後に回すと、無効なバッチでも --state-dir の
+            // ディレクトリツリーが副作用として作られてしまい、さらに保存先エラー（3）が
+            // 本来ユーザーに見せるべき検証エラーの一覧（2）を覆い隠してしまうため
+            DependencyGraph.build(batch);
+        } catch (ValidationException e) {
+            // バッチの構造が無効な場合は各エラーを標準エラーに出力して終了する
+            for (String error : e.errors()) {
+                System.err.println("invalid: " + error);
+            }
+            return BatchCli.EXIT_VALIDATION;
+        }
+
         // 状態保存ストアを格納する変数を宣言する
         JsonExecutionStore store;
         try {
@@ -66,18 +81,10 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_CONFIG;
         }
 
-        // バッチ実行結果を格納する変数を宣言する
-        ExecutionResult result;
-        try {
-            // バッチを実行して結果を取得する
-            result = new BatchExecutor().execute(batch);
-        } catch (ValidationException e) {
-            // バッチの構造が無効な場合は各エラーを標準エラーに出力して終了する
-            for (String error : e.errors()) {
-                System.err.println("invalid: " + error);
-            }
-            return BatchCli.EXIT_VALIDATION;
-        }
+        // バッチを実行して結果を取得する。BatchExecutor.execute は内部で依存グラフを
+        // もう一度構築するが、構築は軽量な処理であり、検証は上で済んでいるため
+        // 同じバッチに対して ValidationException が再発することはない
+        ExecutionResult result = new BatchExecutor().execute(batch);
 
         // 状態の保存に失敗しても実行結果は表示できるよう、先にサマリーを出力する
         printSummary(result);

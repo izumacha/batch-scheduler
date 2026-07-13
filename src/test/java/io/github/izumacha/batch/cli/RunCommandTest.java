@@ -50,6 +50,31 @@ class RunCommandTest {
     }
 
     @Test
+    void invalidBatchExitsValidationWithoutCreatingStateDir(@TempDir Path dir) throws IOException {
+        // バッチ定義ファイルの出力先パスを組み立てる
+        Path config = dir.resolve("batch.yaml");
+        // 存在しないジョブに依存する（構造が無効な）バッチ定義を書き込む
+        Files.writeString(config, """
+                name: invalid
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                    dependsOn: [ghost]
+                """);
+        // まだ存在しない保存先ディレクトリのパスを用意する（作られないことを検証する）
+        Path stateDir = dir.resolve("brand/new/state");
+
+        // run コマンドを実行する（検証は保存先ディレクトリの作成より先に行われるはず）
+        int code = BatchCli.run("run", config.toString(), "--state-dir", stateDir.toString(), "-q");
+
+        // 保存先エラー（3）ではなく検証エラー（2）が優先して報告されるはず
+        assertEquals(BatchCli.EXIT_VALIDATION, code);
+        // 無効なバッチでは --state-dir のディレクトリツリーが副作用として作られていないこと
+        assertFalse(Files.exists(stateDir),
+                "an invalid batch must not create the state directory as a side effect");
+    }
+
+    @Test
     void successfulRunSavesStateAndExitsOk(@TempDir Path dir) throws IOException {
         // ジョブ実行を確認するためのプローブファイルのパスを決める
         Path probe = dir.resolve("probe.txt");
