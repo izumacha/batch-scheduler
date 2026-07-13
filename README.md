@@ -108,8 +108,21 @@ jobs:
 |------|---------|
 | `0`  | Success — the operation completed (and, for `run`, the batch `SUCCEEDED`). |
 | `1`  | The batch ran to completion but ended in a `FAILED` state. |
-| `2`  | Validation error — the batch is structurally invalid (bad DAG, missing dependency, duplicate id, empty command, cycle). |
-| `3`  | Configuration / IO error (file missing or unparseable) or a usage error. |
+| `2`  | Validation error — the batch is structurally invalid (bad DAG, missing dependency, duplicate id, empty or blank command token, cycle). |
+| `3`  | Configuration / IO error (file missing or unparseable, or the `--state-dir` cannot be prepared before the run) or a usage error. |
+
+Notes:
+
+- `run` validates the batch (exit `2`) before preparing the state directory
+  (exit `3`), so an invalid batch never creates the `--state-dir` tree as a
+  side effect.
+- If persisting the run record fails *after* execution (e.g. the state
+  directory became unwritable mid-run), the batch outcome wins: after a failed
+  batch the exit code is still `1`; only after a successful batch is the
+  persistence failure reported as exit `3`.
+- `timeoutSeconds` and `retries` accept integers only: any float literal —
+  including whole-number floats such as `30.0` — is rejected as a
+  configuration error (exit `3`) instead of being truncated.
 
 ## Security & trust model
 

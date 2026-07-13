@@ -54,24 +54,34 @@ ExecutionResult  (per-job JobResults, overall status, timings)
 The CLI ties these together: `validate` stops after building the graph; `run`
 goes all the way through execution and persistence; `list` reads stored results.
 
-`run` prepares (creates and validates) the state directory **before** executing
-any job, so an unusable `--state-dir` — for example a path that is an existing
-regular file — fails fast with exit code 3 while no job has run yet. If
-persisting the record still fails *after* execution (e.g. the disk filled up
-mid-run), the exit code prefers the batch outcome: a failed batch exits 1
-(`EXIT_FAILED`) so wrapper scripts branch on the real result, and only a
-successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
+`run` validates the DAG (exit code 2 on structural errors) *before* touching
+the state directory, so an invalid batch never creates the `--state-dir` tree
+as a side effect and validation errors are never masked by a state-directory
+error. It then prepares the state directory **before** executing any job: the
+pre-run step creates the directory and catches structurally-unusable paths —
+for example a path that is an existing regular file — failing fast with exit
+code 3 while no job has run yet. This pre-run step is *not* a full writability
+probe: an existing directory without write permission still surfaces only at
+save time, after the run. The store constructor deliberately does not probe
+for writability, because `list` shares `JsonExecutionStore` and must keep
+working against a read-only state directory. When persisting the record fails
+*after* execution (read-only directory, disk filled up mid-run, the directory
+destroyed by a job), the exit code prefers the batch outcome: a failed batch
+exits 1 (`EXIT_FAILED`) so wrapper scripts branch on the real result, and only
+a successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
 
 ## Key decisions
 
 - **Immutable records.** All model types are Java records with normalization and
   light validation in their canonical constructors. This makes the data easy to
   reason about and safe to share.
-- **Strict numeric parsing.** Fractional values in integer fields (e.g.
-  `timeoutSeconds: 0.9` or `retries: 2.9`) are rejected as configuration errors
-  (exit code 3) instead of being silently truncated: Jackson's default
-  float-to-int coercion is disabled in `BatchConfigLoader`, so `timeoutSeconds:
-  0.9` can never silently become `0` — which would mean *no timeout at all*.
+- **Strict numeric parsing.** Float literals in integer fields (`timeoutSeconds`,
+  `retries`) are rejected as configuration errors (exit code 3) instead of being
+  silently truncated: Jackson's default float-to-int coercion is disabled in
+  `BatchConfigLoader`, so `timeoutSeconds: 0.9` can never silently become `0` —
+  which would mean *no timeout at all*. This applies to **all** float literals,
+  not just fractional ones: even a whole-number float such as `timeoutSeconds:
+  30.0` is rejected — these fields accept integers only.
 - **Validation aggregates all errors.** `DependencyGraph.build` collects every
   structural problem (duplicate ids, unknown/self dependencies, empty or blank
   commands — a command whose first token, the program name, is empty or
