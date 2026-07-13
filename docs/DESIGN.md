@@ -59,6 +59,11 @@ goes all the way through execution and persistence; `list` reads stored results.
 - **Immutable records.** All model types are Java records with normalization and
   light validation in their canonical constructors. This makes the data easy to
   reason about and safe to share.
+- **Strict numeric parsing.** Fractional values in integer fields (e.g.
+  `timeoutSeconds: 0.9` or `retries: 2.9`) are rejected as configuration errors
+  (exit code 3) instead of being silently truncated: Jackson's default
+  float-to-int coercion is disabled in `BatchConfigLoader`, so `timeoutSeconds:
+  0.9` can never silently become `0` — which would mean *no timeout at all*.
 - **Validation aggregates all errors.** `DependencyGraph.build` collects every
   structural problem (duplicate ids, unknown/self dependencies, empty commands,
   cycles) and throws a single `ValidationException` carrying the full list, so

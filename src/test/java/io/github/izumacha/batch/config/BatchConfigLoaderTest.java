@@ -114,6 +114,37 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void fractionalTimeoutSecondsSurfacesConfigException() {
+        // 既定の Jackson は小数を整数へ切り捨て変換するため、timeoutSeconds: 0.9 が
+        // 0（= タイムアウト無し）に化けてしまう。coercion を無効化した結果、
+        // 小数のタイムアウト指定が ConfigException として明示的に拒否されることを確認する
+        String yaml = """
+                name: bad
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo x"]
+                    timeoutSeconds: 0.9
+                """;
+        // 小数の timeoutSeconds は ConfigException として表面化するはず
+        assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+    }
+
+    @Test
+    void fractionalRetriesSurfacesConfigException() {
+        // retries: 2.9 が 2 に静かに切り捨てられると利用者の意図（3 回近いリトライ）と
+        // 異なる実行になるため、小数のリトライ指定が拒否されることを確認する
+        String yaml = """
+                name: bad
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo x"]
+                    retries: 2.9
+                """;
+        // 小数の retries は ConfigException として表面化するはず
+        assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+    }
+
+    @Test
     void malformedYamlSurfacesConfigException() {
         String yaml = "name: etl\njobs: [oops: : :";
         assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));

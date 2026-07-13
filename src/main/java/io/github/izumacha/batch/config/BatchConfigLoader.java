@@ -60,7 +60,12 @@ public final class BatchConfigLoader {
         this.mapper = new ObjectMapper(yamlFactory)
                 .registerModule(new JavaTimeModule())
                 // 未知のフィールドがあっても例外にしない（上位互換性のため）
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+                // 小数を整数フィールドへ黙って切り捨て変換（coercion）しない。
+                // 既定では `timeoutSeconds: 0.9` が 0（= タイムアウト無し）、
+                // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
+                // 小数値は ConfigException（終了コード 3）として明示的に拒否する
+                .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false);
     }
 
     /**
