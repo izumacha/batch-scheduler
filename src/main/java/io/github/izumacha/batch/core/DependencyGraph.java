@@ -112,6 +112,11 @@ public final class DependencyGraph {
             // コマンドが空のジョブはエラーとして記録する
             if (job.command().isEmpty()) {
                 errors.add("job '" + id + "' has an empty command");
+            } else if (job.command().get(0).isBlank()) {
+                // 先頭トークン（起動するプログラム名）が空文字・空白のみのジョブは
+                // 起動が絶対に成功しないため、validate 時点でエラーとして記録する
+                // （`command: [""]` が「空でない」として素通りするのを防ぐ）
+                errors.add("job '" + id + "' has a blank command");
             }
             // このジョブの検証済み依存セットを作成する（宣言順を保持）
             Set<String> deps = new LinkedHashSet<>();

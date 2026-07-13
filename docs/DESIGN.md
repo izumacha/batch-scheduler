@@ -73,9 +73,11 @@ successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
   float-to-int coercion is disabled in `BatchConfigLoader`, so `timeoutSeconds:
   0.9` can never silently become `0` — which would mean *no timeout at all*.
 - **Validation aggregates all errors.** `DependencyGraph.build` collects every
-  structural problem (duplicate ids, unknown/self dependencies, empty commands,
-  cycles) and throws a single `ValidationException` carrying the full list, so
-  users can fix everything in one pass rather than one error at a time.
+  structural problem (duplicate ids, unknown/self dependencies, empty or blank
+  commands — a command whose first token, the program name, is empty or
+  whitespace-only can never start — and cycles) and throws a single
+  `ValidationException` carrying the full list, so users can fix everything in
+  one pass rather than one error at a time.
 - **Failure semantics.** Jobs run in topological order. If a job ends `FAILED`,
   every job that depends on it (transitively) is marked `SKIPPED`, and the overall
   run status is `FAILED`. A run is `SUCCEEDED` only if every job succeeded.
