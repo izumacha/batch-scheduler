@@ -3,7 +3,10 @@ package io.github.izumacha.batch.cli;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -95,6 +98,79 @@ class RunCommandTest {
             assertTrue(files.anyMatch(p -> p.getFileName().toString().endsWith(".json")),
                     "a run record JSON should be persisted in the state directory");
         }
+    }
+
+    // 終了コードと捕捉した標準エラー出力をまとめて返すテスト用の入れ物
+    private record RunOutcome(int code, String stderr) {}
+
+    // run コマンドを実行し、標準エラー出力を文字列として捕捉して終了コードと一緒に返すヘルパー
+    private static RunOutcome runCapturingStderr(String... args) {
+        // 元の標準エラー出力を退避する
+        PrintStream original = System.err;
+        // 出力を貯めるバッファを用意する
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        try {
+            // 標準エラー出力をバッファ付きの PrintStream に差し替える
+            System.setErr(new PrintStream(buffer, true, StandardCharsets.UTF_8));
+            // run コマンドを実行して終了コードを受け取る
+            int code = BatchCli.run(args);
+            // 終了コードと捕捉した標準エラー出力を組にして返す
+            return new RunOutcome(code, buffer.toString(StandardCharsets.UTF_8));
+        } finally {
+            // 何があっても標準エラー出力を元に戻す
+            System.setErr(original);
+        }
+    }
+
+    // 実行中に保存先ディレクトリを破壊して通常ファイルに置き換えるジョブ 1 件の
+    // バッチ定義を書き出すヘルパー（保存が実行後に失敗する状況を再現する）
+    private static Path writeStateDirDestroyingBatch(Path dir, Path stateDir, int exitCode)
+            throws IOException {
+        // バッチ定義ファイルの出力先パスを組み立てる
+        Path config = dir.resolve("batch.yaml");
+        // 保存先ディレクトリを削除して同名の通常ファイルを作り、指定の終了コードで終わる YAML を書き込む
+        Files.writeString(config, """
+                name: destroyer
+                jobs:
+                  - id: destroy
+                    command: ["sh", "-c", "rm -rf '%s' && touch '%s'; exit %d"]
+                """.formatted(stateDir.toAbsolutePath(), stateDir.toAbsolutePath(), exitCode));
+        // 書き出した設定ファイルのパスを返す
+        return config;
+    }
+
+    @Test
+    void persistFailureAfterFailedBatchPrefersBatchExitCode(@TempDir Path dir) throws IOException {
+        // 保存先ディレクトリのパスを決める（run が事前に作成し、ジョブが破壊する）
+        Path stateDir = dir.resolve("state");
+        // 保存先を破壊してから終了コード 1 で失敗するバッチ定義を書き出す
+        Path config = writeStateDirDestroyingBatch(dir, stateDir, 1);
+
+        // run コマンドを実行し、終了コードと標準エラー出力を捕捉する
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(), "-q");
+
+        // 保存失敗（3）よりバッチ失敗（1）が優先して報告されるはず
+        assertEquals(BatchCli.EXIT_FAILED, outcome.code());
+        // 保存に失敗した旨のエラーメッセージは標準エラーに出力されているはず
+        assertTrue(outcome.stderr().contains("failed to persist"), outcome.stderr());
+    }
+
+    @Test
+    void persistFailureAfterSuccessfulBatchExitsConfig(@TempDir Path dir) throws IOException {
+        // 保存先ディレクトリのパスを決める（run が事前に作成し、ジョブが破壊する）
+        Path stateDir = dir.resolve("state");
+        // 保存先を破壊してから終了コード 0 で成功するバッチ定義を書き出す
+        Path config = writeStateDirDestroyingBatch(dir, stateDir, 0);
+
+        // run コマンドを実行し、終了コードと標準エラー出力を捕捉する
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(), "-q");
+
+        // バッチが成功していた場合のみ、保存失敗が設定・IO エラー（3）として報告されるはず
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        // 保存に失敗した旨のエラーメッセージは標準エラーに出力されているはず
+        assertTrue(outcome.stderr().contains("failed to persist"), outcome.stderr());
     }
 
     @Test
