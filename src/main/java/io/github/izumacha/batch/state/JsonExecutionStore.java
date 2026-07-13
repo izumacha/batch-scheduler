@@ -130,16 +130,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // ファイルが存在しない場合は空の Optional を返す
             return Optional.empty();
         }
-        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
-            return Optional.of(mapper.readValue(in, ExecutionResult.class));
-        } catch (IOException e) {
-            // パースに失敗したファイルはスキップして空 Optional を返す（findAll と同じ寛容な挙動）。
-            // クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、途中書き込みや
-            // 手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
-            LOGGER.warning("Skipping unreadable execution result '" + runId + "' at " + file + ": " + e.getMessage());
-            return Optional.empty();
-        }
+        // 読み込み・パース・壊れたファイルの読み飛ばしは findAll/findRecent と共通のヘルパーに委譲する
+        return tryRead(file);
     }
 
     @Override
@@ -154,16 +146,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // ベースディレクトリ内のファイルをフィルタリングして処理する
             files.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
                     .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
-                    .forEach(p -> {
-                        try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
-                            // ファイルを読み込んで ExecutionResult に変換してリストに追加する
-                            results.add(mapper.readValue(in, ExecutionResult.class));
-                        } catch (IOException e) {
-                            // パースに失敗したファイルはスキップするが、原因を警告ログに残す
-                            // （途中書き込みや無関係なファイルの可能性があるが、予期しないエラーの診断に役立てる）
-                            LOGGER.warning("Skipping unreadable execution result file '" + p + "': " + e.getMessage());
-                        }
-                    });
+                    // 読み込み・パース・壊れたファイルの読み飛ばしは共通ヘルパー tryRead に委譲する
+                    .forEach(p -> tryRead(p).ifPresent(results::add));
         } catch (IOException e) {
             // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -217,21 +201,36 @@ public final class JsonExecutionStore implements ExecutionStore {
             throw new UncheckedIOException(
                     "failed to list execution results under " + baseDir, e);
         }
-        // 絞り込んだ候補ファイルだけを実際にパースする（全件パースを避けて資源枯渇を防ぐ）
+        // 絞り込んだ候補ファイルだけを実際にパースする（全件パースを避けて資源枯渇を防ぐ）。
+        // 読み込み・パース・壊れたファイルの読み飛ばしは findAll と共通のヘルパー tryRead に委譲する
         List<ExecutionResult> results = new ArrayList<>();
         for (Path p : candidates) {
-            try (InputStream in = Files.newInputStream(p, LinkOption.NOFOLLOW_LINKS)) {
-                // ファイルを読み込んで ExecutionResult に変換してリストに追加する
-                results.add(mapper.readValue(in, ExecutionResult.class));
-            } catch (IOException e) {
-                // パースに失敗したファイルはスキップするが、原因を警告ログに残す（findAll と同じ寛容な挙動）
-                LOGGER.warning("Skipping unreadable execution result file '" + p + "': " + e.getMessage());
-            }
+            tryRead(p).ifPresent(results::add);
         }
         // ファイル名の降順とstartedAtの降順は通常一致するが、契約どおりの順序を厳密に保証するため
         // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         return results;
+    }
+
+    /**
+     * Reads and parses one execution-result JSON file, tolerating a missing
+     * or unparseable file by logging a warning and returning empty instead of
+     * throwing. Shared by {@link #findById}, {@link #findAll}, and
+     * {@link #findRecent} so the "skip broken files" contract documented on
+     * this class lives in exactly one place.
+     */
+    private Optional<ExecutionResult> tryRead(Path file) {
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
+            return Optional.of(mapper.readValue(in, ExecutionResult.class));
+        } catch (IOException e) {
+            // パースに失敗したファイルはスキップして空 Optional を返す（fail-safe）。
+            // クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、途中書き込みや
+            // 手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
+            LOGGER.warning("Skipping unreadable execution result file '" + file + "': " + e.getMessage());
+            return Optional.empty();
+        }
     }
 
     /**
