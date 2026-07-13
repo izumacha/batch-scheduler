@@ -54,6 +54,14 @@ ExecutionResult  (per-job JobResults, overall status, timings)
 The CLI ties these together: `validate` stops after building the graph; `run`
 goes all the way through execution and persistence; `list` reads stored results.
 
+`run` prepares (creates and validates) the state directory **before** executing
+any job, so an unusable `--state-dir` — for example a path that is an existing
+regular file — fails fast with exit code 3 while no job has run yet. If
+persisting the record still fails *after* execution (e.g. the disk filled up
+mid-run), the exit code prefers the batch outcome: a failed batch exits 1
+(`EXIT_FAILED`) so wrapper scripts branch on the real result, and only a
+successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
+
 ## Key decisions
 
 - **Immutable records.** All model types are Java records with normalization and

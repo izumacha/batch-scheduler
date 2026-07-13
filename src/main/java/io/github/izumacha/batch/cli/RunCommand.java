@@ -52,6 +52,20 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_CONFIG;
         }
 
+        // 状態保存ストアを格納する変数を宣言する
+        JsonExecutionStore store;
+        try {
+            // ジョブを 1 つも実行する前に保存先ディレクトリを作成・検証する（fail fast）。
+            // 使えない --state-dir（例: 既存の通常ファイル）を実行後に発見すると、
+            // ジョブは走ったのに記録が残らず、終了コード 3 が本来のバッチ結果を
+            // 覆い隠してしまうため、先にストアを構築して早期に失敗させる
+            store = new JsonExecutionStore(stateDir);
+        } catch (RuntimeException e) {
+            // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
+            System.err.println("error: failed to prepare state directory: " + e.getMessage());
+            return BatchCli.EXIT_CONFIG;
+        }
+
         // バッチ実行結果を格納する変数を宣言する
         ExecutionResult result;
         try {
@@ -70,11 +84,15 @@ public final class RunCommand implements Callable<Integer> {
 
         try {
             // 実行結果を状態ディレクトリに JSON ファイルとして保存する
-            new JsonExecutionStore(stateDir).save(result);
+            store.save(result);
         } catch (RuntimeException e) {
-            // 保存に失敗した場合はエラーメッセージを標準エラーに出力して終了する
+            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する
             System.err.println("error: failed to persist run state: " + e.getMessage());
-            return BatchCli.EXIT_CONFIG;
+            // 保存先は事前検証済みなのでここに来るのは稀（実行中のディスク満杯など）。
+            // バッチ自体が失敗している場合は、記録漏れ（3）よりもバッチ失敗（1）の方が
+            // ラッパースクリプトの分岐にとって重要な情報なので EXIT_FAILED を優先して返す。
+            // バッチが成功していた場合のみ、保存失敗を EXIT_CONFIG として報告する
+            return result.succeeded() ? BatchCli.EXIT_CONFIG : BatchCli.EXIT_FAILED;
         }
         // 保存先ディレクトリの絶対パスを標準出力に出力する
         System.out.printf("%nState saved to %s%n", stateDir.toAbsolutePath());
