@@ -167,6 +167,32 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findAllSkipsFileWithNullJobIdInsteadOfThrowing(@TempDir Path dir) throws Exception {
+        // JobResult.jobId は必須（本クラスと同じ「壊れたファイルは読み飛ばす」契約）。
+        // jobId が null の jobResults エントリを含む手動改変ファイルは、JobResult の
+        // コンストラクタ検証によって ValueInstantiationException(IOException 系)になり、
+        // tryRead が他の壊れたファイルと同様に読み飛ばすべきで、未捕捉例外にならないことを確認する。
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("good", Instant.now()));
+        Files.writeString(dir.resolve("badjobid.json"), """
+                {
+                  "runId": "badjobid",
+                  "batchName": "etl",
+                  "status": "SUCCEEDED",
+                  "startedAt": "2024-01-01T00:00:00Z",
+                  "finishedAt": "2024-01-01T00:00:01Z",
+                  "jobResults": [
+                    { "jobId": null, "status": "SUCCEEDED", "exitCode": 0, "attempts": 1 }
+                  ]
+                }
+                """);
+
+        List<ExecutionResult> all = store.findAll();
+        assertEquals(1, all.size());
+        assertEquals("good", all.get(0).runId());
+    }
+
+    @Test
     void savesRunWithVeryShortRunId(@TempDir Path dir) {
         // A one-character runId must not blow up the temp-file prefix.
         JsonExecutionStore store = new JsonExecutionStore(dir);
