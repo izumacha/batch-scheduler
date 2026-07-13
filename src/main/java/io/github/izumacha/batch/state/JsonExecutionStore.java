@@ -173,6 +173,17 @@ public final class JsonExecutionStore implements ExecutionStore {
      * candidates are still re-sorted by {@link ExecutionResults#BY_STARTED_AT_DESC}
      * after parsing so the returned order matches the documented "most
      * recent first" contract exactly, even if a file was manually edited.
+     *
+     * <p><b>Known trade-off:</b> because the candidate window is chosen from
+     * filenames alone, a corrupted/unparseable file inside that window is
+     * simply skipped rather than backfilled from just outside the window
+     * (unlike the {@link #findAll()}-then-truncate default, which always
+     * returns {@code limit} results as long as that many valid runs exist
+     * anywhere). A single manually-corrupted state file can therefore make
+     * this method return fewer than {@code limit} results even when older
+     * valid runs exist. This is accepted for the MVP: corrupted state files
+     * are not an expected operational state (§ state directory safety), and
+     * widening the window to backfill would reintroduce unbounded parsing.
      */
     @Override
     public List<ExecutionResult> findRecent(int limit) {
