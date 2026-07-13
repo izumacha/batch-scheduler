@@ -140,6 +140,7 @@ class DependencyGraphTest {
         // ジョブは起動が絶対に成功しない。空リストのチェックだけでは素通りするため、
         // validate 時点でエラーとして検出されることを確認する
         Job blank = new Job("a", null, List.of("   "), List.of(), 0, 0, Map.of(), null);
+        // 空白コマンドのジョブ 1 件だけを含むバッチを組み立てる
         Batch batch = new Batch("bc", List.of(blank));
         // 検証で ValidationException が投げられるはず
         ValidationException ex = assertThrows(ValidationException.class,
