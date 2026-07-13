@@ -4,6 +4,7 @@ import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
 import io.github.izumacha.batch.config.ValidationException;
 import io.github.izumacha.batch.core.BatchExecutor;
+import io.github.izumacha.batch.core.DependencyGraph;
 import io.github.izumacha.batch.model.Batch;
 import io.github.izumacha.batch.model.ExecutionResult;
 import io.github.izumacha.batch.model.JobResult;
@@ -52,11 +53,12 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_CONFIG;
         }
 
-        // バッチ実行結果を格納する変数を宣言する
-        ExecutionResult result;
         try {
-            // バッチを実行して結果を取得する
-            result = new BatchExecutor().execute(batch);
+            // 保存先ディレクトリを作る前にバッチの構造（依存 DAG）を明示的に検証する。
+            // 検証をストア構築より後に回すと、無効なバッチでも --state-dir の
+            // ディレクトリツリーが副作用として作られてしまい、さらに保存先エラー（3）が
+            // 本来ユーザーに見せるべき検証エラーの一覧（2）を覆い隠してしまうため
+            DependencyGraph.build(batch);
         } catch (ValidationException e) {
             // バッチの構造が無効な場合は各エラーを標準エラーに出力して終了する
             for (String error : e.errors()) {
@@ -65,16 +67,43 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_VALIDATION;
         }
 
+        // 状態保存ストアを格納する変数を宣言する
+        JsonExecutionStore store;
+        try {
+            // ジョブを 1 つも実行する前に保存先ディレクトリを作成・検証する（fail fast）。
+            // 使えない --state-dir（例: 既存の通常ファイル）を実行後に発見すると、
+            // ジョブは走ったのに記録が残らず、終了コード 3 が本来のバッチ結果を
+            // 覆い隠してしまうため、先にストアを構築して早期に失敗させる
+            store = new JsonExecutionStore(stateDir);
+        } catch (RuntimeException e) {
+            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
+            Throwable cause = e.getCause();
+            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
+            String detail = cause != null ? " (" + cause + ")" : "";
+            // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
+            System.err.println("error: failed to prepare state directory: " + e.getMessage() + detail);
+            return BatchCli.EXIT_CONFIG;
+        }
+
+        // バッチを実行して結果を取得する。BatchExecutor.execute は内部で依存グラフを
+        // もう一度構築するが、構築は軽量な処理であり、検証は上で済んでいるため
+        // 同じバッチに対して ValidationException が再発することはない
+        ExecutionResult result = new BatchExecutor().execute(batch);
+
         // 状態の保存に失敗しても実行結果は表示できるよう、先にサマリーを出力する
         printSummary(result);
 
         try {
             // 実行結果を状態ディレクトリに JSON ファイルとして保存する
-            new JsonExecutionStore(stateDir).save(result);
+            store.save(result);
         } catch (RuntimeException e) {
-            // 保存に失敗した場合はエラーメッセージを標準エラーに出力して終了する
+            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する
             System.err.println("error: failed to persist run state: " + e.getMessage());
-            return BatchCli.EXIT_CONFIG;
+            // 保存先は事前検証済みなのでここに来るのは稀（実行中のディスク満杯など）。
+            // バッチ自体が失敗している場合は、記録漏れ（3）よりもバッチ失敗（1）の方が
+            // ラッパースクリプトの分岐にとって重要な情報なので EXIT_FAILED を優先して返す。
+            // バッチが成功していた場合のみ、保存失敗を EXIT_CONFIG として報告する
+            return result.succeeded() ? BatchCli.EXIT_CONFIG : BatchCli.EXIT_FAILED;
         }
         // 保存先ディレクトリの絶対パスを標準出力に出力する
         System.out.printf("%nState saved to %s%n", stateDir.toAbsolutePath());

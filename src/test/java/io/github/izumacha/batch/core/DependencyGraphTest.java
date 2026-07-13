@@ -135,6 +135,21 @@ class DependencyGraphTest {
     }
 
     @Test
+    void blankCommandIsDetected() {
+        // `command: [""]` のように要素はあるが先頭トークン（プログラム名）が空白のみの
+        // ジョブは起動が絶対に成功しない。空リストのチェックだけでは素通りするため、
+        // validate 時点でエラーとして検出されることを確認する
+        Job blank = new Job("a", null, List.of("   "), List.of(), 0, 0, Map.of(), null);
+        // 空白コマンドのジョブ 1 件だけを含むバッチを組み立てる
+        Batch batch = new Batch("bc", List.of(blank));
+        // 検証で ValidationException が投げられるはず
+        ValidationException ex = assertThrows(ValidationException.class,
+                () -> DependencyGraph.build(batch));
+        // 空白コマンドを指すエラーメッセージが含まれていること
+        assertTrue(ex.errors().contains("job 'a' has a blank command"), ex.errors().toString());
+    }
+
+    @Test
     void unknownDependencyIsDetected() {
         Batch batch = new Batch("missing", List.of(
                 job("a", List.of("ghost"))));
