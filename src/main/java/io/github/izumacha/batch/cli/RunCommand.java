@@ -76,8 +76,12 @@ public final class RunCommand implements Callable<Integer> {
             // 覆い隠してしまうため、先にストアを構築して早期に失敗させる
             store = new JsonExecutionStore(stateDir);
         } catch (RuntimeException e) {
+            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
+            Throwable cause = e.getCause();
+            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
+            String detail = cause != null ? " (" + cause + ")" : "";
             // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to prepare state directory: " + e.getMessage());
+            System.err.println("error: failed to prepare state directory: " + e.getMessage() + detail);
             return BatchCli.EXIT_CONFIG;
         }
 
