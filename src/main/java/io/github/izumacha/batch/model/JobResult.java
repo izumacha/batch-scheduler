@@ -28,6 +28,20 @@ public record JobResult(
     // プロセスが終了コードを返さなかった場合（スキップ・タイムアウト・起動失敗）に使う番兵値
     public static final int NO_EXIT_CODE = -1;
 
+    public JobResult {
+        // jobId が null または空白の場合は例外を投げる。JobResult は必ず特定のジョブに
+        // 対応づくため、他の必須フィールドと同様ここで拒否する（Job.id と同じ理由・同じパターン）。
+        // これを検証しないと、手動改変や破損した状態ファイルから jobId が null の JobResult が
+        // そのままデシリアライズされてしまい、ExecutionResult#result(String) の
+        // r.jobId().equals(jobId) が未捕捉 NullPointerException になる（§6/§9 違反）。
+        // Jackson 経由でこの例外が起きた場合は ValueInstantiationException（IOException 系）に
+        // 包まれるため、JsonExecutionStore.tryRead が「壊れたファイルは読み飛ばす」契約どおりに
+        // 処理できる（Job/Batch の null 要素検証と同じ扱い）。
+        if (jobId == null || jobId.isBlank()) {
+            throw new IllegalArgumentException("jobId is required");
+        }
+    }
+
     /** Wall-clock duration of the job, or {@link Duration#ZERO} when it did not run. */
     public Duration duration() {
         // 開始時刻または終了時刻が null なら所要時間ゼロを返す（スキップされたジョブなど）
