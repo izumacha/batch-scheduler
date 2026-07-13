@@ -223,4 +223,22 @@ class JsonExecutionStoreTest {
         // 保存件数より大きい上限では全件がそのまま返る
         assertEquals(1, store.findRecent(10).size());
     }
+
+    @Test
+    void findRecentSkipsUnparseableFileWithinWindow(@TempDir Path dir) throws Exception {
+        // findRecent は候補ファイル名を絞り込んだ後に初めてパースするため、絞り込んだ
+        // 少数件（limit 件）の中に壊れたファイルが混ざっていても読み飛ばせることを確認する
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        store.save(sampleRun("run0", base));
+        store.save(sampleRun("run2", base.plus(2, ChronoUnit.DAYS)));
+        // "run1" は破損した JSON として直接置く（実行結果としては保存しない）
+        Files.writeString(dir.resolve("run1.json"), "{ this is not valid json");
+
+        // 上限 3 件を要求しても、壊れたファイルは読み飛ばされ有効な 2 件だけが返る
+        List<ExecutionResult> recent = store.findRecent(3);
+        assertEquals(2, recent.size());
+        assertEquals("run2", recent.get(0).runId());
+        assertEquals("run0", recent.get(1).runId());
+    }
 }
