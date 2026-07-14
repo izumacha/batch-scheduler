@@ -261,9 +261,17 @@ public final class JsonExecutionStore implements ExecutionStore {
      * comparison with no filesystem I/O, so it is unit-testable without
      * creating any files. Shared by {@link #findAll} (safety-ceiling
      * truncation) and {@link #findRecent} (limit truncation).
+     *
+     * <p>When {@code candidates.size() <= ceiling}, the same list reference is
+     * returned unmodified (no copy). This is safe only because every current
+     * caller passes an unmodifiable list ({@code Stream.toList()}); a future
+     * caller passing a mutable list must not rely on the returned list being
+     * independent of the input.
      */
     static List<Path> keepMostRecentByFilename(List<Path> candidates, int ceiling) {
-        // 既にちょうど収まっている場合はソートせずそのまま返す（無駄な比較を避ける）
+        // 既にちょうど収まっている場合はソートせずそのまま返す（無駄な比較を避ける）。
+        // 呼び出し元は現状すべて Stream.toList()（変更不可）を渡しているため、参照をそのまま
+        // 返しても安全。可変リストを渡す呼び出し元を将来追加する場合はこの前提が崩れる点に注意
         if (candidates.size() <= ceiling) {
             return candidates;
         }

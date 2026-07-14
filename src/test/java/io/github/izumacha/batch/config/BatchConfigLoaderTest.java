@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -171,6 +172,13 @@ class BatchConfigLoaderTest {
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.load(missing));
         assertTrue(ex.getMessage().contains(missing.toString()),
                 "message should contain the path, was: " + ex.getMessage());
+        // A missing (mistyped) path must not be reported as "not a regular file" --
+        // that message is reserved for a path that exists but is the wrong type
+        // (see nonRegularFilePathIsRejected). Conflating the two would make a
+        // simple typo look like a special-file rejection.
+        assertFalse(ex.getMessage().contains("not a regular file"),
+                "missing-file message should be distinct from the wrong-type message, was: "
+                        + ex.getMessage());
     }
 
     @Test

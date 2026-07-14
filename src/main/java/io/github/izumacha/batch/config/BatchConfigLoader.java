@@ -79,21 +79,39 @@ public final class BatchConfigLoader {
         if (path == null) {
             throw new ConfigException("config path must not be null");
         }
-        // Reject anything that is not a regular file (FIFOs, character devices,
-        // directories, ...) before touching its size or contents. Files.size()
-        // is not meaningful for special files (e.g. it reports 0 for /dev/zero,
-        // silently bypassing the MAX_CONFIG_BYTES guard below), and a
-        // FIFO/character device can block or stream unboundedly on read,
-        // defeating the "bounded parsing" invariant even though the size check
-        // itself passed. Batch config files have no legitimate reason to be
-        // anything other than a regular file.
-        // 通常ファイル以外（FIFO・キャラクタデバイス・ディレクトリ等）は、サイズ確認や読み込みを
-        // 行う前に拒否する。Files.size() は特殊ファイルに対して意味を持たず
+        // Reject anything that EXISTS but is not a regular file (FIFOs,
+        // character devices, directories, ...) before touching its size or
+        // contents. Files.size() is not meaningful for special files (e.g. it
+        // reports 0 for /dev/zero, silently bypassing the MAX_CONFIG_BYTES
+        // guard below), and a FIFO/character device can block or stream
+        // unboundedly on read, defeating the "bounded parsing" invariant even
+        // though the size check itself passed. Batch config files have no
+        // legitimate reason to be anything other than a regular file.
+        //
+        // The Files.exists(path) guard matters for error-message clarity, not
+        // just correctness: Files.isRegularFile(path) alone returns false for
+        // BOTH "doesn't exist" and "wrong type", which would collapse a
+        // mistyped/missing path into the same "not a regular file" message
+        // instead of the clearer NoSuchFileException-derived message the
+        // existing IOException handling below already produces. Only reject
+        // here when we can positively confirm the path exists and is the
+        // wrong type; a missing (or existence-undeterminable, e.g. permission
+        // denied on a parent directory) path falls through to Files.size()
+        // below, which raises its own descriptive IOException.
+        // 存在するのに通常ファイル以外（FIFO・キャラクタデバイス・ディレクトリ等）の場合だけ、
+        // サイズ確認や読み込みを行う前に拒否する。Files.size() は特殊ファイルに対して意味を持たず
         // （例えば /dev/zero では 0 を返し、直後の MAX_CONFIG_BYTES チェックをすり抜けてしまう）、
         // FIFO/キャラクタデバイスは読み込み時に無制限にブロック・ストリームしうるため、
         // サイズチェックが通過していても「有界なパース」という不変条件が崩れる。
         // バッチ設定ファイルが通常ファイル以外である正当な理由はない。
-        if (!Files.isRegularFile(path)) {
+        //
+        // Files.exists(path) を併用するのはメッセージの分かりやすさのため: isRegularFile() 単独では
+        // 「存在しない」と「型が違う」のどちらも false を返し区別できず、パスの typo・存在しない
+        // ファイルまで「通常ファイルではない」という誤解を招くメッセージになってしまう。ここでは
+        // 「存在するのに型が違う」ことを確認できた場合だけ拒否し、存在しない（または存在確認自体が
+        // 権限エラー等で判定不能な）パスは下の Files.size() に委ねて、そちらの分かりやすい
+        // IOException 由来メッセージを使わせる。
+        if (Files.exists(path) && !Files.isRegularFile(path)) {
             throw new ConfigException("batch config path is not a regular file: " + path);
         }
         // ファイル内容を格納する変数を宣言する
