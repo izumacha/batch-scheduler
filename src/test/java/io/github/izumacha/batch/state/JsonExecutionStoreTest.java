@@ -6,6 +6,8 @@ import io.github.izumacha.batch.model.JobStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -205,11 +207,48 @@ class JsonExecutionStoreTest {
     }
 
     @Test
-    void createsBaseDirIfAbsent(@TempDir Path dir) {
+    void constructorDoesNotCreateBaseDir(@TempDir Path dir) {
+        // 読み取り専用の list コマンドが副作用でディレクトリを作らないよう、
+        // コンストラクタはベースディレクトリを作成しないこと
         Path nested = dir.resolve("nested/store");
         assertFalse(Files.exists(nested));
         new JsonExecutionStore(nested);
+        assertFalse(Files.exists(nested));
+    }
+
+    @Test
+    void saveCreatesBaseDirIfAbsent(@TempDir Path dir) {
+        // 書き込み時（save）には保存先ディレクトリが自動的に作成されること
+        Path nested = dir.resolve("nested/store");
+        JsonExecutionStore store = new JsonExecutionStore(nested);
+        store.save(sampleRun("r1", Instant.parse("2024-01-01T00:00:00Z")));
         assertTrue(Files.isDirectory(nested));
+        assertTrue(Files.isRegularFile(nested.resolve("r1.json")));
+    }
+
+    @Test
+    void ensureBaseDirectoryCreatesDirAndFailsOnFileCollision(@TempDir Path dir) throws IOException {
+        // ensureBaseDirectory は保存先を作成し、既存の通常ファイルと衝突する場合は
+        // fail fast で UncheckedIOException を投げること（run コマンドの早期検証用）
+        Path nested = dir.resolve("nested/store");
+        new JsonExecutionStore(nested).ensureBaseDirectory();
+        assertTrue(Files.isDirectory(nested));
+
+        Path collision = dir.resolve("collision");
+        Files.writeString(collision, "not a directory");
+        JsonExecutionStore broken = new JsonExecutionStore(collision);
+        assertThrows(UncheckedIOException.class, broken::ensureBaseDirectory);
+    }
+
+    @Test
+    void findAllAndFindRecentReturnEmptyWithoutCreatingMissingDir(@TempDir Path dir) {
+        // ディレクトリ未存在でも読み取り系は空を返し、副作用で作成しないこと
+        // （読み取り専用の場所でも list コマンドが動作するための前提）
+        Path nested = dir.resolve("nested/store");
+        JsonExecutionStore store = new JsonExecutionStore(nested);
+        assertTrue(store.findAll().isEmpty());
+        assertTrue(store.findRecent(10).isEmpty());
+        assertFalse(Files.exists(nested));
     }
 
     @Test

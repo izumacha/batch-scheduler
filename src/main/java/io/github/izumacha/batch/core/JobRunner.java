@@ -13,9 +13,12 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -36,6 +39,13 @@ public final class JobRunner {
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
+    // タイムアウト時に子孫プロセスを掃引（列挙して強制終了）する最大回数。
+    // fork し続けるジョブが相手でも killTree が無限ループしないための上限。
+    private static final int MAX_KILL_SWEEPS = 10;
+    // 親プロセスを一時停止する kill コマンド自体の完了を待つ上限時間
+    private static final Duration KILL_COMMAND_TIMEOUT = Duration.ofSeconds(1);
+    // kill コマンド不在の警告を初回のみ出すためのフラグ（毎タイムアウトのログ洪水を防ぐ）
+    private static final AtomicBoolean KILL_UNAVAILABLE_LOGGED = new AtomicBoolean(false);
 
     // Attempt.message が「プレーンなメッセージ」か「キャプチャした出力の末尾」かを
     // 区別するための内部プレフィックス。Attempt 生成側と summarize の剥がし側で
@@ -245,12 +255,113 @@ public final class JobRunner {
         return Attempt.completed(exitCode, collector.tail());
     }
 
-    /** プロセスとその子孫プロセスをすべて強制終了する */
+    /**
+     * プロセスとその子孫プロセスをすべて強制終了する。
+     *
+     * <p>順序が重要: 子孫の列挙(descendants())は親が生きている間しか使えない
+     * （親が exit すると子は孤児化して親子関係を辿れなくなる）。さらに fork し
+     * 続けるジョブでは、列挙と kill の間に生まれた子が取り残される。そこで
+     * まず親へ SIGSTOP を送って「親自身の新たな fork」と「親の exit」の両方を
+     * 凍結し、子孫を列挙・強制終了してから、最後に親を強制終了する。
+     * SIGSTOP を送れない環境（kill コマンドが無い等）では凍結なしの
+     * ベストエフォート掃引にフォールバックする。子孫がさらに fork し続ける
+     * ケース（再帰的 fork）は凍結対象外のためベストエフォートに留まる。
+     */
     private static void killTree(Process process) {
-        // 子孫プロセスをすべて強制終了する
-        process.descendants().forEach(ProcessHandle::destroyForcibly);
-        // 親プロセス自身も強制終了する
-        process.destroyForcibly();
+        // SIGSTOP を実際に送れたかどうか（finally で SIGCONT を送るか判定するため、
+        // try の外で宣言し例外時も後始末で参照できるようにする）
+        boolean stopped = false;
+        try {
+            // 親がまだ生きている場合のみ一時停止を送る。既に死んで再利用された PID へ
+            // SIGSTOP を送ると無関係なプロセスを凍結してしまうため、直前に確認して
+            // その窓を最小化する（Process ハンドル経由の kill と違い外部 kill は
+            // PID の同一性を検証できない）
+            stopped = process.isAlive() && trySignal("-STOP", process.pid());
+            // 子孫を列挙して強制終了する。SIGKILL 済みの子は親が停止中のため回収されず
+            // ゾンビとして列挙され続けるので、「新しく見つかった PID が無くなったら完了」
+            // と判定する。fork し続ける子孫が居ても必ず有限で打ち切れるよう上限も設ける
+            Set<Long> killedPids = new HashSet<>();
+            for (int sweep = 0; sweep < MAX_KILL_SWEEPS; sweep++) {
+                // 現時点で親にぶら下がっている子孫のうち、まだ kill していないものを抽出する
+                List<ProcessHandle> fresh = process.descendants()
+                        .filter(handle -> killedPids.add(handle.pid()))
+                        .toList();
+                // 新顔がいなければ掃引完了
+                if (fresh.isEmpty()) {
+                    break;
+                }
+                // 新しく見つかった子孫をすべて強制終了する
+                fresh.forEach(ProcessHandle::destroyForcibly);
+            }
+        } finally {
+            // 子孫の列挙・強制終了の途中で想定外の例外が発生しても、親プロセスの
+            // 強制終了だけは必ず実行する（ここを取り逃すと元のバグ以上に確実な
+            // プロセスリークになるため、finally で保証する）。
+            // 最後に親プロセス自身を強制終了する（SIGKILL は SIGSTOP 中でも有効。
+            // ハンドル経由なので PID が再利用されていても無関係なプロセスは殺さない）
+            process.destroyForcibly();
+            // 万一 SIGSTOP が PID 再利用で無関係なプロセスに届いていた場合に備え、
+            // 同じ PID へ SIGCONT を送って凍結を解除する。本来の対象は直前の SIGKILL で
+            // 死んでいるため、対象が正しかった場合の SIGCONT は無害な空振りになる
+            if (stopped) {
+                trySignal("-CONT", process.pid());
+            }
+        }
+    }
+
+    /**
+     * 指定 PID へシグナルを送る（POSIX の kill コマンド経由、ベストエフォート）。
+     * Java 標準 API には SIGSTOP / SIGCONT を送る手段が無いため外部コマンドに委ねる。
+     * 送れなくても killTree はフォールバックで動くため、失敗は致命的ではない。
+     *
+     * @param signal kill コマンドへ渡すシグナル指定（例: "-STOP", "-CONT"）
+     * @param pid 送信先のプロセス ID
+     * @return kill コマンドを起動できた場合 true（シグナル送達の保証ではない）
+     */
+    private static boolean trySignal(String signal, long pid) {
+        try {
+            // kill コマンドを引数配列で起動する（シェルを介さないため引数の解釈事故がない）。
+            // 出力は不要なので /dev/null へ捨て、パイプの fd を JVM 側に残さない
+            Process kill = new ProcessBuilder("kill", signal, Long.toString(pid))
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectErrorStream(false)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            // 使わない標準入力パイプを閉じて fd を解放する
+            closeQuietly(kill.getOutputStream());
+            // kill コマンド自体がハングしないよう短い上限付きで終了を待つ。
+            // 呼び出し元スレッドが割り込み済み（タイムアウト後の cancel 経路）でも
+            // 待機を省略しないよう、InterruptedException を投げない spin 待ちを使う
+            long deadlineNanos = System.nanoTime() + KILL_COMMAND_TIMEOUT.toNanos();
+            while (kill.isAlive() && System.nanoTime() < deadlineNanos) {
+                // 短命コマンドの終了待ちなので CPU に軽いスピン待機で足りる
+                Thread.onSpinWait();
+            }
+            // 万一終わらなければ kill コマンドを強制終了して先へ進む
+            if (kill.isAlive()) {
+                kill.destroyForcibly();
+            }
+            return true;
+        } catch (IOException e) {
+            // kill コマンドが存在しない環境（例: Windows）では凍結をスキップして
+            // フォールバック掃引に任せる。毎タイムアウトで騒がないよう初回のみ WARNING で残す
+            if (KILL_UNAVAILABLE_LOGGED.compareAndSet(false, true)) {
+                LOGGER.warning("kill command unavailable; falling back to best-effort "
+                        + "process-tree kill without freezing the parent: " + e);
+            }
+            return false;
+        }
+    }
+
+    /** ストリームを例外を握り潰さずログだけ残して閉じる（後始末専用）。 */
+    private static void closeQuietly(java.io.OutputStream stream) {
+        try {
+            // ストリームを閉じて fd を解放する
+            stream.close();
+        } catch (IOException e) {
+            // 後始末の失敗は処理を止めるほどではないため FINE で痕跡だけ残す
+            LOGGER.fine("failed to close kill command stdin: " + e);
+        }
     }
 
     private static void joinQuietly(Thread t, Duration timeout) {

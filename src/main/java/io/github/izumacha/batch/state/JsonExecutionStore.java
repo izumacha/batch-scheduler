@@ -76,6 +76,20 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // Tolerate fields written by newer versions (forward compatibility).
                 // 未知のフィールドがあっても例外を投げず無視する（上位互換性のため）
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        // 注: ここでベースディレクトリは作成しない。コンストラクタで作成すると
+        // 読み取り専用の list コマンドまで副作用でディレクトリを作ってしまい、
+        // findAll / findRecent の「ディレクトリ未存在なら空を返す」分岐にも
+        // 到達できなくなるため、作成は save() / ensureBaseDirectory() に限定する。
+    }
+
+    /**
+     * ベースディレクトリを作成・検証する（存在すれば何もしない）。
+     * 書き込みを伴うコマンドが実行前に保存先の使用可否を早期確認（fail fast）
+     * したい場合に明示的に呼ぶ。読み取り専用の利用では呼ばないこと。
+     *
+     * @throws UncheckedIOException 作成に失敗した場合（例: 既存ファイルと衝突・権限不足）
+     */
+    public void ensureBaseDirectory() {
         try {
             // ベースディレクトリが存在しない場合は再帰的に作成する
             Files.createDirectories(baseDir);
@@ -96,9 +110,9 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (result.runId() == null || result.runId().isBlank()) {
             throw new IllegalArgumentException("result.runId must not be null or blank");
         }
+        // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）
+        ensureBaseDirectory();
         try {
-            // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）
-            Files.createDirectories(baseDir);
             // runId から書き込み先のファイルパスを計算する
             Path target = fileFor(result.runId());
             // Write to a temp file in the same directory, then move atomically
