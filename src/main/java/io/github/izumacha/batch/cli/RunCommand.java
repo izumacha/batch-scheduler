@@ -73,8 +73,10 @@ public final class RunCommand implements Callable<Integer> {
             // ジョブを 1 つも実行する前に保存先ディレクトリを作成・検証する（fail fast）。
             // 使えない --state-dir（例: 既存の通常ファイル）を実行後に発見すると、
             // ジョブは走ったのに記録が残らず、終了コード 3 が本来のバッチ結果を
-            // 覆い隠してしまうため、先にストアを構築して早期に失敗させる
+            // 覆い隠してしまうため、先にストアを構築し保存先を明示的に作成・検証する
+            // （コンストラクタはディレクトリを作らないため、書き込み系のここでだけ呼ぶ）
             store = new JsonExecutionStore(stateDir);
+            store.ensureBaseDirectory();
         } catch (RuntimeException e) {
             // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
             Throwable cause = e.getCause();
