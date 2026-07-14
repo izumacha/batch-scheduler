@@ -215,4 +215,30 @@ class BatchConfigLoaderTest {
         assertTrue(ex.getMessage().contains("too large"),
                 "message should explain the size limit, was: " + ex.getMessage());
     }
+
+    @Test
+    void nonRegularFilePathIsRejected(@TempDir Path dir) {
+        // A directory is not a regular file; Files.size()/Files.readString() would
+        // either throw an unrelated IOException or behave in a confusing way. The
+        // regular-file guard must reject it up front with a clear message, before
+        // ever calling Files.size() (which is meaningless for special files).
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.load(dir));
+        assertTrue(ex.getMessage().contains("not a regular file"),
+                "message should explain the rejection reason, was: " + ex.getMessage());
+    }
+
+    @Test
+    void characterDeviceIsRejectedEvenThoughItsSizeIsZero() {
+        // Regression test for the TOCTOU this guard closes: Files.size("/dev/null")
+        // reports 0, which would have silently passed the old size-only check even
+        // though reading it is unbounded/blocking for some device files (e.g.
+        // /dev/zero). The regular-file guard must reject it before Files.size() is
+        // ever consulted. Linux-only; CI runs on ubuntu-latest (see .github/workflows).
+        Path devNull = Path.of("/dev/null");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                Files.exists(devNull), "requires /dev/null (Linux/macOS)");
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.load(devNull));
+        assertTrue(ex.getMessage().contains("not a regular file"),
+                "message should explain the rejection reason, was: " + ex.getMessage());
+    }
 }

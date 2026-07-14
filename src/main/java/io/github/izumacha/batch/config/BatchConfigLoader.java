@@ -79,6 +79,23 @@ public final class BatchConfigLoader {
         if (path == null) {
             throw new ConfigException("config path must not be null");
         }
+        // Reject anything that is not a regular file (FIFOs, character devices,
+        // directories, ...) before touching its size or contents. Files.size()
+        // is not meaningful for special files (e.g. it reports 0 for /dev/zero,
+        // silently bypassing the MAX_CONFIG_BYTES guard below), and a
+        // FIFO/character device can block or stream unboundedly on read,
+        // defeating the "bounded parsing" invariant even though the size check
+        // itself passed. Batch config files have no legitimate reason to be
+        // anything other than a regular file.
+        // 通常ファイル以外（FIFO・キャラクタデバイス・ディレクトリ等）は、サイズ確認や読み込みを
+        // 行う前に拒否する。Files.size() は特殊ファイルに対して意味を持たず
+        // （例えば /dev/zero では 0 を返し、直後の MAX_CONFIG_BYTES チェックをすり抜けてしまう）、
+        // FIFO/キャラクタデバイスは読み込み時に無制限にブロック・ストリームしうるため、
+        // サイズチェックが通過していても「有界なパース」という不変条件が崩れる。
+        // バッチ設定ファイルが通常ファイル以外である正当な理由はない。
+        if (!Files.isRegularFile(path)) {
+            throw new ConfigException("batch config path is not a regular file: " + path);
+        }
         // ファイル内容を格納する変数を宣言する
         String content;
         try {
