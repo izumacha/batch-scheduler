@@ -180,4 +180,63 @@ class JobRunnerTest {
         assertEquals(1, r.attempts(),
                 "should stop after the interrupted attempt, not spin through all retries");
     }
+
+    @Test
+    void timeoutKillsDescendantsOfForkingJob() throws Exception {
+        // fork し続けるジョブがタイムアウトした際に、子孫プロセスが孤児として
+        // 取り残されないことを検証する。修正前(子孫→親の順で kill)は、列挙と
+        // kill の間に親が生み続けた子が大量に生き残っていた。
+        // 子の PID を一時ファイルへ記録し、実行後に全 PID の死亡を確認する。
+        java.nio.file.Path pidFile = java.nio.file.Files.createTempFile("jobrunner-pids", ".txt");
+        try {
+            // 300 秒眠る子を全速力で fork し続けるスクリプト(タイムアウトは 1 秒)
+            String script = "while :; do sleep 300 & echo $! >> \"$PID_FILE\"; done";
+            Job forker = new Job("forker", null, List.of("sh", "-c", script),
+                    List.of(), 0, 1, Map.of("PID_FILE", pidFile.toString()), null);
+            JobResult r = fastRunner().run(forker);
+            // タイムアウトで失敗扱いになること
+            assertEquals(JobStatus.FAILED, r.status());
+
+            // 記録された子 PID を読み出す(少なくとも 1 つは fork されているはず)
+            List<Long> pids = java.nio.file.Files.readAllLines(pidFile).stream()
+                    .filter(line -> !line.isBlank())
+                    .map(Long::parseLong)
+                    .toList();
+            assertFalse(pids.isEmpty(), "the forking job should have spawned children");
+
+            // すべての子がタイムアウト kill の後まもなく死んでいること(猶予 5 秒)
+            long deadlineNanos = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            for (Long pid : pids) {
+                while (isRunning(pid)) {
+                    assertTrue(System.nanoTime() < deadlineNanos,
+                            "child process " + pid + " leaked after timeout kill");
+                    Thread.sleep(50);
+                }
+            }
+        } finally {
+            // 一時ファイルを後始末する
+            java.nio.file.Files.deleteIfExists(pidFile);
+        }
+    }
+
+    /** PID のプロセスが実際に実行中かどうかを判定する(終了済み・未回収のゾンビは「死亡」扱い)。 */
+    private static boolean isRunning(long pid) {
+        // プロセスハンドルが取得できない・isAlive が false なら確実に死んでいる
+        var handle = ProcessHandle.of(pid);
+        if (handle.isEmpty() || !handle.get().isAlive()) {
+            return false;
+        }
+        // コンテナ環境では PID 1 が孤児ゾンビを回収しないことがあり、
+        // ProcessHandle.isAlive() はゾンビ(終了済み・未回収)にも true を返す。
+        // Linux では /proc の状態フィールドで ゾンビ(Z)/死亡(X) を除外する。
+        try {
+            String stat = java.nio.file.Files.readString(java.nio.file.Path.of("/proc/" + pid + "/stat"));
+            // コマンド名は括弧で囲まれるため、最後の ")" の 2 文字後が状態フィールド
+            char state = stat.charAt(stat.lastIndexOf(')') + 2);
+            return state != 'Z' && state != 'X';
+        } catch (java.io.IOException | IndexOutOfBoundsException e) {
+            // /proc が読めない環境では isAlive の判定に従う(過剰検出側に倒す)
+            return true;
+        }
+    }
 }

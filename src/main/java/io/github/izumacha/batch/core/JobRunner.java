@@ -36,6 +36,11 @@ public final class JobRunner {
     private static final Duration DEFAULT_RETRY_BACKOFF = Duration.ofSeconds(1);
     // プロセス終了後に出力リーダースレッドが終了するのを待つ最大時間
     private static final Duration READER_JOIN_TIMEOUT = Duration.ofSeconds(5);
+    // タイムアウト時に子孫プロセスを掃引（列挙して強制終了）する最大回数。
+    // fork し続けるジョブが相手でも killTree が無限ループしないための上限。
+    private static final int MAX_KILL_SWEEPS = 10;
+    // 親プロセスを一時停止する kill コマンド自体の完了を待つ上限時間
+    private static final Duration KILL_COMMAND_TIMEOUT = Duration.ofSeconds(1);
 
     // Attempt.message が「プレーンなメッセージ」か「キャプチャした出力の末尾」かを
     // 区別するための内部プレフィックス。Attempt 生成側と summarize の剥がし側で
@@ -245,12 +250,58 @@ public final class JobRunner {
         return Attempt.completed(exitCode, collector.tail());
     }
 
-    /** プロセスとその子孫プロセスをすべて強制終了する */
+    /**
+     * プロセスとその子孫プロセスをすべて強制終了する。
+     *
+     * <p>順序が重要: 子孫の列挙(descendants())は親が生きている間しか使えない
+     * （親が exit すると子は孤児化して親子関係を辿れなくなる）。さらに fork し
+     * 続けるジョブでは、列挙と kill の間に生まれた子が取り残される。そこで
+     * まず親へ SIGSTOP を送って「新たな fork」と「親の exit」の両方を凍結し、
+     * 子孫一覧が安定した状態で列挙・強制終了してから、最後に親を強制終了する。
+     * SIGSTOP を送れない環境（kill コマンドが無い等）では凍結なしの
+     * ベストエフォート掃引にフォールバックする。
+     */
     private static void killTree(Process process) {
-        // 子孫プロセスをすべて強制終了する
-        process.descendants().forEach(ProcessHandle::destroyForcibly);
-        // 親プロセス自身も強制終了する
+        // 親を一時停止して fork の発生源と exit の両方を凍結する（ベストエフォート）
+        trySignalStop(process.pid());
+        // 子孫を列挙して強制終了する。fork し続ける子孫が居ても必ず有限で
+        // 打ち切れるよう、列挙が空になるか上限回数に達するまで掃引を繰り返す
+        for (int sweep = 0; sweep < MAX_KILL_SWEEPS; sweep++) {
+            // 現時点で親にぶら下がっている子孫プロセスの一覧を取得する
+            List<ProcessHandle> descendants = process.descendants().toList();
+            // 子孫がいなければ掃引完了
+            if (descendants.isEmpty()) {
+                break;
+            }
+            // 見つかった子孫をすべて強制終了する
+            descendants.forEach(ProcessHandle::destroyForcibly);
+        }
+        // 最後に親プロセス自身を強制終了する（SIGKILL は SIGSTOP 中でも有効）
         process.destroyForcibly();
+    }
+
+    /**
+     * 指定 PID へ SIGSTOP を送って一時停止を試みる（POSIX の kill コマンド経由）。
+     * Java 標準 API には停止シグナルを送る手段が無いため外部コマンドに委ねる。
+     * 送れなくても killTree はフォールバックで動くため、失敗は致命的ではない。
+     */
+    private static void trySignalStop(long pid) {
+        try {
+            // kill コマンドを引数配列で起動する（シェルを介さないため引数の解釈事故がない）
+            Process kill = new ProcessBuilder("kill", "-STOP", Long.toString(pid)).start();
+            // kill コマンド自体がハングしないよう短い上限付きで終了を待つ
+            if (!kill.waitFor(KILL_COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                // 万一終わらなければ kill コマンドを強制終了して先へ進む
+                kill.destroyForcibly();
+            }
+        } catch (IOException e) {
+            // kill コマンドが存在しない環境（例: Windows）では凍結をスキップして
+            // フォールバック掃引に任せる。silent にせず FINE レベルで痕跡を残す
+            LOGGER.fine("SIGSTOP unavailable, falling back to best-effort kill sweep: " + e);
+        } catch (InterruptedException e) {
+            // 待機中に割り込まれた場合は割り込みフラグを復元して先へ進む
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static void joinQuietly(Thread t, Duration timeout) {
