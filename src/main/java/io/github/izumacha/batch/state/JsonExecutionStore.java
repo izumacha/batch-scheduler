@@ -37,6 +37,22 @@ public final class JsonExecutionStore implements ExecutionStore {
     /** Fixed temp-file prefix; must be >= 3 chars for {@link Files#createTempFile}. */
     // 一時ファイルのプレフィックス（createTempFile は 3 文字以上必要）
     private static final String TMP_PREFIX = "run-";
+    /**
+     * Absolute safety ceiling for unbounded list retrieval ({@link #findAll()}
+     * and {@link #findRecent} with {@code limit <= 0}), so a pathologically
+     * large state directory cannot force an unbounded full-content parse even
+     * when the caller explicitly asked for "no limit" (CLI {@code list
+     * --limit 0}). batch-scheduler accumulates one file per run over the
+     * tool's lifetime (§ CLAUDE.md: intended for repeated/CI invocation), so
+     * a long-lived state directory can grow far larger than any interactive
+     * "show me everything" request actually needs. This ceiling is far above
+     * any realistic usage and only changes behavior in that pathological
+     * case -- it is a circuit breaker, not a user-facing cap.
+     */
+    // 「上限なし」（findAll / findRecent(limit<=0)）の絶対的な安全上限。長期運用で
+    // .batch-state に大量のファイルが蓄積した場合でも、内容の全文パースが無制限に
+    // ならないようにする（現実的な利用規模を大きく超えた場合のみ効くサーキットブレーカー）
+    static final int MAX_UNBOUNDED_RESULTS = 100_000;
 
     // JSON ファイルを保存するベースディレクトリのパスを保持するフィールド
     private final Path baseDir;
@@ -142,17 +158,31 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         // 読み込んだ実行結果を蓄積するリストを作成する
         List<ExecutionResult> results = new ArrayList<>();
+        // パース対象の候補パス（中身はまだ読まない。ファイル名一覧の取得は軽量なので先に全件集める）
+        List<Path> candidates;
         try (Stream<Path> files = Files.list(baseDir)) {
-            // ベースディレクトリ内のファイルをフィルタリングして処理する
-            files.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
+            // ベースディレクトリ内のファイルをフィルタリングして候補リストを作る
+            candidates = files
+                    .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
                     .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
-                    // 読み込み・パース・壊れたファイルの読み飛ばしは共通ヘルパー tryRead に委譲する
-                    .forEach(p -> tryRead(p).ifPresent(results::add));
+                    .toList();
         } catch (IOException e) {
             // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
                     "failed to list execution results under " + baseDir, e);
         }
+        // 候補が安全上限を超えている場合は、ファイル名（=時系列）の新しい順に絞り込んでから
+        // パースする（全件の内容パースによる資源枯渇を避ける。MAX_UNBOUNDED_RESULTS 参照）
+        if (candidates.size() > MAX_UNBOUNDED_RESULTS) {
+            LOGGER.warning("State directory " + baseDir + " has " + candidates.size()
+                    + " execution results, exceeding the unbounded-list safety ceiling ("
+                    + MAX_UNBOUNDED_RESULTS + "); returning only the " + MAX_UNBOUNDED_RESULTS
+                    + " most recent by filename. Use 'list --limit N' for a bounded view.");
+            candidates = keepMostRecentByFilename(candidates, MAX_UNBOUNDED_RESULTS);
+        }
+        // 絞り込んだ候補だけを実際にパースする（読み込み・パース・壊れたファイルの読み飛ばしは
+        // 共通ヘルパー tryRead に委譲する）
+        candidates.forEach(p -> tryRead(p).ifPresent(results::add));
         // 結果を開始日時の降順（最新順）に並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         // 並べ替え済みのリストを返す
@@ -201,17 +231,16 @@ public final class JsonExecutionStore implements ExecutionStore {
             candidates = files
                     .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
                     .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
-                    // runId が "yyyyMMdd-HHmmss-XXXXXX" 形式で辞書順=時系列順になることを利用し、
-                    // ファイル名の降順（新しい実行が先頭）だけで並べ替える。中身を読まずに絞り込める
-                    .sorted(Comparator.comparing((Path p) -> p.getFileName().toString()).reversed())
-                    // 降順に並んだ先頭から limit 件だけを候補として残す
-                    .limit(limit)
                     .toList();
         } catch (IOException e) {
             // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
                     "failed to list execution results under " + baseDir, e);
         }
+        // runId が "yyyyMMdd-HHmmss-XXXXXX" 形式で辞書順=時系列順になることを利用し、
+        // ファイル名の降順（新しい実行が先頭）だけで limit 件に絞り込む。中身を読まずに絞り込める
+        // （findAll の安全上限絞り込みと同じヘルパーを再利用。§6 DRY）
+        candidates = keepMostRecentByFilename(candidates, limit);
         // 絞り込んだ候補ファイルだけを実際にパースする（全件パースを避けて資源枯渇を防ぐ）。
         // 読み込み・パース・壊れたファイルの読み飛ばしは findAll と共通のヘルパー tryRead に委譲する
         List<ExecutionResult> results = new ArrayList<>();
@@ -222,6 +251,27 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         return results;
+    }
+
+    /**
+     * Keeps only the {@code ceiling} entries of {@code candidates} with the
+     * lexicographically largest filename, relying on the {@code runId}
+     * filename format ({@code yyyyMMdd-HHmmss-<hex>}) sorting in chronological
+     * order -- so "largest filename" means "most recent". Pure path-string
+     * comparison with no filesystem I/O, so it is unit-testable without
+     * creating any files. Shared by {@link #findAll} (safety-ceiling
+     * truncation) and {@link #findRecent} (limit truncation).
+     */
+    static List<Path> keepMostRecentByFilename(List<Path> candidates, int ceiling) {
+        // 既にちょうど収まっている場合はソートせずそのまま返す（無駄な比較を避ける）
+        if (candidates.size() <= ceiling) {
+            return candidates;
+        }
+        // ファイル名の降順（新しい実行が先頭）に並べ替えてから先頭 ceiling 件だけを残す
+        return candidates.stream()
+                .sorted(Comparator.comparing((Path p) -> p.getFileName().toString()).reversed())
+                .limit(ceiling)
+                .toList();
     }
 
     /**

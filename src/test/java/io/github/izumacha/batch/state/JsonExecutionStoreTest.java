@@ -267,4 +267,44 @@ class JsonExecutionStoreTest {
         assertEquals("run2", recent.get(0).runId());
         assertEquals("run0", recent.get(1).runId());
     }
+
+    @Test
+    void keepMostRecentByFilenameReturnsAllWhenUnderOrAtCeiling() {
+        // ちょうど ceiling 件、および ceiling 未満の件数はソートせずそのまま返る（境界値）
+        List<Path> two = List.of(Path.of("b.json"), Path.of("a.json"));
+        assertEquals(two, JsonExecutionStore.keepMostRecentByFilename(two, 2));
+        assertEquals(two, JsonExecutionStore.keepMostRecentByFilename(two, 10));
+    }
+
+    @Test
+    void keepMostRecentByFilenameTruncatesToNewestByLexicographicOrder() {
+        // ファイル I/O なしで、100,000 件規模でも一瞬で検証できる純粋ロジックのテスト。
+        // runId は "yyyyMMdd-HHmmss-XXXXXX" 形式のため辞書順=時系列順になる前提を模して、
+        // ゼロ埋め連番のファイル名で新しい順（大きい番号が先頭）に切り詰められることを確認する
+        List<Path> candidates = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            candidates.add(Path.of(String.format("run-%02d.json", i)));
+        }
+
+        List<Path> kept = JsonExecutionStore.keepMostRecentByFilename(candidates, 3);
+
+        assertEquals(
+                List.of(Path.of("run-09.json"), Path.of("run-08.json"), Path.of("run-07.json")),
+                kept);
+    }
+
+    @Test
+    void findAllReturnsAllWhenUnderTheSafetyCeiling(@TempDir Path dir) {
+        // MAX_UNBOUNDED_RESULTS 件そのものを実ファイルで作って超過させるのはテスト実行時間の
+        // 観点で非現実的なため、切り詰めロジック自体は keepMostRecentByFilename の単体テストで
+        // 純粋ロジックとしてカバーする。ここでは findAll() が通常時（上限未満）に全件をそのまま
+        // 返す既存契約を壊していないことだけを回帰確認する。
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        for (int i = 0; i < 5; i++) {
+            store.save(sampleRun("run" + i, base.plus(i, ChronoUnit.DAYS)));
+        }
+
+        assertEquals(5, store.findAll().size());
+    }
 }
