@@ -268,35 +268,44 @@ public final class JobRunner {
      * ケース（再帰的 fork）は凍結対象外のためベストエフォートに留まる。
      */
     private static void killTree(Process process) {
-        // 親がまだ生きている場合のみ一時停止を送る。既に死んで再利用された PID へ
-        // SIGSTOP を送ると無関係なプロセスを凍結してしまうため、直前に確認して
-        // その窓を最小化する（Process ハンドル経由の kill と違い外部 kill は
-        // PID の同一性を検証できない）
-        boolean stopped = process.isAlive() && trySignal("-STOP", process.pid());
-        // 子孫を列挙して強制終了する。SIGKILL 済みの子は親が停止中のため回収されず
-        // ゾンビとして列挙され続けるので、「新しく見つかった PID が無くなったら完了」
-        // と判定する。fork し続ける子孫が居ても必ず有限で打ち切れるよう上限も設ける
-        Set<Long> killedPids = new HashSet<>();
-        for (int sweep = 0; sweep < MAX_KILL_SWEEPS; sweep++) {
-            // 現時点で親にぶら下がっている子孫のうち、まだ kill していないものを抽出する
-            List<ProcessHandle> fresh = process.descendants()
-                    .filter(handle -> killedPids.add(handle.pid()))
-                    .toList();
-            // 新顔がいなければ掃引完了
-            if (fresh.isEmpty()) {
-                break;
+        // SIGSTOP を実際に送れたかどうか（finally で SIGCONT を送るか判定するため、
+        // try の外で宣言し例外時も後始末で参照できるようにする）
+        boolean stopped = false;
+        try {
+            // 親がまだ生きている場合のみ一時停止を送る。既に死んで再利用された PID へ
+            // SIGSTOP を送ると無関係なプロセスを凍結してしまうため、直前に確認して
+            // その窓を最小化する（Process ハンドル経由の kill と違い外部 kill は
+            // PID の同一性を検証できない）
+            stopped = process.isAlive() && trySignal("-STOP", process.pid());
+            // 子孫を列挙して強制終了する。SIGKILL 済みの子は親が停止中のため回収されず
+            // ゾンビとして列挙され続けるので、「新しく見つかった PID が無くなったら完了」
+            // と判定する。fork し続ける子孫が居ても必ず有限で打ち切れるよう上限も設ける
+            Set<Long> killedPids = new HashSet<>();
+            for (int sweep = 0; sweep < MAX_KILL_SWEEPS; sweep++) {
+                // 現時点で親にぶら下がっている子孫のうち、まだ kill していないものを抽出する
+                List<ProcessHandle> fresh = process.descendants()
+                        .filter(handle -> killedPids.add(handle.pid()))
+                        .toList();
+                // 新顔がいなければ掃引完了
+                if (fresh.isEmpty()) {
+                    break;
+                }
+                // 新しく見つかった子孫をすべて強制終了する
+                fresh.forEach(ProcessHandle::destroyForcibly);
             }
-            // 新しく見つかった子孫をすべて強制終了する
-            fresh.forEach(ProcessHandle::destroyForcibly);
-        }
-        // 最後に親プロセス自身を強制終了する（SIGKILL は SIGSTOP 中でも有効。
-        // ハンドル経由なので PID が再利用されていても無関係なプロセスは殺さない）
-        process.destroyForcibly();
-        // 万一 SIGSTOP が PID 再利用で無関係なプロセスに届いていた場合に備え、
-        // 同じ PID へ SIGCONT を送って凍結を解除する。本来の対象は直前の SIGKILL で
-        // 死んでいるため、対象が正しかった場合の SIGCONT は無害な空振りになる
-        if (stopped) {
-            trySignal("-CONT", process.pid());
+        } finally {
+            // 子孫の列挙・強制終了の途中で想定外の例外が発生しても、親プロセスの
+            // 強制終了だけは必ず実行する（ここを取り逃すと元のバグ以上に確実な
+            // プロセスリークになるため、finally で保証する）。
+            // 最後に親プロセス自身を強制終了する（SIGKILL は SIGSTOP 中でも有効。
+            // ハンドル経由なので PID が再利用されていても無関係なプロセスは殺さない）
+            process.destroyForcibly();
+            // 万一 SIGSTOP が PID 再利用で無関係なプロセスに届いていた場合に備え、
+            // 同じ PID へ SIGCONT を送って凍結を解除する。本来の対象は直前の SIGKILL で
+            // 死んでいるため、対象が正しかった場合の SIGCONT は無害な空振りになる
+            if (stopped) {
+                trySignal("-CONT", process.pid());
+            }
         }
     }
 
