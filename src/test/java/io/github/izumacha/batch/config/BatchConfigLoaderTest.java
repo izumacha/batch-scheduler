@@ -225,6 +225,19 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void oversizedStringIsRejected() {
+        // loadFromString has no file to check the size of before reading (the
+        // caller already holds the whole string in memory), but it must still
+        // reject oversized content with the same explicit ConfigException as
+        // load(Path), instead of relying only on SnakeYAML's internal
+        // codePointLimit (which throws an unwrapped runtime exception).
+        String filler = "#".repeat(BatchConfigLoader.MAX_CONFIG_BYTES + 1);
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(filler));
+        assertTrue(ex.getMessage().contains("too large"),
+                "message should explain the size limit, was: " + ex.getMessage());
+    }
+
+    @Test
     void nonRegularFilePathIsRejected(@TempDir Path dir) {
         // A directory is not a regular file; Files.size()/Files.readString() would
         // either throw an unrelated IOException or behave in a confusing way. The

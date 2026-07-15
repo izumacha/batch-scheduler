@@ -10,6 +10,7 @@ import io.github.izumacha.batch.model.Batch;
 import org.yaml.snakeyaml.LoaderOptions;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -139,10 +140,28 @@ public final class BatchConfigLoader {
     /**
      * Parses YAML/JSON text directly into a {@link Batch}. Useful for tests.
      *
-     * @throws ConfigException if the content is malformed or describes an
-     *                         invalid batch
+     * @throws ConfigException if the content is too large or malformed, or
+     *                         describes an invalid batch
      */
     public Batch loadFromString(String content) {
+        // load(Path) はファイルを丸ごとメモリへ読む前に Files.size() でサイズを
+        // 拒否するが、loadFromString は呼び出し側が既に文字列をメモリ上に持っている
+        // ため「読む前」の防御はできない。それでも、この後の(再帰下降の)パース処理に
+        // 進む前に明示的にサイズを拒否することで、load(Path) と同じ「4 MiB 上限は
+        // 必ず先に効く」という契約を保つ。SnakeYAML 側の codePointLimit も内部的な
+        // 保険として効くが、その例外は ConfigException でラップされない生の実行時
+        // 例外であり、呼び出し側から見た契約が不安定になるため、ここで明示的に
+        // ConfigException として先に弾く。
+        if (content != null) {
+            // ファイル版と同じ「4 MiB」の意味に揃えるため、UTF-8 バイト数で比較する
+            // (Java の String.length() は UTF-16 コード単位数であり、"4 MiB" が
+            // 意味するバイト数とは一致しないため使わない)
+            long sizeBytes = content.getBytes(StandardCharsets.UTF_8).length;
+            if (sizeBytes > MAX_CONFIG_BYTES) {
+                throw new ConfigException("batch config is too large: <string>"
+                        + " (" + sizeBytes + " bytes, limit " + MAX_CONFIG_BYTES + ")");
+            }
+        }
         // 文字列を直接パースする（テストや組み込み用）。ソース名は "<string>" とする
         return parse(content, "<string>");
     }
