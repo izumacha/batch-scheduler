@@ -1,7 +1,6 @@
 package io.github.izumacha.batch.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.List;
 import java.util.Map;
@@ -25,7 +24,6 @@ import java.util.Map;
  * @param workingDir     working directory for the process; {@code null} inherits the launcher's
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-@JsonInclude(JsonInclude.Include.NON_DEFAULT)
 public record Job(
         String id,
         String name,
