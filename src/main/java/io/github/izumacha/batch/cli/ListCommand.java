@@ -37,16 +37,24 @@ public final class ListCommand implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        // 過去の実行結果リストを格納する変数を宣言する
-        List<ExecutionResult> runs;
+        // 表示上限ちょうどの件数しかない場合と、上限を超えて切り詰められた場合を区別するため、
+        // 実際に表示する件数より 1 件多く要求する（limit が Integer.MAX_VALUE 付近だと
+        // +1 でオーバーフローするので、その場合は加算しない＝実質「上限なし」として扱う）
+        int fetchLimit = (limit > 0 && limit < Integer.MAX_VALUE) ? limit + 1 : limit;
+        // 状態ディレクトリから読み込んだ実行結果リスト（切り詰め判定用に 1 件多い可能性がある）
+        List<ExecutionResult> fetched;
         try {
-            // 状態ディレクトリから最新順で最大 limit 件の実行記録を読み込む（limit<=0 は全件）
-            runs = new JsonExecutionStore(stateDir).findRecent(limit);
+            // 状態ディレクトリから最新順で最大 fetchLimit 件の実行記録を読み込む（limit<=0 は全件）
+            fetched = new JsonExecutionStore(stateDir).findRecent(fetchLimit);
         } catch (RuntimeException e) {
             // 読み込みに失敗した場合はエラーメッセージを標準エラーに出力して終了する
             System.err.println("error: failed to read run state: " + e.getMessage());
             return BatchCli.EXIT_CONFIG;
         }
+        // 実際に limit を超えて切り詰められたかどうか（+1 件多く取れた場合のみ真）
+        boolean truncated = limit > 0 && fetched.size() > limit;
+        // 画面に表示するのは常に limit 件まで（切り詰め判定用に多く取った 1 件は表示しない）
+        List<ExecutionResult> runs = truncated ? fetched.subList(0, limit) : fetched;
 
         // 実行記録が 1 件もない場合はその旨を出力して正常終了する
         if (runs.isEmpty()) {
@@ -71,9 +79,8 @@ public final class ListCommand implements Callable<Integer> {
                     CliFormat.instant(run.startedAt()),
                     CliFormat.duration(run.duration()));
         }
-        // 上限ちょうどまで表示した場合は、隠れた古い実行がある可能性を注記する。
-        // （runs は最大 limit 件なので、limit と同数なら切り詰められている可能性が高い）
-        if (limit > 0 && runs.size() == limit) {
+        // 実際に切り詰められた場合のみ、隠れた古い実行があることを注記する
+        if (truncated) {
             System.out.printf("%n(showing up to %d most recent runs; use --limit 0 to list all)%n",
                     limit);
         }
