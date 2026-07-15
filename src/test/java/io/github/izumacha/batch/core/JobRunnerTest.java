@@ -125,6 +125,20 @@ class JobRunnerTest {
     }
 
     @Test
+    void emptyCommandIsReportedAsFailureNotThrown() {
+        // Job itself does not reject an empty command list (only DependencyGraph.build()'s
+        // pre-flight validation does), so a Job constructed directly (bypassing that
+        // validation, as this test does) can reach JobRunner with command = List.of().
+        // ProcessBuilder(List.of()).start() throws ArrayIndexOutOfBoundsException, which must
+        // surface as a FAILED result rather than escaping run() as an uncaught exception.
+        Job j = new Job("emptycmd", null, List.of(), List.of(), 0, 0, Map.of(), null);
+        JobResult r = fastRunner().run(j);
+        assertEquals(JobStatus.FAILED, r.status());
+        assertEquals(JobResult.NO_EXIT_CODE, r.exitCode());
+        assertNotNull(r.message());
+    }
+
+    @Test
     void environmentVariableIsPassedToProcess() {
         Job j = new Job("env", null, List.of("sh", "-c", "test \"$MY_VAR\" = hello"),
                 List.of(), 0, 0, Map.of("MY_VAR", "hello"), null);

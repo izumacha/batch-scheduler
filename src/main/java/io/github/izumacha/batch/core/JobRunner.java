@@ -158,6 +158,16 @@ public final class JobRunner {
     }
 
     private Attempt runOnce(Job job) {
+        // 空コマンドは通常 DependencyGraph.build() の事前検証（"has an empty command"）で
+        // 弾かれるが、Job レコード自身はこの不変条件を強制していないため、検証を経由せず
+        // JobRunner に直接渡す呼び出し元（テスト等）では素通りしうる。空リストのまま
+        // ProcessBuilder(job.command()).start() を呼ぶと ArrayIndexOutOfBoundsException が
+        // 発生し、これは下の catch（IllegalArgumentException / IOException）では捕捉できず、
+        // 「ジョブの失敗時に例外は投げず常に終端 JobResult を返す」という本クラスの契約を
+        // 破って呼び出し元まで伝播してしまう。よってここで起動失敗として明示的に扱う
+        if (job.command().isEmpty()) {
+            return Attempt.failedToStart("failed to start: command is empty (job '" + job.id() + "')");
+        }
         // ジョブのコマンドリストを使って ProcessBuilder を生成する
         ProcessBuilder pb = new ProcessBuilder(job.command());
         // 標準エラーを標準出力にマージする（まとめて一つのストリームとして読める）
