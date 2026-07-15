@@ -68,6 +68,25 @@ class ListCommandTest {
     }
 
     @Test
+    void limitExactlyMatchingRunCountOmitsFooter(@TempDir Path dir) {
+        // 保存件数がちょうど limit と同数のとき、切り詰めは実際には発生していないので
+        // フッターを出してはいけない（regression: 以前は runs.size() == limit だけで
+        // 判定しており、「全件がちょうど limit 件」と「limit を超えて切り詰められた」を
+        // 区別できず、常に誤ってフッターを表示していた）。
+        Instant base = Instant.parse("2024-01-01T00:00:00Z");
+        seed(dir, "run-a", base);
+        seed(dir, "run-b", base.plus(1, ChronoUnit.DAYS));
+
+        // 保存件数と同じ上限 2 件で実行する
+        String out = runListCapturingStdout("list", "--state-dir", dir.toString(), "--limit", "2");
+
+        // 2 件とも表示されるが、隠れた実行は無いのでフッターは出ない
+        assertTrue(out.contains("run-a"), out);
+        assertTrue(out.contains("run-b"), out);
+        assertFalse(out.contains("--limit 0 to list all"), out);
+    }
+
+    @Test
     void zeroLimitListsAllWithoutFooter(@TempDir Path dir) {
         Instant base = Instant.parse("2024-01-01T00:00:00Z");
         seed(dir, "run-a", base);

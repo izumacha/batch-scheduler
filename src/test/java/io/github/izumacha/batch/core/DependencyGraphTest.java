@@ -184,6 +184,23 @@ class DependencyGraphTest {
     }
 
     @Test
+    void duplicateDeclarationsOwnErrorsAreStillReported() {
+        // 重複 ID の「2 件目」に固有のエラー（今回は不明な依存）があっても、
+        // "duplicate job id" とは別にきちんと検出されることを確認する（regression:
+        // 以前は重複 ID の 2 件目以降を丸ごとスキップしており、renaming 後の再検証まで
+        // このエラーが表面化しなかった＝全エラーを一度に集約する DESIGN.md の約束に違反していた）。
+        Job dupA1 = new Job("a", null, List.of("sh", "-c", "true"), List.of(), 0, 0, Map.of(), null);
+        Job dupA2 = new Job("a", null, List.of("sh", "-c", "true"), List.of("ghost"), 0, 0, Map.of(), null);
+        Batch batch = new Batch("dup-own-error", List.of(dupA1, dupA2));
+
+        ValidationException ex = assertThrows(ValidationException.class,
+                () -> DependencyGraph.build(batch));
+        List<String> errors = ex.errors();
+        assertTrue(errors.contains("duplicate job id: 'a'"), errors.toString());
+        assertTrue(errors.contains("job 'a' depends on unknown job 'ghost'"), errors.toString());
+    }
+
+    @Test
     void multipleErrorsAreAggregated() {
         // duplicate id 'a', empty command on 'b', unknown dep on 'c', self-dep on 'd'.
         Job dupA1 = new Job("a", null, List.of("sh", "-c", "true"), List.of(), 0, 0, Map.of(), null);

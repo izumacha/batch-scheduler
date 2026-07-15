@@ -105,10 +105,12 @@ public final class DependencyGraph {
         for (Job job : jobs) {
             // 現在のジョブの ID を取得する
             String id = job.id();
-            // 重複 ID は最初の宣言のみを対象にする
-            if (dependencies.containsKey(id)) {
-                continue;
-            }
+            // 重複 ID でも当該ジョブ自身の検証（空コマンド・自己依存・不明依存）は
+            // 以下で必ず実行する。DESIGN.md は「全エラーを一度に集約する」と約束しており、
+            // 重複した 2 件目以降の宣言に固有のエラーを検証せずスキップすると、1 回目の
+            // validate では見えなかったエラーが ID 重複を直してからの 2 回目で初めて
+            // 表面化してしまい、その約束を破る（issue: 重複ジョブの検証漏れ）。
+            // グラフ構築用マップへの登録だけは下の putIfAbsent で最初の宣言に限定する。
             // コマンドが空のジョブはエラーとして記録する
             if (job.command().isEmpty()) {
                 errors.add("job '" + id + "' has an empty command");
@@ -135,10 +137,13 @@ public final class DependencyGraph {
                 // 検証済みの依存 ID をセットに追加する
                 deps.add(dep);
             }
-            // このジョブの依存セットをマップに登録する
-            dependencies.put(id, deps);
-            // このジョブ本体を ID 引きできるように登録する（最初の宣言のみ、重複時は上と同様スキップ済み）
-            jobsById.put(id, job);
+            // putIfAbsent なら「まだ未登録のときだけ登録する」を 1 行で表現できる。
+            // 2 件目以降の重複宣言は id で上書きされず、上の検証だけを適用してこのジョブの
+            // deps は捨てられる（cycle 検出等は最初の宣言の依存関係のみを対象にすれば十分で、
+            // 重複 ID 自体は既に上のループでエラー済み）
+            dependencies.putIfAbsent(id, deps);
+            // このジョブ本体を ID 引きできるように登録する（同じく最初の宣言のみ）
+            jobsById.putIfAbsent(id, job);
         }
 
         // 循環検出は辺が有効であることが確認されてから行う
