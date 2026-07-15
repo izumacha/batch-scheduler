@@ -121,11 +121,8 @@ public final class BatchConfigLoader {
             // Reject oversized files before reading them whole into memory.
             // ファイルをメモリに読む前にサイズを確認して、大きすぎる場合は拒否する
             long size = Files.size(path);
-            // ファイルサイズが上限を超えている場合はエラーを投げる
-            if (size > MAX_CONFIG_BYTES) {
-                throw new ConfigException("batch config file is too large: " + path
-                        + " (" + size + " bytes, limit " + MAX_CONFIG_BYTES + ")");
-            }
+            // ファイルサイズが上限を超えている場合はエラーを投げる(ラベルは呼び出し元のパスそのもの)
+            rejectIfOversized(size, path.toString());
             // ファイル全体を文字列として読み込む
             content = Files.readString(path);
         } catch (IOException e) {
@@ -148,22 +145,44 @@ public final class BatchConfigLoader {
         // 拒否するが、loadFromString は呼び出し側が既に文字列をメモリ上に持っている
         // ため「読む前」の防御はできない。それでも、この後の(再帰下降の)パース処理に
         // 進む前に明示的にサイズを拒否することで、load(Path) と同じ「4 MiB 上限は
-        // 必ず先に効く」という契約を保つ。SnakeYAML 側の codePointLimit も内部的な
-        // 保険として効くが、その例外は ConfigException でラップされない生の実行時
-        // 例外であり、呼び出し側から見た契約が不安定になるため、ここで明示的に
-        // ConfigException として先に弾く。
+        // 必ず先に効く」という契約を保つ。
+        //
+        // SnakeYAML 側の codePointLimit(コンストラクタで MAX_CONFIG_BYTES と同値に
+        // 設定済み)は「コードポイント数」を数えるため、マルチバイト文字(例: 日本語)を
+        // 大量に含む文字列だと UTF-8 バイト数は 4 MiB を超えていてもコードポイント数は
+        // 上限未満のままで codePointLimit をすり抜けてしまう(この関数がここで
+        // 明示チェックする本質的な理由。単にエラーメッセージを分かりやすくするだけの
+        // 冗長チェックではない)。
         if (content != null) {
-            // ファイル版と同じ「4 MiB」の意味に揃えるため、UTF-8 バイト数で比較する
-            // (Java の String.length() は UTF-16 コード単位数であり、"4 MiB" が
-            // 意味するバイト数とは一致しないため使わない)
-            long sizeBytes = content.getBytes(StandardCharsets.UTF_8).length;
-            if (sizeBytes > MAX_CONFIG_BYTES) {
-                throw new ConfigException("batch config is too large: <string>"
-                        + " (" + sizeBytes + " bytes, limit " + MAX_CONFIG_BYTES + ")");
+            // まず String.length()(UTF-16 コード単位数)で安価に事前判定する。
+            // どの文字も UTF-8 エンコード後のバイト数は UTF-16 コード単位数以上になる
+            // (ASCII は 1 対 1、BMP の非ASCIIは 1 単位に2〜3バイト、サロゲートペアは
+            // 2 単位に4バイト)ため、length() が既に上限超過なら UTF-8 バイト数も
+            // 必ず超過している。極端に巨大な文字列を毎回フルエンコードしてから
+            // 判定する無駄(ピークメモリ・CPU の倍加)を避けられる。
+            if (content.length() > MAX_CONFIG_BYTES) {
+                // 事前判定だけで上限超過と確定できる場合は、正確なバイト数を
+                // 数えるためだけにエンコードせず、length() をそのまま報告する
+                rejectIfOversized((long) content.length(), "<string>");
             }
+            // ファイル版と同じ「4 MiB」の意味に揃えるため、UTF-8 バイト数で正確に比較する
+            long sizeBytes = content.getBytes(StandardCharsets.UTF_8).length;
+            rejectIfOversized(sizeBytes, "<string>");
         }
         // 文字列を直接パースする（テストや組み込み用）。ソース名は "<string>" とする
         return parse(content, "<string>");
+    }
+
+    // load(Path) と loadFromString の両方で使う、サイズ上限超過を拒否する共通処理。
+    // label は例外メッセージに表示する識別子(ファイルパス、または文字列入力なら "<string>")。
+    private static void rejectIfOversized(long sizeBytes, String label) {
+        // サイズが上限を超えていなければ何もしない(正常系)
+        if (sizeBytes <= MAX_CONFIG_BYTES) {
+            return;
+        }
+        // 上限を超えている場合は、識別子と実サイズ・上限値を含む ConfigException を投げる
+        throw new ConfigException("batch config is too large: " + label
+                + " (" + sizeBytes + " bytes, limit " + MAX_CONFIG_BYTES + ")");
     }
 
     private Batch parse(String content, String source) {
