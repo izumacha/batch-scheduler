@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -25,7 +26,7 @@ import java.util.stream.Stream;
  * document per run, named {@code <runId>.json}, under a base directory.
  *
  * <p>Instants are written as ISO-8601 strings (timestamps disabled) and reads
- * tolerate unparseable files by skipping them.
+ * tolerate missing, oversized, or unparseable files by skipping them.
  */
 public final class JsonExecutionStore implements ExecutionStore {
 
@@ -342,16 +343,30 @@ public final class JsonExecutionStore implements ExecutionStore {
             // Bound the parse the same way BatchConfigLoader bounds config
             // parsing: check the size before handing the file to Jackson, so
             // a single oversized record (see MAX_RECORD_BYTES) can never
-            // force an unbounded in-memory parse. Files.size() here is safe
-            // from symlink surprises: every caller of tryRead has already
-            // confirmed the path is a regular file via NOFOLLOW_LINKS before
-            // reaching this method (findById directly, findAll/findRecent via
-            // their Files.isRegularFile(..., NOFOLLOW_LINKS) candidate filter).
+            // force an unbounded in-memory parse. Every caller of tryRead has
+            // already confirmed the path is a regular file via NOFOLLOW_LINKS
+            // before reaching this method (findById directly, findAll/
+            // findRecent via their Files.isRegularFile(..., NOFOLLOW_LINKS)
+            // candidate filter) -- but that check and this one are two
+            // separate filesystem calls, so a NOFOLLOW_LINKS-respecting size
+            // read (rather than plain Files.size(), which always follows
+            // symlinks) keeps this method's own symlink-safety invariant
+            // self-contained instead of depending on the caller's earlier,
+            // separate check to still hold. If the path was swapped for a
+            // symlink in that window, this reports the link's own (tiny)
+            // size, not its target's, so it is never mistaken for oversized;
+            // the read just below still fails closed via NOFOLLOW_LINKS.
             // Jackson にファイルを渡す前にサイズを確認する（BatchConfigLoader と同じ
             // 「パース前にサイズを拒否する」防御）。呼び出し元は tryRead に渡す前に
-            // NOFOLLOW_LINKS で通常ファイルであることを確認済みのため、ここでの
-            // Files.size() がシンボリックリンクの実体を辿ってしまう心配はない
-            long size = Files.size(file);
+            // NOFOLLOW_LINKS で通常ファイルであることを確認済みだが、その確認とこの
+            // サイズ取得は別々のファイルシステム呼び出しのため、ここでも
+            // NOFOLLOW_LINKS を指定してこのメソッド単体でシンボリックリンク安全性を
+            // 完結させる（単純な Files.size() はシンボリックリンクを常に辿ってしまう）。
+            // この間にファイルがシンボリックリンクへ差し替えられていても、ここで
+            // 取得できるのはリンク自体の（小さい）サイズであり実体の大きさではないため
+            // 誤って「巨大」と判定されることはなく、直後の読み込みは NOFOLLOW_LINKS により
+            // 引き続き安全側に失敗する
+            long size = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).size();
             // サイズが上限を超えるファイルは壊れたファイルと同様に読み飛ばす
             if (size > MAX_RECORD_BYTES) {
                 LOGGER.warning("Skipping oversized execution result file '" + file + "' ("
