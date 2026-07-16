@@ -127,10 +127,33 @@ malicious resource exhaustion and against tampering with the state directory:
 - **Parallel execution** of independent jobs (run ready jobs concurrently while
   still honoring the DAG).
 - **Scheduling** (cron-style triggers) so batches can run unattended.
-- **Resume / rerun-failed** — re-run only the failed and skipped jobs of a prior
-  run.
 - **Pluggable stores** — alternative `ExecutionStore` implementations (database,
   object storage) behind the existing interface.
+
+`Resume / rerun-failed` has been implemented: `run --rerun-failed <runId>` loads
+the named prior `ExecutionResult` from the state directory and passes it to
+`BatchExecutor.execute(Batch, ExecutionResult)`. While executing in topological
+order, any job whose result in that prior run was `SUCCEEDED` is reused verbatim
+(not re-run) and used as-is when checking whether it blocks dependents; jobs that
+were `FAILED` or `SKIPPED`, and jobs present in the batch but absent from the
+prior result (newly added since), execute normally. This is a rerun, not an
+in-place resume: it always produces a fresh run id and a new persisted record
+covering every job in the batch, so the run history keeps a complete, independently
+inspectable record of each attempt.
+
+`execute` rejects (`IllegalArgumentException`, surfaced by `run` as a one-line
+`error:` message and exit `3`) a `priorResult` whose `batchName()` does not match
+the batch being run, so a `--rerun-failed` runId copy-pasted from an unrelated
+batch file — one that happens to share a job id with the batch actually being
+run, under the same shared `--state-dir` — cannot silently borrow that job's
+unrelated result. This guard is a best-effort mitigation, not a strong identity
+check: batch `name` is a human-chosen label with no uniqueness constraint (it
+defaults to `"batch"` when unset), so two distinct batch files that both happen
+to use the same name are not distinguished. Reuse also does not detect that a
+`SUCCEEDED` job's own definition (its `command`, `dependsOn`, `env`, etc.) has
+changed since the prior run — like the batch file's `command` entries
+themselves (see "Security & trust model" above), the operator issuing
+`--rerun-failed` is trusted to know that the jobs being reused are still valid.
 
 `Richer retry / backoff policies (e.g. exponential backoff, jitter)` has been
 implemented: `JobRunner` delegates delay computation to `RetryBackoffPolicy`,

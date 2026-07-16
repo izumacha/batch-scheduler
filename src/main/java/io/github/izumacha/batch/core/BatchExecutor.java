@@ -60,6 +60,43 @@ public final class BatchExecutor {
      * 個々のジョブの失敗は記録され、例外にはならない。
      */
     public ExecutionResult execute(Batch batch) {
+        // 再利用する前回結果が無い（＝全ジョブを新規実行する）通常実行に委譲する
+        return execute(batch, null);
+    }
+
+    /**
+     * バッチを実行する。{@code priorResult} が非 null の場合は「再実行（rerun-failed）」
+     * モードとして動作し、そこで {@link JobStatus#SUCCEEDED} だったジョブは再実行せず
+     * 前回の結果をそのまま採用する（docs/DESIGN.md Future extensions
+     * 「Resume / rerun-failed」に対応）。前回 FAILED/SKIPPED だったジョブや、
+     * 前回に存在しなかった新規ジョブは通常どおり実行する。
+     *
+     * <p>不正なバッチは最初のジョブが実行される前に
+     * {@link io.github.izumacha.batch.config.ValidationException} をスローする。
+     * {@code priorResult} が非 null かつ {@code batch.name()} と異なるバッチ名を持つ場合は
+     * 誤用（別バッチの結果の取り違え）として {@link IllegalArgumentException} をスローする。
+     * ただし同名バッチ同士の取り違えまでは検出できない（バッチ名は一意性を強制されない
+     * 人間向けラベルのため）。再実行対象のジョブ定義（コマンド・依存関係等）が前回実行時から
+     * 変更されていないかどうかも検証しない。運用者が同じ --state-dir を共有する複数バッチを
+     * 管理する場合や、成功済みジョブの定義を変更してから再実行する場合はこれらの残余リスクに
+     * 留意すること（docs/DESIGN.md 参照）。個々のジョブの失敗は記録され、例外にはならない。
+     *
+     * @param batch 実行するバッチ定義
+     * @param priorResult 再利用する前回の実行結果。{@code null} なら通常実行（全ジョブ新規実行）
+     */
+    public ExecutionResult execute(Batch batch, ExecutionResult priorResult) {
+        // rerun-failed モードで渡された前回結果が「別のバッチ」のものだと、たまたま一致した
+        // jobId の結果が無関係なバッチから紛れ込んで誤って流用されてしまう（例: 複数のバッチ
+        // 定義が同じ --state-dir を共有し、たまたま同じ job id を持つ場合）。バッチ名の一致を
+        // 最低限のガードとして早期に検証し、一致しなければ誤用として拒否する
+        // （§9 fail-closed: 不明なら拒否。同名バッチ同士の取り違えまでは検出できない残余
+        // リスクだが、docs/DESIGN.md に明記したうえで許容する）
+        if (priorResult != null && !batch.name().equals(priorResult.batchName())) {
+            throw new IllegalArgumentException(
+                    "priorResult belongs to a different batch ('" + priorResult.batchName()
+                            + "') than the one being executed ('" + batch.name()
+                            + "'); refusing to reuse its job results");
+        }
         // バッチを検証して依存グラフを構築する（不正なら ValidationException がスローされる）
         DependencyGraph graph = DependencyGraph.build(batch);
 
@@ -76,6 +113,13 @@ public final class BatchExecutor {
 
             // ジョブをトポロジカル順に実行する
             for (Job job : order) {
+                // rerun-failed モードで、このジョブが前回 SUCCEEDED していれば再実行せず
+                // 前回の結果をそのまま流用する（依存側のブロック判定にもこの結果を使う）
+                JobResult reused = reusablePriorResult(priorResult, job.id());
+                if (reused != null) {
+                    results.put(job.id(), reused);
+                    continue;
+                }
                 // このジョブをブロックしている依存ジョブがあるか確認する
                 String blockingDep = firstBlockingDependency(job, results);
                 // ブロックしている依存がある場合はジョブをスキップして結果を記録する
@@ -111,6 +155,22 @@ public final class BatchExecutor {
             throw new BatchExecutionException("unexpected error while executing batch '"
                     + batch.name() + "' (runId=" + runId + ")", e);
         }
+    }
+
+    /**
+     * rerun-failed モードで、指定ジョブを再実行せず流用できる前回結果を返す。
+     * 前回結果が無い（通常実行）・前回そのジョブが存在しなかった（新規ジョブ）・
+     * 前回 SUCCEEDED でなかった（FAILED/SKIPPED は再実行対象）場合は {@code null} を返す。
+     */
+    private static JobResult reusablePriorResult(ExecutionResult priorResult, String jobId) {
+        // 通常実行（priorResult が無い）なら流用しない
+        if (priorResult == null) {
+            return null;
+        }
+        // 前回結果からこのジョブ ID を検索し、SUCCEEDED だった場合のみ流用対象として返す
+        return priorResult.result(jobId)
+                .filter(JobResult::succeeded)
+                .orElse(null);
     }
 
     /**
