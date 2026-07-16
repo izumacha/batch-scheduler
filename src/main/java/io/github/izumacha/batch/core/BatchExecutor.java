@@ -110,12 +110,18 @@ public final class BatchExecutor {
             List<Job> order = graph.topologicalOrder();
             // ジョブ ID をキー、実行結果を値とするマップ（宣言順を保持）
             Map<String, JobResult> results = new LinkedHashMap<>();
+            // rerun-failed 用に前回結果を jobId で O(1) 参照できるようマップ化しておく。
+            // ExecutionResult#result(String) はジョブ結果リストをその都度線形走査するため、
+            // これをジョブごとの下のループ内で毎回呼ぶとバッチ全体では O(ジョブ数 × 前回結果数)
+            // に劣化する（DependencyGraph.topologicalOrder が batch.job(id) の線形走査を避けて
+            // jobsById を事前構築しているのと同じ理由でここも避ける。§8 パフォーマンス）
+            Map<String, JobResult> priorResultsById = indexPriorResults(priorResult);
 
             // ジョブをトポロジカル順に実行する
             for (Job job : order) {
                 // rerun-failed モードで、このジョブが前回 SUCCEEDED していれば再実行せず
                 // 前回の結果をそのまま流用する（依存側のブロック判定にもこの結果を使う）
-                JobResult reused = reusablePriorResult(priorResult, job.id());
+                JobResult reused = reusablePriorResult(priorResultsById, job.id());
                 if (reused != null) {
                     results.put(job.id(), reused);
                     continue;
@@ -158,19 +164,37 @@ public final class BatchExecutor {
     }
 
     /**
+     * {@code priorResult} のジョブ結果を jobId で O(1) 参照できるようマップ化する。
+     * {@code priorResult} が {@code null}（通常実行）の場合は空マップを返す。
+     *
+     * <p>前回結果は状態ディレクトリから読み込んだ、手動改変や破損の可能性がある入力
+     * （docs/DESIGN.md「State-directory safety」）であるため、同じ jobId が複数回
+     * 現れても例外にはせず、{@link ExecutionResult#result(String)}（最初に見つかった
+     * ものを返す）と同じ「最初の出現を採用する」挙動を {@code putIfAbsent} で踏襲する。
+     */
+    private static Map<String, JobResult> indexPriorResults(ExecutionResult priorResult) {
+        // 通常実行（priorResult が無い）なら空マップを返す
+        if (priorResult == null) {
+            return Map.of();
+        }
+        // 宣言（記録）順を保持しつつ jobId をキーにしたマップを組み立てる
+        Map<String, JobResult> byId = new LinkedHashMap<>();
+        for (JobResult r : priorResult.jobResults()) {
+            // 同じ jobId が重複していても最初の 1 件だけを登録する
+            byId.putIfAbsent(r.jobId(), r);
+        }
+        return byId;
+    }
+
+    /**
      * rerun-failed モードで、指定ジョブを再実行せず流用できる前回結果を返す。
      * 前回結果が無い（通常実行）・前回そのジョブが存在しなかった（新規ジョブ）・
      * 前回 SUCCEEDED でなかった（FAILED/SKIPPED は再実行対象）場合は {@code null} を返す。
      */
-    private static JobResult reusablePriorResult(ExecutionResult priorResult, String jobId) {
-        // 通常実行（priorResult が無い）なら流用しない
-        if (priorResult == null) {
-            return null;
-        }
-        // 前回結果からこのジョブ ID を検索し、SUCCEEDED だった場合のみ流用対象として返す
-        return priorResult.result(jobId)
-                .filter(JobResult::succeeded)
-                .orElse(null);
+    private static JobResult reusablePriorResult(Map<String, JobResult> priorResultsById, String jobId) {
+        // 前回結果マップからこのジョブ ID を検索し、SUCCEEDED だった場合のみ流用対象として返す
+        JobResult prior = priorResultsById.get(jobId);
+        return prior != null && prior.succeeded() ? prior : null;
     }
 
     /**
