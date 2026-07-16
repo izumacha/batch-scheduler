@@ -318,6 +318,21 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findRecentClampsLimitAboveUnboundedSafetyCeiling(@TempDir Path dir) {
+        // MAX_UNBOUNDED_RESULTS件そのものを実ファイルで作って超過させるのはテスト実行時間の
+        // 観点で非現実的なため（findAllReturnsAllWhenUnderTheSafetyCeilingと同じ理由）、
+        // ここでは「安全上限を超えるlimitを渡してもクラッシュせず、実際に保存された分だけが
+        // そのまま返る」ことを確認する回帰テストに留める。クランプ後の切り詰めロジック自体は
+        // keepMostRecentByFilenameTruncatesToNewestByLexicographicOrderで純粋ロジックとして
+        // カバー済み。
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("only", Instant.parse("2024-01-01T00:00:00Z")));
+
+        // 安全上限(100,000)を超えるlimitを渡しても、内部でクランプされ正常に動作する
+        assertEquals(1, store.findRecent(JsonExecutionStore.MAX_UNBOUNDED_RESULTS + 1).size());
+    }
+
+    @Test
     void findRecentSkipsUnparseableFileWithinWindow(@TempDir Path dir) throws Exception {
         // findRecent は候補ファイル名を絞り込んだ後に初めてパースするため、絞り込んだ
         // 少数件（limit 件）の中に壊れたファイルが混ざっていても読み飛ばせることを確認する

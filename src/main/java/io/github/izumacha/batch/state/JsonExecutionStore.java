@@ -270,6 +270,16 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (limit <= 0) {
             return findAll();
         }
+        // limitがMAX_UNBOUNDED_RESULTSを超える場合、findAllと同じ安全上限を適用する。
+        // ここでクランプしないと、呼び出し元が意図的か誤りかに関わらず巨大なlimit
+        // （例: CLIの`list --limit 200000`）を渡すだけでfindAll側の安全上限を回避でき、
+        // 状態ディレクトリに大量のファイルが蓄積した環境で無制限パースが再発してしまう
+        if (limit > MAX_UNBOUNDED_RESULTS) {
+            LOGGER.warning("Requested limit " + limit + " exceeds the unbounded-list safety "
+                    + "ceiling (" + MAX_UNBOUNDED_RESULTS + "); clamping to " + MAX_UNBOUNDED_RESULTS
+                    + ".");
+            limit = MAX_UNBOUNDED_RESULTS;
+        }
         // ベースディレクトリが存在しない場合は空リストを返す
         if (!Files.isDirectory(baseDir)) {
             return List.of();
