@@ -76,9 +76,15 @@ Jobs that were `SUCCEEDED` in that prior run are reused verbatim (their
 original result is copied into the new run, not re-executed); jobs that were
 `FAILED` or `SKIPPED`, and any job present in the batch file but absent from
 the prior run, run normally. The prior run id is looked up in the same
-`--state-dir`, so it must still be present there. This is a rerun, not a
-resume: it still produces a brand-new run id and a new persisted record
-covering every job in the batch.
+`--state-dir`, so it must still be present there, and it must belong to a run
+of a batch with the same `name` — a run id from a different batch is rejected
+(exit `3`) rather than silently borrowing an unrelated job's result. This is a
+rerun, not a resume: it still produces a brand-new run id and a new persisted
+record covering every job in the batch.
+
+`--rerun-failed` does not detect that a `SUCCEEDED` job's own definition
+(its `command`, `dependsOn`, etc.) changed since the prior run — like the rest
+of the batch file, you are trusted to only skip jobs you know are still valid.
 
 ## YAML schema
 

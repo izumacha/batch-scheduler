@@ -171,6 +171,22 @@ class BatchExecutorTest {
     }
 
     @Test
+    void rerunFailedRejectsPriorResultFromADifferentBatch() {
+        // 「other」という名前の別バッチの前回結果を用意する（たまたま同じ job id "a" を含む）。
+        Batch otherBatch = new Batch("other", List.of(ok("a", List.of())));
+        ExecutionResult otherPriorResult = executor().execute(otherBatch);
+        assertEquals(JobStatus.SUCCEEDED, otherPriorResult.status());
+
+        // 名前が異なる「mine」というバッチに対して、無関係な前回結果を rerun-failed で渡す。
+        Batch myBatch = new Batch("mine", List.of(ok("a", List.of())));
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> executor().execute(myBatch, otherPriorResult));
+        // 取り違えを検出したことがメッセージから分かるはず（両方のバッチ名を含む）。
+        assertTrue(ex.getMessage().contains("other") && ex.getMessage().contains("mine"),
+                ex.getMessage());
+    }
+
+    @Test
     void executeWithoutPriorResultBehavesLikeNormalExecute() {
         // priorResult に null を渡した場合は通常実行（execute(batch) と同じ挙動）になる。
         Batch batch = new Batch("plain", List.of(ok("a", List.of())));

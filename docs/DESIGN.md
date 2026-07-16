@@ -141,6 +141,20 @@ in-place resume: it always produces a fresh run id and a new persisted record
 covering every job in the batch, so the run history keeps a complete, independently
 inspectable record of each attempt.
 
+`execute` rejects (`IllegalArgumentException`, surfaced by `run` as a one-line
+`error:` message and exit `3`) a `priorResult` whose `batchName()` does not match
+the batch being run, so a `--rerun-failed` runId copy-pasted from an unrelated
+batch file — one that happens to share a job id with the batch actually being
+run, under the same shared `--state-dir` — cannot silently borrow that job's
+unrelated result. This guard is a best-effort mitigation, not a strong identity
+check: batch `name` is a human-chosen label with no uniqueness constraint (it
+defaults to `"batch"` when unset), so two distinct batch files that both happen
+to use the same name are not distinguished. Reuse also does not detect that a
+`SUCCEEDED` job's own definition (its `command`, `dependsOn`, `env`, etc.) has
+changed since the prior run — like the batch file's `command` entries
+themselves (see "Security & trust model" above), the operator issuing
+`--rerun-failed` is trusted to know that the jobs being reused are still valid.
+
 `Richer retry / backoff policies (e.g. exponential backoff, jitter)` has been
 implemented: `JobRunner` delegates delay computation to `RetryBackoffPolicy`,
 which grows the configured base delay exponentially per attempt (capped at

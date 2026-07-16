@@ -100,8 +100,19 @@ public final class RunCommand implements Callable<Integer> {
         // 指定した設定ミスをジョブ実行後ではなく fail fast で発見できる
         ExecutionResult priorResult = null;
         if (rerunFailedRunId != null) {
-            // 前回結果を runId で検索する（見つからなければ空の Optional）
-            priorResult = store.findById(rerunFailedRunId).orElse(null);
+            try {
+                // 前回結果を runId で検索する（見つからなければ空の Optional）。
+                // runId に "/"・"\"・".."・NUL 等が含まれる場合、findById が委譲する
+                // JsonExecutionStore.fileFor はパストラバーサル対策として
+                // IllegalArgumentException を投げる（他の失敗経路と同様この try で
+                // 捕捉し、スタックトレースを外部に出さず 1 行のエラーに変換する）
+                priorResult = store.findById(rerunFailedRunId).orElse(null);
+            } catch (IllegalArgumentException e) {
+                // runId の形式が不正な場合は設定・IO エラーとして終了する
+                System.err.println("error: invalid --rerun-failed run id '" + rerunFailedRunId
+                        + "': " + e.getMessage());
+                return BatchCli.EXIT_CONFIG;
+            }
             if (priorResult == null) {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '" + rerunFailedRunId
@@ -114,7 +125,15 @@ public final class RunCommand implements Callable<Integer> {
         // もう一度構築するが、構築は軽量な処理であり、検証は上で済んでいるため
         // 同じバッチに対して ValidationException が再発することはない。
         // priorResult が null なら通常実行、非 null なら rerun-failed モードで実行する
-        ExecutionResult result = new BatchExecutor().execute(batch, priorResult);
+        ExecutionResult result;
+        try {
+            result = new BatchExecutor().execute(batch, priorResult);
+        } catch (IllegalArgumentException e) {
+            // priorResult が別バッチのものだった場合（batch.name() の不一致）はここで拒否される。
+            // ジョブを 1 つも実行していない段階のエラーなので設定・IO エラーとして終了する
+            System.err.println("error: " + e.getMessage());
+            return BatchCli.EXIT_CONFIG;
+        }
 
         // 状態の保存に失敗しても実行結果は表示できるよう、先にサマリーを出力する
         printSummary(result);

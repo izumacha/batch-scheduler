@@ -73,12 +73,30 @@ public final class BatchExecutor {
      *
      * <p>不正なバッチは最初のジョブが実行される前に
      * {@link io.github.izumacha.batch.config.ValidationException} をスローする。
-     * 個々のジョブの失敗は記録され、例外にはならない。
+     * {@code priorResult} が非 null かつ {@code batch.name()} と異なるバッチ名を持つ場合は
+     * 誤用（別バッチの結果の取り違え）として {@link IllegalArgumentException} をスローする。
+     * ただし同名バッチ同士の取り違えまでは検出できない（バッチ名は一意性を強制されない
+     * 人間向けラベルのため）。再実行対象のジョブ定義（コマンド・依存関係等）が前回実行時から
+     * 変更されていないかどうかも検証しない。運用者が同じ --state-dir を共有する複数バッチを
+     * 管理する場合や、成功済みジョブの定義を変更してから再実行する場合はこれらの残余リスクに
+     * 留意すること（docs/DESIGN.md 参照）。個々のジョブの失敗は記録され、例外にはならない。
      *
      * @param batch 実行するバッチ定義
      * @param priorResult 再利用する前回の実行結果。{@code null} なら通常実行（全ジョブ新規実行）
      */
     public ExecutionResult execute(Batch batch, ExecutionResult priorResult) {
+        // rerun-failed モードで渡された前回結果が「別のバッチ」のものだと、たまたま一致した
+        // jobId の結果が無関係なバッチから紛れ込んで誤って流用されてしまう（例: 複数のバッチ
+        // 定義が同じ --state-dir を共有し、たまたま同じ job id を持つ場合）。バッチ名の一致を
+        // 最低限のガードとして早期に検証し、一致しなければ誤用として拒否する
+        // （§9 fail-closed: 不明なら拒否。同名バッチ同士の取り違えまでは検出できない残余
+        // リスクだが、docs/DESIGN.md に明記したうえで許容する）
+        if (priorResult != null && !batch.name().equals(priorResult.batchName())) {
+            throw new IllegalArgumentException(
+                    "priorResult belongs to a different batch ('" + priorResult.batchName()
+                            + "') than the one being executed ('" + batch.name()
+                            + "'); refusing to reuse its job results");
+        }
         // バッチを検証して依存グラフを構築する（不正なら ValidationException がスローされる）
         DependencyGraph graph = DependencyGraph.build(batch);
 

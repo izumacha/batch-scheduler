@@ -198,6 +198,74 @@ class RunCommandTest {
     }
 
     @Test
+    void rerunFailedWithMalformedRunIdFailsCleanlyInsteadOfThrowing(@TempDir Path dir)
+            throws IOException {
+        // マルフォームな runId（パストラバーサル文字列）を --rerun-failed に渡す。
+        Path config = dir.resolve("batch.yaml");
+        Files.writeString(config, """
+                name: irrelevant
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        Path stateDir = dir.resolve("state");
+
+        // "../" を含む runId は JsonExecutionStore.fileFor がパストラバーサル対策として拒否する。
+        // run コマンドはこれを未捕捉例外（スタックトレース露出）にせず、他の失敗経路と同じ
+        // 「error: ...」形式の 1 行メッセージへ変換して終了するはず。
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(),
+                "--rerun-failed", "../escape", "-q");
+
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        // 「error: invalid --rerun-failed run id」の 1 行メッセージが出ているはず。
+        assertTrue(outcome.stderr().contains("error: invalid --rerun-failed run id"), outcome.stderr());
+        // スタックトレース（例外クラス名）が漏れていないことを確認する。
+        assertFalse(outcome.stderr().contains("IllegalArgumentException"), outcome.stderr());
+    }
+
+    @Test
+    void rerunFailedRejectsRunIdFromADifferentBatchName(@TempDir Path dir) throws IOException {
+        // 「other」という名前のバッチを一度実行して記録を作る。
+        Path otherConfig = dir.resolve("other.yaml");
+        Files.writeString(otherConfig, """
+                name: other
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        Path stateDir = dir.resolve("state");
+        int firstCode = BatchCli.run("run", otherConfig.toString(), "--state-dir", stateDir.toString(), "-q");
+        assertEquals(BatchCli.EXIT_OK, firstCode);
+        // その runId を取り出す。
+        String otherRunId;
+        try (var files = Files.list(stateDir)) {
+            Path recorded = files
+                    .filter(p -> p.getFileName().toString().endsWith(".json"))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("expected a persisted run record"));
+            String fileName = recorded.getFileName().toString();
+            otherRunId = fileName.substring(0, fileName.length() - ".json".length());
+        }
+
+        // 名前が異なる「mine」というバッチに対して、その runId を --rerun-failed に指定する。
+        Path myConfig = dir.resolve("mine.yaml");
+        Files.writeString(myConfig, """
+                name: mine
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        RunOutcome outcome = runCapturingStderr(
+                "run", myConfig.toString(), "--state-dir", stateDir.toString(),
+                "--rerun-failed", otherRunId, "-q");
+
+        // 別バッチの結果の取り違えとして設定・IO エラーで拒否されるはず。
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        assertTrue(outcome.stderr().contains("different batch"), outcome.stderr());
+    }
+
+    @Test
     void rerunFailedReusesSucceededJobsAndReRunsOnlyTheFailedOne(@TempDir Path dir)
             throws IOException {
         // counted ジョブは実行されるたびにカウンタファイルをインクリメントする（再実行有無の検証用）。
