@@ -17,6 +17,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
@@ -54,8 +55,12 @@ public final class JobRunner {
 
     // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
-    // リトライ間隔（コンストラクタで設定する）
-    private final Duration retryBackoff;
+    // リトライ間隔（バックオフ）の計算ポリシー（コンストラクタで設定する）。
+    // retryBackoff コンストラクタ引数は「基準（初回リトライ前の）待機時間」として扱われ、
+    // 試行を重ねるごとに2倍ずつ伸びつつ既定の上限でクランプされ、実際の待機はその範囲内で
+    // ランダムに散らされる（指数バックオフ＋フルジッター。thundering herd 回避、
+    // docs/DESIGN.md の Future extensions「Richer retry / backoff policies」に対応）
+    private final RetryBackoffPolicy retryBackoffPolicy;
     // true にすると出力を標準出力にも表示する
     private final boolean echoOutput;
 
@@ -71,8 +76,8 @@ public final class JobRunner {
         }
         // 最大行数フィールドを設定する
         this.maxCapturedOutputLines = maxCapturedOutputLines;
-        // リトライ間隔が null の場合はゼロ（待機なし）にする
-        this.retryBackoff = retryBackoff == null ? Duration.ZERO : retryBackoff;
+        // 基準待機時間（null ならゼロ＝バックオフなし）と既定の上限からバックオフポリシーを組み立てる
+        this.retryBackoffPolicy = new RetryBackoffPolicy(retryBackoff, RetryBackoffPolicy.DEFAULT_MAX_DELAY);
         // 出力エコーフラグを設定する
         this.echoOutput = echoOutput;
     }
@@ -126,10 +131,12 @@ public final class JobRunner {
             }
 
             // 次の試行が残っており、バックオフが設定されている場合は待機する
-            if (attempt < maxAttempts && !retryBackoff.isZero() && !retryBackoff.isNegative()) {
+            if (attempt < maxAttempts && !retryBackoffPolicy.isZero()) {
                 try {
-                    // 次のリトライまで指定の時間だけスリープする
-                    Thread.sleep(retryBackoff.toMillis());
+                    // 指数バックオフ＋フルジッターで待機時間を計算し、その時間だけスリープする
+                    Duration delay = retryBackoffPolicy.delayFor(
+                            attempt, bound -> ThreadLocalRandom.current().nextLong(bound));
+                    Thread.sleep(delay.toMillis());
                 } catch (InterruptedException e) {
                     // スリープが割り込まれた場合は割り込みフラグを復元してループを抜ける
                     Thread.currentThread().interrupt();
