@@ -3,6 +3,7 @@ package io.github.izumacha.batch.cli;
 import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
 import io.github.izumacha.batch.config.ValidationException;
+import io.github.izumacha.batch.core.BatchExecutionException;
 import io.github.izumacha.batch.core.BatchExecutor;
 import io.github.izumacha.batch.core.DependencyGraph;
 import io.github.izumacha.batch.model.Batch;
@@ -131,6 +132,14 @@ public final class RunCommand implements Callable<Integer> {
         } catch (IllegalArgumentException e) {
             // priorResult が別バッチのものだった場合（batch.name() の不一致）はここで拒否される。
             // ジョブを 1 つも実行していない段階のエラーなので設定・IO エラーとして終了する
+            System.err.println("error: " + e.getMessage());
+            return BatchCli.EXIT_CONFIG;
+        } catch (BatchExecutionException e) {
+            // BatchExecutor 内部の予期しない失敗（オーケストレーション自体の不具合）。
+            // ここで捕捉しないと picocli の既定ハンドラがスタックトレースをそのまま
+            // 標準エラーに出してしまい、他のすべての失敗経路が守っている
+            // 「スタックトレースを外部に出さない」という規約（§9 fail-closed）から
+            // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する
             System.err.println("error: " + e.getMessage());
             return BatchCli.EXIT_CONFIG;
         }
