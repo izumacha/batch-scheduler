@@ -195,6 +195,34 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdSkipsOversizedFile(@TempDir Path dir) throws Exception {
+        // MAX_RECORD_BYTES を超えるファイルは、パースを試みる前にサイズだけで
+        // 読み飛ばされるべき（BatchConfigLoader のオーバーサイズ拒否と同じ防御）。
+        // 有効な JSON かどうかは無関係にサイズだけで弾かれることを確認するため、
+        // 内容は単純な埋め草文字列にする（パースまで到達しないことの裏付けにもなる）。
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        byte[] filler = new byte[(int) JsonExecutionStore.MAX_RECORD_BYTES + 1];
+        java.util.Arrays.fill(filler, (byte) ' ');
+        Files.write(dir.resolve("huge.json"), filler);
+
+        assertTrue(store.findById("huge").isEmpty());
+    }
+
+    @Test
+    void findAllSkipsOversizedFileButReturnsOthers(@TempDir Path dir) throws Exception {
+        // findAll の候補一覧に混ざっていても、他の正常なファイルの読み込みは妨げないこと
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("good", Instant.now()));
+        byte[] filler = new byte[(int) JsonExecutionStore.MAX_RECORD_BYTES + 1];
+        java.util.Arrays.fill(filler, (byte) ' ');
+        Files.write(dir.resolve("huge.json"), filler);
+
+        List<ExecutionResult> all = store.findAll();
+        assertEquals(1, all.size());
+        assertEquals("good", all.get(0).runId());
+    }
+
+    @Test
     void savesRunWithVeryShortRunId(@TempDir Path dir) {
         // A one-character runId must not blow up the temp-file prefix.
         JsonExecutionStore store = new JsonExecutionStore(dir);

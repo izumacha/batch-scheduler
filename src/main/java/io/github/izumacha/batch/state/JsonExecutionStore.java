@@ -53,6 +53,40 @@ public final class JsonExecutionStore implements ExecutionStore {
     // .batch-state に大量のファイルが蓄積した場合でも、内容の全文パースが無制限に
     // ならないようにする（現実的な利用規模を大きく超えた場合のみ効くサーキットブレーカー）
     static final int MAX_UNBOUNDED_RESULTS = 100_000;
+    /**
+     * Upper bound on a single stored execution-result JSON document, mirroring
+     * {@link io.github.izumacha.batch.config.BatchConfigLoader#MAX_CONFIG_BYTES}'s
+     * "bound before parsing" guard (docs/DESIGN.md: "Bounded config parsing").
+     * That guard covers the number of files parsed per list request
+     * ({@link #MAX_UNBOUNDED_RESULTS}) but, until now, nothing capped the size
+     * of an individual file: {@link #tryRead} handed the file straight to
+     * Jackson with no limit, so a single oversized {@code <runId>.json} --
+     * whether from a misconfigured {@code JobRunner} (a very large
+     * {@code maxCapturedOutputLines}), a corrupted write, or a file dropped
+     * into the state directory by another process with write access -- could
+     * force an unbounded in-memory parse on every {@code run}/{@code list}
+     * invocation that touches it (docs/DESIGN.md "State-directory safety"
+     * already treats the state directory as a tampering target: run-id
+     * validation and no-symlink-following exist for the same reason). 16 MiB
+     * is far above any legitimate record (JobRunner's per-job message is at
+     * most one captured output line, capped at 8 KiB by
+     * {@code OutputCollector.MAX_LINE_CHARS}, so even a batch with
+     * thousands of jobs stays well under this ceiling) -- a circuit breaker,
+     * not a practical cap.
+     */
+    // 保存済み実行結果 JSON 1 件あたりのサイズ上限。BatchConfigLoader が設定ファイルに
+    // 対して行っている「パース前にサイズを拒否する」防御（docs/DESIGN.md: bounded config
+    // parsing）と同じ考え方を、これまで無防備だった状態ファイルの読み込みにも適用する。
+    // MAX_UNBOUNDED_RESULTS は「一覧で何件パースするか」を制限するが、1 件のファイル
+    // 自体の大きさは制限しておらず、tryRead はサイズを確認せず Jackson にそのまま渡していた。
+    // 巨大な maxCapturedOutputLines 設定・書き込み途中の破損・他プロセスによる改変などで
+    // 肥大化した 1 ファイルだけでも、それに触れる run/list のたびに無制限なメモリパースを
+    // 強いられ得る（状態ディレクトリを改変対象として扱う前提は docs/DESIGN.md の
+    // 「State-directory safety」で runId 検証・シンボリックリンク非追従として既に明言されている）。
+    // 16MiB は正規の記録を大きく上回る値（JobRunner が message に含めるのは出力の最終 1 行の
+    // みで OutputCollector.MAX_LINE_CHARS により 8KiB に上限があるため、ジョブ数が数千規模の
+    // バッチでも十分に収まる）であり、現実的な用途を妨げないサーキットブレーカーとして機能する。
+    static final long MAX_RECORD_BYTES = 16L * 1024 * 1024; // 16 MiB
 
     // JSON ファイルを保存するベースディレクトリのパスを保持するフィールド
     private final Path baseDir;
@@ -297,20 +331,41 @@ public final class JsonExecutionStore implements ExecutionStore {
     }
 
     /**
-     * Reads and parses one execution-result JSON file, tolerating a missing
-     * or unparseable file by logging a warning and returning empty instead of
-     * throwing. Shared by {@link #findById}, {@link #findAll}, and
+     * Reads and parses one execution-result JSON file, tolerating a missing,
+     * oversized, or unparseable file by logging a warning and returning empty
+     * instead of throwing. Shared by {@link #findById}, {@link #findAll}, and
      * {@link #findRecent} so the "skip broken files" contract documented on
      * this class lives in exactly one place.
      */
     private Optional<ExecutionResult> tryRead(Path file) {
-        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-            // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
-            return Optional.of(mapper.readValue(in, ExecutionResult.class));
+        try {
+            // Bound the parse the same way BatchConfigLoader bounds config
+            // parsing: check the size before handing the file to Jackson, so
+            // a single oversized record (see MAX_RECORD_BYTES) can never
+            // force an unbounded in-memory parse. Files.size() here is safe
+            // from symlink surprises: every caller of tryRead has already
+            // confirmed the path is a regular file via NOFOLLOW_LINKS before
+            // reaching this method (findById directly, findAll/findRecent via
+            // their Files.isRegularFile(..., NOFOLLOW_LINKS) candidate filter).
+            // Jackson にファイルを渡す前にサイズを確認する（BatchConfigLoader と同じ
+            // 「パース前にサイズを拒否する」防御）。呼び出し元は tryRead に渡す前に
+            // NOFOLLOW_LINKS で通常ファイルであることを確認済みのため、ここでの
+            // Files.size() がシンボリックリンクの実体を辿ってしまう心配はない
+            long size = Files.size(file);
+            // サイズが上限を超えるファイルは壊れたファイルと同様に読み飛ばす
+            if (size > MAX_RECORD_BYTES) {
+                LOGGER.warning("Skipping oversized execution result file '" + file + "' ("
+                        + size + " bytes, limit " + MAX_RECORD_BYTES + ")");
+                return Optional.empty();
+            }
+            try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
+                return Optional.of(mapper.readValue(in, ExecutionResult.class));
+            }
         } catch (IOException e) {
-            // パースに失敗したファイルはスキップして空 Optional を返す（fail-safe）。
-            // クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、途中書き込みや
-            // 手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
+            // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
+            // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
+            // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
             LOGGER.warning("Skipping unreadable execution result file '" + file + "': " + e.getMessage());
             return Optional.empty();
         }
