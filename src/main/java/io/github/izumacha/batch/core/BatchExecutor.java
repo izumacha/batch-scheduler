@@ -60,6 +60,25 @@ public final class BatchExecutor {
      * 個々のジョブの失敗は記録され、例外にはならない。
      */
     public ExecutionResult execute(Batch batch) {
+        // 再利用する前回結果が無い（＝全ジョブを新規実行する）通常実行に委譲する
+        return execute(batch, null);
+    }
+
+    /**
+     * バッチを実行する。{@code priorResult} が非 null の場合は「再実行（rerun-failed）」
+     * モードとして動作し、そこで {@link JobStatus#SUCCEEDED} だったジョブは再実行せず
+     * 前回の結果をそのまま採用する（docs/DESIGN.md Future extensions
+     * 「Resume / rerun-failed」に対応）。前回 FAILED/SKIPPED だったジョブや、
+     * 前回に存在しなかった新規ジョブは通常どおり実行する。
+     *
+     * <p>不正なバッチは最初のジョブが実行される前に
+     * {@link io.github.izumacha.batch.config.ValidationException} をスローする。
+     * 個々のジョブの失敗は記録され、例外にはならない。
+     *
+     * @param batch 実行するバッチ定義
+     * @param priorResult 再利用する前回の実行結果。{@code null} なら通常実行（全ジョブ新規実行）
+     */
+    public ExecutionResult execute(Batch batch, ExecutionResult priorResult) {
         // バッチを検証して依存グラフを構築する（不正なら ValidationException がスローされる）
         DependencyGraph graph = DependencyGraph.build(batch);
 
@@ -76,6 +95,13 @@ public final class BatchExecutor {
 
             // ジョブをトポロジカル順に実行する
             for (Job job : order) {
+                // rerun-failed モードで、このジョブが前回 SUCCEEDED していれば再実行せず
+                // 前回の結果をそのまま流用する（依存側のブロック判定にもこの結果を使う）
+                JobResult reused = reusablePriorResult(priorResult, job.id());
+                if (reused != null) {
+                    results.put(job.id(), reused);
+                    continue;
+                }
                 // このジョブをブロックしている依存ジョブがあるか確認する
                 String blockingDep = firstBlockingDependency(job, results);
                 // ブロックしている依存がある場合はジョブをスキップして結果を記録する
@@ -111,6 +137,22 @@ public final class BatchExecutor {
             throw new BatchExecutionException("unexpected error while executing batch '"
                     + batch.name() + "' (runId=" + runId + ")", e);
         }
+    }
+
+    /**
+     * rerun-failed モードで、指定ジョブを再実行せず流用できる前回結果を返す。
+     * 前回結果が無い（通常実行）・前回そのジョブが存在しなかった（新規ジョブ）・
+     * 前回 SUCCEEDED でなかった（FAILED/SKIPPED は再実行対象）場合は {@code null} を返す。
+     */
+    private static JobResult reusablePriorResult(ExecutionResult priorResult, String jobId) {
+        // 通常実行（priorResult が無い）なら流用しない
+        if (priorResult == null) {
+            return null;
+        }
+        // 前回結果からこのジョブ ID を検索し、SUCCEEDED だった場合のみ流用対象として返す
+        return priorResult.result(jobId)
+                .filter(JobResult::succeeded)
+                .orElse(null);
     }
 
     /**

@@ -40,6 +40,14 @@ public final class RunCommand implements Callable<Integer> {
     @Option(names = {"-q", "--quiet"}, description = "suppress the per-job summary table")
     boolean quiet;
 
+    // 再実行モード: 指定した runId の前回結果のうち SUCCEEDED だったジョブは再実行せず流用し、
+    // FAILED/SKIPPED だったジョブ（および前回に存在しなかった新規ジョブ）だけを実行する
+    @Option(names = {"--rerun-failed"}, paramLabel = "RUN_ID",
+            description = "reuse succeeded job results from a prior run (looked up by run id "
+                    + "under --state-dir) and only (re-)execute jobs that were FAILED or "
+                    + "SKIPPED in it, or that did not exist in it")
+    String rerunFailedRunId;
+
     @Override
     public Integer call() {
         // バッチ設定オブジェクトを格納する変数を宣言する
@@ -87,10 +95,26 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_CONFIG;
         }
 
+        // --rerun-failed が指定されていれば、その runId の前回結果を state ディレクトリから
+        // 読み込む。ジョブを 1 つも実行する前に検証することで、存在しない runId を
+        // 指定した設定ミスをジョブ実行後ではなく fail fast で発見できる
+        ExecutionResult priorResult = null;
+        if (rerunFailedRunId != null) {
+            // 前回結果を runId で検索する（見つからなければ空の Optional）
+            priorResult = store.findById(rerunFailedRunId).orElse(null);
+            if (priorResult == null) {
+                // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
+                System.err.println("error: no prior run found with id '" + rerunFailedRunId
+                        + "' under " + stateDir.toAbsolutePath());
+                return BatchCli.EXIT_CONFIG;
+            }
+        }
+
         // バッチを実行して結果を取得する。BatchExecutor.execute は内部で依存グラフを
         // もう一度構築するが、構築は軽量な処理であり、検証は上で済んでいるため
-        // 同じバッチに対して ValidationException が再発することはない
-        ExecutionResult result = new BatchExecutor().execute(batch);
+        // 同じバッチに対して ValidationException が再発することはない。
+        // priorResult が null なら通常実行、非 null なら rerun-failed モードで実行する
+        ExecutionResult result = new BatchExecutor().execute(batch, priorResult);
 
         // 状態の保存に失敗しても実行結果は表示できるよう、先にサマリーを出力する
         printSummary(result);

@@ -52,10 +52,33 @@ Useful options:
 - `run --state-dir <dir>` / `list --state-dir <dir>` — directory where run state
   is stored (default: `.batch-state`).
 - `run -q` / `run --quiet` — suppress the per-job summary table.
+- `run --rerun-failed <runId>` — reuse `SUCCEEDED` job results from a prior run
+  (looked up by run id under `--state-dir`) and only (re-)execute jobs that were
+  `FAILED` or `SKIPPED` in it, or that did not exist in it yet. See
+  [Rerunning only the failed jobs](#rerunning-only-the-failed-jobs).
 - `list -n <n>` / `list --limit <n>` — show at most `n` of the most recent runs
   (default: `20`); pass `0` or a negative number to list all.
 - `--help`, `--version` — standard help and version output (also available on each
   sub-command).
+
+### Rerunning only the failed jobs
+
+After a `run` ends with some jobs `FAILED` or `SKIPPED`, you can fix the
+underlying issue and rerun just those jobs (plus any brand-new jobs added to
+the batch file since) without redoing the ones that already succeeded:
+
+```sh
+# Note the "Run ID" printed by the failed run (or read it from `list`).
+java -jar target/batch-scheduler.jar run examples/etl.yaml --rerun-failed 20260101-120000-abc123def456
+```
+
+Jobs that were `SUCCEEDED` in that prior run are reused verbatim (their
+original result is copied into the new run, not re-executed); jobs that were
+`FAILED` or `SKIPPED`, and any job present in the batch file but absent from
+the prior run, run normally. The prior run id is looked up in the same
+`--state-dir`, so it must still be present there. This is a rerun, not a
+resume: it still produces a brand-new run id and a new persisted record
+covering every job in the batch.
 
 ## YAML schema
 
