@@ -83,6 +83,28 @@ class RetryBackoffPolicyTest {
     }
 
     @Test
+    void 基準待機時間が上限を超えて設定されていても初回から上限でクランプされる() {
+        // 回帰テスト: 指数計算ループは attempt=1 のとき1回も回らないため、初期値を
+        // baseMillis のまま使うと1回目のリトライだけ上限チェックを素通りしてしまうバグがあった
+        // （2回目以降はループ内でクランプされるのに1回目だけ効かない不整合）。
+        // 基準10分・上限5分という「基準が上限を超える」設定で、1回目から上限どおりに
+        // クランプされることを検証する
+        RetryBackoffPolicy policy = new RetryBackoffPolicy(Duration.ofMinutes(10), Duration.ofMinutes(5));
+        // attempt=1（ループが回らない最初のケース）でも上限の5分を超えない
+        assertEquals(Duration.ofMinutes(5), policy.delayFor(1, MAX_JITTER));
+        // attempt=2（ループが回るケース）も同様に上限どおり
+        assertEquals(Duration.ofMinutes(5), policy.delayFor(2, MAX_JITTER));
+    }
+
+    @Test
+    void 上限がゼロなら基準待機時間があっても初回から待機なし() {
+        // 上記と同じ回帰: maxDelay=ZERO のとき、attempt=1 でも即座に待機なしになるべき
+        RetryBackoffPolicy policy = new RetryBackoffPolicy(Duration.ofSeconds(5), Duration.ZERO);
+        assertEquals(Duration.ZERO, policy.delayFor(1, MAX_JITTER));
+        assertEquals(Duration.ZERO, policy.delayFor(2, MAX_JITTER));
+    }
+
+    @Test
     void ジッターは計算した上限の範囲内で呼び出し側の関数に委譲される() {
         // jitter に渡される排他的上限が「クランプ後の値+1」であることを検証する
         RetryBackoffPolicy policy = new RetryBackoffPolicy(Duration.ofSeconds(1), Duration.ofMinutes(5));

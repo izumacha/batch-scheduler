@@ -80,7 +80,11 @@ public final class RetryBackoffPolicy {
         // retries の上限は Job.MAX_RETRIES（100万）まで許容されるため、素朴に 2^(attempt-1) を
         // 計算すると long でもすぐ桁あふれする。上限に達し次第ループを打ち切ることで、実際の
         // 反復回数は「基準値が2倍を繰り返して上限へ到達するまで」（せいぜい数十回）に収まる。
-        long cappedMillis = baseMillis;
+        // 初期値は基準値と上限の小さい方から始める。baseMillis をそのまま初期値にすると、
+        // attempt=1（ループが1回も回らない）のとき上限チェックが一度も行われず、
+        // baseDelay が maxDelay を超えて設定された場合に1回目のリトライだけ上限を超えて
+        // 待ってしまう（2回目以降はループ内のクランプが効くのに1回目だけ効かない不整合）
+        long cappedMillis = Math.min(baseMillis, capMillis);
         for (int i = 1; i < attempt; i++) {
             // 既に上限に達していれば、これ以上倍にせず打ち切る
             if (cappedMillis >= capMillis) {
@@ -104,6 +108,7 @@ public final class RetryBackoffPolicy {
         // jitter 関数の引数は排他的上限のため、cappedMillis 自身も選ばれ得るよう +1 する
         // （cappedMillis が Long.MAX_VALUE 付近になることは実運用上ありえないが、念のため桁あふれを避ける）
         long boundExclusive = cappedMillis < Long.MAX_VALUE ? cappedMillis + 1 : Long.MAX_VALUE;
+        // 呼び出し側から渡された jitter 関数に実際の乱数選択を委譲し、待機時間（ミリ秒）を得る
         long jitteredMillis = jitter.applyAsLong(boundExclusive);
         // 計算結果を Duration に変換して返す
         return Duration.ofMillis(jitteredMillis);
