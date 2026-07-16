@@ -127,8 +127,15 @@ malicious resource exhaustion and against tampering with the state directory:
 - **Parallel execution** of independent jobs (run ready jobs concurrently while
   still honoring the DAG).
 - **Scheduling** (cron-style triggers) so batches can run unattended.
-- **Richer retry / backoff** policies (e.g. exponential backoff, jitter).
 - **Resume / rerun-failed** — re-run only the failed and skipped jobs of a prior
   run.
 - **Pluggable stores** — alternative `ExecutionStore` implementations (database,
   object storage) behind the existing interface.
+
+`Richer retry / backoff policies (e.g. exponential backoff, jitter)` has been
+implemented: `JobRunner` delegates delay computation to `RetryBackoffPolicy`,
+which grows the configured base delay exponentially per attempt (capped at
+`RetryBackoffPolicy.DEFAULT_MAX_DELAY`, 5 minutes) and applies full jitter
+(a uniform random pick within `[0, cappedDelay]`) to avoid many retrying jobs
+synchronizing on the same wall-clock instant. A base delay of `Duration.ZERO`
+still means "no backoff" (immediate retry), preserving prior behavior.
