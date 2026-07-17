@@ -286,11 +286,52 @@ public final class BatchConfigLoader {
             // 戻り値は使わない（爆弾なら Composer が例外を投げて即座に打ち切られることだけが目的）
             boundsGuard.load(content);
         } catch (YAMLException e) {
-            // billion-laughs 相当のエイリアス爆弾・過剰なネストを検出した場合は
-            // ConfigException に包んで投げる（終了コード 3、スタックトレースは出さない）
-            throw new ConfigException(
-                    "batch config exceeds YAML safety limits: " + source + " (" + rootMessage(e) + ")", e);
+            // このガードが検出すべきなのは alias 爆弾・過剰ネストの 2 種類だけであり、
+            // それ以外（例えば単なる文法エラー）まで拾ってしまうと、mapper.readValue が
+            // 本来出すはずの分かりやすいエラーメッセージ（例: "failed to parse batch
+            // config: ..."）を「safety limits」という見当違いのメッセージで覆い隠して
+            // しまう。SnakeYAML の Scanner/Parser が投げる文法エラー系の例外は
+            // ScannerException/ParserException 等の YAMLException のサブクラスであり、
+            // ここでは isSafetyLimitViolation で「本当にこの 2 種類の上限超過か」を
+            // メッセージ文言で見分ける（Composer が直接 `new YAMLException(...)` する
+            // 数少ない箇所のうちの 2 つ）。一致しなければ何もせず処理を続け、直後の
+            // mapper.readValue に本来のエラー報告を任せる（そちらも同じ文法エラーに
+            // 遭遇して ConfigException を投げるため、ここで握り潰しても未報告にはならない）
+            if (isSafetyLimitViolation(e)) {
+                // billion-laughs 相当のエイリアス爆弾・過剰なネストを検出した場合は
+                // ConfigException に包んで投げる（終了コード 3、スタックトレースは出さない）
+                throw new ConfigException(
+                        "batch config exceeds YAML safety limits: " + source + " (" + rootMessage(e) + ")", e);
+            }
         }
+    }
+
+    /**
+     * Whether {@code e} is specifically the alias-count or nesting-depth guard
+     * tripping (as opposed to any other {@link YAMLException} subtype, e.g. a
+     * plain syntax error). SnakeYAML's {@code Composer} throws the exact base
+     * {@link YAMLException} class directly (not a subclass) at exactly two call
+     * sites for these two checks, with these two literal message prefixes
+     * (confirmed against the SnakeYAML 2.3 bytecode); everything else --
+     * {@code ScannerException}, {@code ParserException}, {@code
+     * ComposerException}, etc. -- is a distinct subclass carrying an unrelated
+     * problem. Matching by message text is admittedly coupled to SnakeYAML's
+     * literal strings; if a future SnakeYAML upgrade changes them, the worst
+     * case is this guard silently stops firing for real bombs again (falling
+     * back to today's already-broken behavior), not a false rejection of valid
+     * documents. {@code BatchConfigLoaderTest#yamlAliasBombIsRejected} and
+     * {@code #yamlDeepNestingBombIsRejected} exist to catch that regression
+     * (e.g. on a SnakeYAML version bump) in CI.
+     */
+    private static boolean isSafetyLimitViolation(YAMLException e) {
+        // メッセージ本文を取り出す（null の可能性もあるため先に確認する）
+        String message = e.getMessage();
+        // メッセージが null なら判定不能なので false（安全側＝この例外は無視して mapper に委ねる）
+        if (message == null) {
+            return false;
+        }
+        // alias 上限超過、またはネスト深度上限超過のどちらかのメッセージ文言に一致するかを確認する
+        return message.contains("exceeds the specified max") || message.contains("Nesting Depth exceeded max");
     }
 
     private static String rootMessage(Throwable t) {

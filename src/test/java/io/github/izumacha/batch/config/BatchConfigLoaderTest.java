@@ -148,7 +148,16 @@ class BatchConfigLoaderTest {
     @Test
     void malformedYamlSurfacesConfigException() {
         String yaml = "name: etl\njobs: [oops: : :";
-        assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // Regression guard: enforceYamlSafetyLimits' pre-parse pass (added to
+        // catch alias-bomb/deep-nesting documents, see yamlAliasBombIsRejected)
+        // must not swallow this plain syntax error and report it as a
+        // misleading "safety limits" violation instead of the real problem.
+        assertFalse(ex.getMessage().contains("safety limits"),
+                "a plain syntax error must not be reported as a safety-limit violation, was: "
+                        + ex.getMessage());
+        assertTrue(ex.getMessage().contains("invalid batch config"),
+                "message should explain the parse failure, was: " + ex.getMessage());
     }
 
     @Test
