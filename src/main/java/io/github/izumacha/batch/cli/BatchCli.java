@@ -2,6 +2,8 @@ package io.github.izumacha.batch.cli;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.IExecutionExceptionHandler;
+import picocli.CommandLine.ParseResult;
 import picocli.CommandLine.Spec;
 import picocli.CommandLine.Model.CommandSpec;
 
@@ -58,8 +60,38 @@ public final class BatchCli implements Callable<Integer> {
         // すべてのコマンドとサブコマンドに対して終了コードのマッピングを設定する
         // （PicoCLI のデフォルトコードをドキュメント通りのコードに変換するため）
         applyExitCodes(cmd);
+        // 各サブコマンドが個別に catch し損ねた予期しない例外を picocli の既定ハンドラ
+        // （生のスタックトレースをそのまま標準エラーに出す）へ渡さないための最終防波堤を設定する。
+        // RunCommand は BatchExecutionException を自前で catch して 1 行メッセージへ変換しているが、
+        // ValidateCommand 等の他コマンドには同種のガードが無く、DependencyGraph の
+        // 「起こり得ないはず」の内部不変条件違反（IllegalStateException）等が万一発生すると、
+        // §9 fail-closed の「スタックトレースを外部に出さない」規約からこの経路だけ外れてしまう。
+        // ルートの CommandLine 1 箇所に設定すれば、サブコマンドの実行時に投げられた未捕捉の例外は
+        // すべてここを経由するため、個々のコマンド実装が catch し忘れても安全側に倒せる。
+        cmd.setExecutionExceptionHandler(new SanitizingExecutionExceptionHandler());
         // 引数を解析してコマンドを実行し、終了コードを返す
         return cmd.execute(args);
+    }
+
+    // 未捕捉の実行時例外を、生のスタックトレースを出さない 1 行のエラーメッセージへ変換する
+    // 最終防波堤ハンドラ（§9 fail-closed。他の catch 節と同じ「error: ...」書式に揃える）。
+    // パッケージプライベート（テストから直接インスタンス化して検証できるようにするため）
+    static final class SanitizingExecutionExceptionHandler implements IExecutionExceptionHandler {
+        @Override
+        public int handleExecutionException(Exception ex, CommandLine commandLine, ParseResult parseResult) {
+            // 他の失敗経路（RunCommand の各 catch 節）と同じ「error: <メッセージ>」の 1 行だけを
+            // 標準エラーに出す。例外オブジェクト自体（スタックトレース）は決して出力しない。
+            // このアプリはログ出力先を切り替える logging.properties を持たず、
+            // java.util.logging の既定 ConsoleHandler が Level.SEVERE 以上を標準エラーへ
+            // そのまま流すため、Logger.log(Level, msg, throwable) のように Throwable 引数付きで
+            // 記録すると、この println とは別にフルスタックトレースまで標準エラーへ二重出力されて
+            // しまう（実際に検証用テストでこの回帰を確認した）。他の catch 節が e.getMessage() だけを
+            // 使い、生の例外を一切 Logger に渡していないのと同じ理由で、ここでもメッセージ文字列
+            // だけを扱う。
+            System.err.println("error: " + ex.getMessage());
+            // 個々のコマンドが自前で catch していた場合と同じ EXIT_CONFIG を返す
+            return EXIT_CONFIG;
+        }
     }
 
     // PicoCLI のデフォルト終了コードをこのツール独自のコードに上書きするメソッド
