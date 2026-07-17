@@ -199,17 +199,39 @@ class BatchConfigLoaderTest {
 
     @Test
     void yamlAliasBombIsRejected() {
-        // Classic "billion laughs": exponential alias expansion. The capped
-        // maxAliasesForCollections must reject it instead of exhausting memory.
-        String bomb = """
-                a: &a ["x","x","x","x","x","x","x","x","x"]
-                b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]
-                c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]
-                d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]
-                e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]
-                jobs: *e
-                """;
-        assertThrows(ConfigException.class, () -> loader.loadFromString(bomb));
+        // Classic "billion laughs": many aliases to one anchor inside a single
+        // collection. `jobs: []` stays structurally valid so the thrown
+        // exception can only come from the alias-count guard itself, not an
+        // incidental type mismatch (the previous version of this test put the
+        // bomb directly on `jobs`, which happened to fail Jackson's structural
+        // mapping of `jobs` regardless of whether the alias limit was ever
+        // consulted -- it passed for the wrong reason and would not have
+        // caught a regression where the limit stopped being enforced).
+        StringBuilder bomb = new StringBuilder("name: bomb\njobs: []\nbase: &base [\"x\"]\nmany: [");
+        // 60 aliases exceeds BatchConfigLoader's alias-count limit (50).
+        for (int i = 0; i < 60; i++) {
+            bomb.append("*base,");
+        }
+        bomb.append("]\n");
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(bomb.toString()));
+        assertTrue(ex.getMessage().contains("safety limits"),
+                "message should explain the alias-count rejection, was: " + ex.getMessage());
+    }
+
+    @Test
+    void yamlDeepNestingBombIsRejected() {
+        // Unbounded nesting depth is a separate resource-exhaustion vector from
+        // the alias count above (deep recursive descent rather than exponential
+        // blow-up from a handful of anchors). The document stays tiny in bytes
+        // -- only the structural depth is excessive -- so this must be rejected
+        // by the nesting-depth guard specifically, not the size guard.
+        StringBuilder deep = new StringBuilder("name: bomb\njobs: []\nnested:\n");
+        for (int i = 0; i < 500; i++) {
+            deep.append("  ".repeat(i + 1)).append("a:\n");
+        }
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(deep.toString()));
+        assertTrue(ex.getMessage().contains("safety limits"),
+                "message should explain the nesting-depth rejection, was: " + ex.getMessage());
     }
 
     @Test

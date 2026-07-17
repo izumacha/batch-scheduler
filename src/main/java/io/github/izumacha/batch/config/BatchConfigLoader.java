@@ -8,6 +8,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.izumacha.batch.model.Batch;
 import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
+import org.yaml.snakeyaml.error.YAMLException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +42,16 @@ public final class BatchConfigLoader {
 
     // Jackson の ObjectMapper インスタンス（YAML/JSON 双方のパースに使う）
     private final ObjectMapper mapper;
+    /**
+     * A second, independent SnakeYAML loader used only to enforce the alias-count
+     * and nesting-depth bounds below in {@link #enforceYamlSafetyLimits}, because
+     * {@link #mapper} alone does not enforce them despite sharing the same
+     * {@link LoaderOptions} (see that field's construction below and
+     * {@link #enforceYamlSafetyLimits} for why).
+     */
+    // 「billion-laughs」エイリアス爆弾・過剰ネストを検出する専用の SnakeYAML ローダー
+    // （mapper とは別インスタンス。理由は下の enforceYamlSafetyLimits を参照）
+    private final Yaml boundsGuard;
 
     public BatchConfigLoader() {
         // Bound the parser so a hostile or accidental "YAML bomb" cannot exhaust
@@ -67,6 +80,22 @@ public final class BatchConfigLoader {
                 // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
                 // 小数値は ConfigException（終了コード 3）として明示的に拒否する
                 .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false);
+
+        // jackson-dataformat-yaml の YAMLParser は SnakeYAML の Scanner/Parser の
+        // イベント列を直接 Jackson のトークンへ橋渡ししており、maxAliasesForCollections /
+        // nestingDepthLimit を実際にチェックする SnakeYAML の Composer を一切経由しない
+        // （SnakeYAML 2.3 のバイトコードで確認済み: 両オプションを参照するのは
+        // Composer クラスだけで、jackson-dataformat-yaml のクラスからは一切参照されない）。
+        // そのため上の mapper に同じ loaderOptions を渡しても、この 2 つの上限は
+        // 事実上ザル（何も拒否しない）になっており、DESIGN.md が謳う「billion-laughs
+        // エイリアス爆弾対策」「ネスト深度対策」は実際には効いていなかった
+        // （codePointLimit だけは Scanner 側で効くため機能する）。
+        // 対策として、実際に Composer を通す素の SnakeYAML ローダーをもう一つ用意し、
+        // parse() の中で本パースの前に「読み捨てるだけの検証パス」として一度読ませることで
+        // 上限超過を検出する。SafeConstructor を使うのは、危険な !!java.* タグ経由の
+        // 任意 Java オブジェクト構築（deserialization gadget）を避けるため
+        // （§9 危険な実行・安全でない解析を避ける: YAML は safe_load 相当を使う）。
+        this.boundsGuard = new Yaml(new SafeConstructor(loaderOptions));
     }
 
     /**
@@ -190,6 +219,9 @@ public final class BatchConfigLoader {
         if (content == null || content.isBlank()) {
             throw new ConfigException("batch config is empty: " + source);
         }
+        // mapper に読ませる前に、alias 爆弾・過剰ネストを検出する専用パスを通す
+        // （mapper 自身はこれらを検出できないため。boundsGuard フィールドの説明を参照）
+        enforceYamlSafetyLimits(content, source);
         // パース結果を格納する変数を宣言する
         Batch batch;
         try {
@@ -222,6 +254,43 @@ public final class BatchConfigLoader {
         }
         // 正常にパースできた Batch オブジェクトを返す
         return batch;
+    }
+
+    /**
+     * Parses {@code content} with a plain SnakeYAML {@link Yaml} (backed by the
+     * same {@link LoaderOptions} as {@link #mapper}, so the same limits apply)
+     * purely to enforce the alias-count and nesting-depth bounds; the resulting
+     * object graph is discarded, {@link #mapper} still performs the real
+     * structural parse into {@link Batch} right after this call returns.
+     *
+     * <p>This exists because {@code mapper} alone does not enforce those two
+     * bounds: jackson-dataformat-yaml's {@code YAMLParser} drives SnakeYAML's
+     * {@code Scanner}/{@code Parser} event stream directly and never builds
+     * nodes through SnakeYAML's {@code Composer}, which is the only class that
+     * reads {@link LoaderOptions#getMaxAliasesForCollections()} and
+     * {@link LoaderOptions#getNestingDepthLimit()} (confirmed against the
+     * SnakeYAML 2.3 bytecode: neither getter is referenced from any
+     * jackson-dataformat-yaml class). Passing the same {@code loaderOptions} to
+     * {@code mapper}'s {@code YAMLFactory} therefore silently does nothing for
+     * these two guards -- a small (well under {@link #MAX_CONFIG_BYTES}),
+     * deeply-aliased "billion laughs" document reaches {@code mapper.readValue}
+     * unrejected today. {@link LoaderOptions#getCodePointLimit()} is unaffected
+     * by this gap: it is enforced earlier, in SnakeYAML's {@code StreamReader},
+     * which the Jackson parser does use.
+     *
+     * @throws ConfigException if the document exceeds the alias-count or
+     *                         nesting-depth limit
+     */
+    private void enforceYamlSafetyLimits(String content, String source) {
+        try {
+            // 戻り値は使わない（爆弾なら Composer が例外を投げて即座に打ち切られることだけが目的）
+            boundsGuard.load(content);
+        } catch (YAMLException e) {
+            // billion-laughs 相当のエイリアス爆弾・過剰なネストを検出した場合は
+            // ConfigException に包んで投げる（終了コード 3、スタックトレースは出さない）
+            throw new ConfigException(
+                    "batch config exceeds YAML safety limits: " + source + " (" + rootMessage(e) + ")", e);
+        }
     }
 
     private static String rootMessage(Throwable t) {
