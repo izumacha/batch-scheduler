@@ -98,7 +98,10 @@ public final class BatchCli implements Callable<Integer> {
     private static void applyExitCodes(CommandLine cmd) {
         // 無効な入力（引数の解析エラー）の終了コードを EXIT_CONFIG に設定する
         cmd.getCommandSpec().exitCodeOnInvalidInput(EXIT_CONFIG);
-        // 実行中の例外（予期しないエラー）の終了コードを EXIT_CONFIG に設定する
+        // 実行中の例外（予期しないエラー）の終了コードを EXIT_CONFIG に設定する。
+        // run() で設定する SanitizingExecutionExceptionHandler が正常に動作する限りは
+        // その戻り値（常に EXIT_CONFIG）がそのまま使われるためこの設定は素通りされるが、
+        // 万一ハンドラ自身が例外を投げた場合の picocli 側フォールバックとして機能し続けるため残す
         cmd.getCommandSpec().exitCodeOnExecutionException(EXIT_CONFIG);
         // サブコマンドにも再帰的に同じ設定を適用する
         for (CommandLine sub : cmd.getSubcommands().values()) {
