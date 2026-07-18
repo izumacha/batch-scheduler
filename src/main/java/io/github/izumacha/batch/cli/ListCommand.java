@@ -48,7 +48,7 @@ public final class ListCommand implements Callable<Integer> {
             fetched = new JsonExecutionStore(stateDir).findRecent(fetchLimit);
         } catch (RuntimeException e) {
             // 読み込みに失敗した場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to read run state: " + e.getMessage());
+            System.err.println("error: failed to read run state: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
         // 実際に limit を超えて切り詰められたかどうか（+1 件多く取れた場合のみ真）

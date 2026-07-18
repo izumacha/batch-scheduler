@@ -121,6 +121,11 @@ malicious resource exhaustion and against tampering with the state directory:
 - **State-directory safety.** Run ids are validated to reject path separators and
   `..` so a record can never be written or read outside the state directory.
   Writes go through a temp file and an atomic move; reads do not follow symlinks.
+  This now also covers the base directory itself, not just individual
+  `<runId>.json` files: `ensureBaseDirectory()` refuses to operate if `--state-dir`
+  is itself a symlink (rather than following it via `createDirectories`), and
+  `findAll`/`findRecent` treat a symlinked base directory the same as a missing
+  one, so a pre-planted symlink cannot redirect reads or writes elsewhere.
 
 ## Future extensions
 

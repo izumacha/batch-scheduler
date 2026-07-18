@@ -65,4 +65,20 @@ class CliFormatTest {
         // 59.95 秒の直前（59.94 秒）は繰り上がらず 59.9s のまま
         assertEquals("59.9s", CliFormat.duration(Duration.ofMillis(59_940)));
     }
+
+    /** メッセージを持つ例外はそのメッセージをそのまま返すことを確認する */
+    @Test
+    void safeMessage_withMessage_returnsMessage() {
+        assertEquals("boom", CliFormat.safeMessage(new IllegalStateException("boom")));
+    }
+
+    /**
+     * メッセージを持たない例外（getMessage() が null）では、診断価値の無い
+     * "null" ではなく例外クラスの単純名を返すことを確認する（RunCommand/ListCommand の
+     * 各 catch 節と BatchCli の最終防波堤ハンドラが共有するフォールバック）。
+     */
+    @Test
+    void safeMessage_withoutMessage_returnsClassSimpleName() {
+        assertEquals("IllegalStateException", CliFormat.safeMessage(new IllegalStateException()));
+    }
 }
