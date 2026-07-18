@@ -58,7 +58,7 @@ public final class RunCommand implements Callable<Integer> {
             batch = new BatchConfigLoader().load(config);
         } catch (ConfigException e) {
             // 読み込みまたは解析エラーの場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: " + e.getMessage());
+            System.err.println("error: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -92,7 +92,7 @@ public final class RunCommand implements Callable<Integer> {
             // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
             String detail = cause != null ? " (" + cause + ")" : "";
             // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to prepare state directory: " + e.getMessage() + detail);
+            System.err.println("error: failed to prepare state directory: " + CliFormat.safeMessage(e) + detail);
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -111,7 +111,7 @@ public final class RunCommand implements Callable<Integer> {
             } catch (IllegalArgumentException e) {
                 // runId の形式が不正な場合は設定・IO エラーとして終了する
                 System.err.println("error: invalid --rerun-failed run id '" + rerunFailedRunId
-                        + "': " + e.getMessage());
+                        + "': " + CliFormat.safeMessage(e));
                 return BatchCli.EXIT_CONFIG;
             }
             if (priorResult == null) {
@@ -132,7 +132,7 @@ public final class RunCommand implements Callable<Integer> {
         } catch (IllegalArgumentException e) {
             // priorResult が別バッチのものだった場合（batch.name() の不一致）はここで拒否される。
             // ジョブを 1 つも実行していない段階のエラーなので設定・IO エラーとして終了する
-            System.err.println("error: " + e.getMessage());
+            System.err.println("error: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         } catch (BatchExecutionException e) {
             // BatchExecutor 内部の予期しない失敗（オーケストレーション自体の不具合）。
@@ -140,7 +140,7 @@ public final class RunCommand implements Callable<Integer> {
             // 標準エラーに出してしまい、他のすべての失敗経路が守っている
             // 「スタックトレースを外部に出さない」という規約（§9 fail-closed）から
             // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する
-            System.err.println("error: " + e.getMessage());
+            System.err.println("error: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -152,7 +152,7 @@ public final class RunCommand implements Callable<Integer> {
             store.save(result);
         } catch (RuntimeException e) {
             // 保存に失敗した場合はエラーメッセージを標準エラーに出力する
-            System.err.println("error: failed to persist run state: " + e.getMessage());
+            System.err.println("error: failed to persist run state: " + CliFormat.safeMessage(e));
             // 保存先は事前検証済みなのでここに来るのは稀（実行中のディスク満杯など）。
             // バッチ自体が失敗している場合は、記録漏れ（3）よりもバッチ失敗（1）の方が
             // ラッパースクリプトの分岐にとって重要な情報なので EXIT_FAILED を優先して返す。

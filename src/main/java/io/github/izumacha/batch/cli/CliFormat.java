@@ -56,6 +56,17 @@ final class CliFormat {
         return String.format("%d.%01ds", wholeSeconds, fraction);
     }
 
+    /**
+     * 例外のメッセージを取得する。メッセージが null の場合は代わりに例外クラス名を返し、
+     * 診断価値の無い「error: null」表示を防ぐ。BatchCli の最終防波堤ハンドラでのみ適用されて
+     * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
+     * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
+     */
+    static String safeMessage(Throwable t) {
+        // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を返す
+        return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+    }
+
     /** テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める */
     static String shortMessage(String message, int max) {
         // null または空白のみの場合は空文字を返す
