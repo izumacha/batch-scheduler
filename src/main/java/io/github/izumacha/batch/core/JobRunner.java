@@ -429,23 +429,36 @@ public final class JobRunner {
             }
         }
 
-        // 最後のメッセージが出力キャプチャの場合は先頭行を追記してコンテキストを補足する
+        // 最後のメッセージが出力キャプチャの場合はその末尾行を追記してコンテキストを補足する
         String tail = lastMessage != null && lastMessage.startsWith(OUTPUT_PREFIX)
                 ? lastMessage.substring(OUTPUT_PREFIX.length())
                 : null;
-        // 失敗時かつ出力がある場合は最初の行をサマリーに付加する
+        // 失敗時かつ出力がある場合は「出力の最終行」をサマリーに付加する。
+        // OutputCollector は古い行を捨てて末尾 maxLines 行だけを保持するリングバッファ
+        // なので、その「先頭行」は単に「総行数 − 保持行数」番目にあった任意の途中行
+        // (進捗ログ等)にすぎない。エラーを出して終了するプロセスは通例エラーを最後に
+        // 出力するため、実際の失敗理由が残るのは最終行側である
         if (!succeeded && tail != null && !tail.isBlank()) {
-            sb.append(": ").append(firstLine(tail));
+            sb.append(": ").append(lastNonBlankLine(tail));
         }
         // 完成したサマリー文字列を返す
         return sb.toString();
     }
 
-    private static String firstLine(String s) {
-        // 最初の改行文字の位置を探す
-        int nl = s.indexOf('\n');
-        // 改行がない場合はトリムして返し、ある場合は最初の行だけ返す
-        return nl < 0 ? s.trim() : s.substring(0, nl).trim();
+    private static String lastNonBlankLine(String s) {
+        // 行単位に分割する(末尾の空行も走査対象に含めるため limit=-1)
+        String[] lines = s.split("\n", -1);
+        // 末尾側から走査して最後の「空白でない」行を探す(最終行が空行のことがあるため)
+        for (int i = lines.length - 1; i >= 0; i--) {
+            // 前後の空白を取り除いた行を取り出す
+            String line = lines[i].trim();
+            // 空白でない行が見つかったらそれを返す
+            if (!line.isEmpty()) {
+                return line;
+            }
+        }
+        // すべて空白だった場合は全体をトリムして返す(呼び出し側の isBlank ガードにより通常到達しない)
+        return s.trim();
     }
 
     /** 1回のプロセス試行の結果を表すイミュータブルなレコード */

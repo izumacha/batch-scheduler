@@ -1,5 +1,6 @@
 package io.github.izumacha.batch.config;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -79,7 +80,16 @@ public final class BatchConfigLoader {
                 // 既定では `timeoutSeconds: 0.9` が 0（= タイムアウト無し）、
                 // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
                 // 小数値は ConfigException（終了コード 3）として明示的に拒否する
-                .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false);
+                .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false)
+                // 同一マップ内の重複キーを「後勝ち」で黙って採用しない。既定では
+                // ジョブ内に `dependsOn:` が 2 回書かれると（コピペや衝突マージの典型）
+                // 先の宣言が静かに消え、依存関係や command が意図せず差し替わったまま
+                // `validate` も OK を返してしまう。重複キーはパースエラー
+                // （ConfigException / 終了コード 3）として明示的に拒否する（§9 入力は信用しない）。
+                // なお SnakeYAML 側の setAllowDuplicateKeys(false) は Composer/Constructor
+                // 経由でしか効かず、jackson-dataformat-yaml のパース経路では機能しないため、
+                // Jackson のストリーム層で検出できる本フラグを使う
+                .configure(JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true);
 
         // jackson-dataformat-yaml の YAMLParser は SnakeYAML の Scanner/Parser の
         // イベント列を直接 Jackson のトークンへ橋渡ししており、maxAliasesForCollections /
@@ -91,9 +101,11 @@ public final class BatchConfigLoader {
         // エイリアス爆弾対策」「ネスト深度対策」は実際には効いていなかった
         // （codePointLimit だけは Scanner 側で効くため機能する）。
         // 対策として、実際に Composer を通す素の SnakeYAML ローダーをもう一つ用意し、
-        // parse() の中で本パースの前に「読み捨てるだけの検証パス」として一度読ませることで
-        // 上限超過を検出する。SafeConstructor を使うのは、危険な !!java.* タグ経由の
-        // 任意 Java オブジェクト構築（deserialization gadget）を避けるため
+        // parse() の中で本パースの前に「読み捨てるだけの検証パス」として compose() させることで
+        // 上限超過を検出する（compose() は値構築を行わないため enforceYamlSafetyLimits を参照）。
+        // SafeConstructor を渡しているのは多層防御: compose() 自体は constructor を使わないが、
+        // 将来 load() 系へ書き換えられた場合でも危険な !!java.* タグ経由の
+        // 任意 Java オブジェクト構築（deserialization gadget）が起きないようにしておく
         // （§9 危険な実行・安全でない解析を避ける: YAML は safe_load 相当を使う）。
         this.boundsGuard = new Yaml(new SafeConstructor(loaderOptions));
     }
@@ -257,34 +269,50 @@ public final class BatchConfigLoader {
     }
 
     /**
-     * Parses {@code content} with a plain SnakeYAML {@link Yaml} (backed by the
-     * same {@link LoaderOptions} as {@link #mapper}, so the same limits apply)
-     * purely to enforce the alias-count and nesting-depth bounds; the resulting
-     * object graph is discarded, {@link #mapper} still performs the real
-     * structural parse into {@link Batch} right after this call returns.
+     * Composes {@code content} with a plain SnakeYAML {@link Yaml} (backed by
+     * the same {@link LoaderOptions} as {@link #mapper}, so the same limits
+     * apply) purely to enforce the alias-count and nesting-depth bounds; the
+     * resulting node tree is discarded, {@link #mapper} still performs the real
+     * structural parse into {@link Batch} right after this call returns. Using
+     * {@code compose()} rather than {@code load()} deliberately stops at the
+     * Composer: constructing Java values (SnakeYAML's constructor stage) can
+     * throw non-{@link YAMLException} runtime exceptions (e.g. an
+     * {@link IllegalArgumentException} from invalid {@code !!binary} Base64)
+     * that would escape the catch below without the source-labelled
+     * {@link ConfigException} wrapping; the real parse's own error reporting
+     * covers such documents instead.
      *
-     * <p>This exists because {@code mapper} alone does not enforce those two
-     * bounds: jackson-dataformat-yaml's {@code YAMLParser} drives SnakeYAML's
-     * {@code Scanner}/{@code Parser} event stream directly and never builds
-     * nodes through SnakeYAML's {@code Composer}, which is the only class that
-     * reads {@link LoaderOptions#getMaxAliasesForCollections()} and
+     * <p>This pre-pass exists because {@code mapper} alone does not enforce
+     * those two bounds: jackson-dataformat-yaml's {@code YAMLParser} drives
+     * SnakeYAML's {@code Scanner}/{@code Parser} event stream directly and
+     * never builds nodes through SnakeYAML's {@code Composer}, which is the
+     * only class that reads
+     * {@link LoaderOptions#getMaxAliasesForCollections()} and
      * {@link LoaderOptions#getNestingDepthLimit()} (confirmed against the
      * SnakeYAML 2.3 bytecode: neither getter is referenced from any
      * jackson-dataformat-yaml class). Passing the same {@code loaderOptions} to
      * {@code mapper}'s {@code YAMLFactory} therefore silently does nothing for
-     * these two guards -- a small (well under {@link #MAX_CONFIG_BYTES}),
-     * deeply-aliased "billion laughs" document reaches {@code mapper.readValue}
-     * unrejected today. {@link LoaderOptions#getCodePointLimit()} is unaffected
-     * by this gap: it is enforced earlier, in SnakeYAML's {@code StreamReader},
-     * which the Jackson parser does use.
+     * these two guards. (In practice the Jackson pipeline also never expands
+     * aliases into collections, so it is this pre-pass -- not
+     * {@code mapper.readValue} -- that would materialize an aliased document;
+     * the point of the guard is to enforce the documented limits in the one
+     * place that does compose the tree, and to keep them enforced if the
+     * parsing pipeline ever changes.) {@link LoaderOptions#getCodePointLimit()}
+     * is unaffected by this gap: it is enforced earlier, in SnakeYAML's
+     * {@code StreamReader}, which the Jackson parser does use.
      *
      * @throws ConfigException if the document exceeds the alias-count or
      *                         nesting-depth limit
      */
     private void enforceYamlSafetyLimits(String content, String source) {
         try {
-            // 戻り値は使わない（爆弾なら Composer が例外を投げて即座に打ち切られることだけが目的）
-            boundsGuard.load(content);
+            // 戻り値は使わない（爆弾なら Composer が例外を投げて即座に打ち切られることだけが目的）。
+            // load() ではなく compose() を使うのは、上限を検査する Composer だけを通し、
+            // SafeConstructor による Java 値の構築を一切行わないため。load() だと構築段階が
+            // 投げる非 YAMLException 系の実行時例外（例: 不正な !!binary の Base64 が投げる
+            // IllegalArgumentException）が下の catch を素通りし、ソース名を含む
+            // ConfigException に包まれないまま CLI の最終防波堤まで漏れてしまう
+            boundsGuard.compose(new java.io.StringReader(content));
         } catch (YAMLException e) {
             // このガードが検出すべきなのは alias 爆弾・過剰ネストの 2 種類だけであり、
             // それ以外（例えば単なる文法エラー）まで拾ってしまうと、mapper.readValue が
