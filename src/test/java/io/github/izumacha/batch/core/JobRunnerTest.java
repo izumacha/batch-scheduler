@@ -82,12 +82,31 @@ class JobRunnerTest {
     void onlyLastLinesAreKeptForOutputTail() {
         JobRunner runner = new JobRunner(2, Duration.ZERO, false);
         // Emit 5 lines, fail; only the last 2 are retained, and the message
-        // shows the first retained line (line4).
+        // shows the final output line (line5). The tail is a ring buffer that
+        // keeps the END of the output, so the summary must surface its last
+        // line — a failing process conventionally prints its error last, and
+        // the buffer's first line is just an arbitrary mid-stream line
+        // (whichever happened to sit at total-lines minus window-size).
         JobResult r = runner.run(job("many",
                 List.of("sh", "-c", "for i in 1 2 3 4 5; do echo line$i; done; exit 1"), 0, 0));
         assertEquals(JobStatus.FAILED, r.status());
-        assertTrue(r.message().contains("line4"), r.message());
+        assertTrue(r.message().contains("line5"), r.message());
         assertTrue(!r.message().contains("line1"), r.message());
+    }
+
+    @Test
+    void failureMessageShowsFinalErrorLineNotOldestRetainedLine() {
+        JobRunner runner = new JobRunner(3, Duration.ZERO, false);
+        // Emit progress lines then a FATAL line and fail. The retained window
+        // is the last 3 lines (progress4, progress5, FATAL...); the summary
+        // must show the FATAL line, not whichever progress line happens to be
+        // the oldest retained one.
+        JobResult r = runner.run(job("fatal",
+                List.of("sh", "-c",
+                        "for i in 1 2 3 4 5; do echo progress$i; done; echo 'FATAL: the real error'; exit 1"),
+                0, 0));
+        assertEquals(JobStatus.FAILED, r.status());
+        assertTrue(r.message().contains("FATAL: the real error"), r.message());
     }
 
     @Test
