@@ -1,5 +1,6 @@
 package io.github.izumacha.batch.config;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -79,7 +80,16 @@ public final class BatchConfigLoader {
                 // 既定では `timeoutSeconds: 0.9` が 0（= タイムアウト無し）、
                 // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
                 // 小数値は ConfigException（終了コード 3）として明示的に拒否する
-                .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false);
+                .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false)
+                // 同一マップ内の重複キーを「後勝ち」で黙って採用しない。既定では
+                // ジョブ内に `dependsOn:` が 2 回書かれると（コピペや衝突マージの典型）
+                // 先の宣言が静かに消え、依存関係や command が意図せず差し替わったまま
+                // `validate` も OK を返してしまう。重複キーはパースエラー
+                // （ConfigException / 終了コード 3）として明示的に拒否する（§9 入力は信用しない）。
+                // なお SnakeYAML 側の setAllowDuplicateKeys(false) は Composer/Constructor
+                // 経由でしか効かず、jackson-dataformat-yaml のパース経路では機能しないため、
+                // Jackson のストリーム層で検出できる本フラグを使う
+                .configure(JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true);
 
         // jackson-dataformat-yaml の YAMLParser は SnakeYAML の Scanner/Parser の
         // イベント列を直接 Jackson のトークンへ橋渡ししており、maxAliasesForCollections /

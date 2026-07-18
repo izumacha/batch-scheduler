@@ -146,6 +146,45 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void duplicateDependsOnKeyWithinJobSurfacesConfigException() {
+        // A job block declaring dependsOn twice (typical of a bad merge or
+        // copy-paste) must be rejected instead of silently keeping only the
+        // last value: last-wins would erase the declared ordering constraint,
+        // `validate` would report OK, and `run` would execute the job before
+        // its prerequisite.
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo a"]
+                  - id: b
+                    command: ["sh", "-c", "echo b"]
+                    dependsOn: [a]
+                    dependsOn: []
+                """;
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        assertTrue(ex.getMessage().contains("Duplicate"),
+                "duplicate keys must be reported explicitly, was: " + ex.getMessage());
+    }
+
+    @Test
+    void duplicateCommandKeyWithinJobSurfacesConfigException() {
+        // A duplicated command key must not silently replace the first
+        // command with the second one (the job would run something the
+        // author believed they had overridden away).
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo right"]
+                    command: ["sh", "-c", "echo wrong"]
+                """;
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        assertTrue(ex.getMessage().contains("Duplicate"),
+                "duplicate keys must be reported explicitly, was: " + ex.getMessage());
+    }
+
+    @Test
     void malformedYamlSurfacesConfigException() {
         String yaml = "name: etl\njobs: [oops: : :";
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
