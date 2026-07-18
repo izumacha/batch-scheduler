@@ -269,6 +269,36 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void ensureBaseDirectoryRejectsSymlinkedBaseDir(@TempDir Path dir) throws IOException {
+        // baseDir 自体がシンボリックリンクの場合、たとえリンク先が正当なディレクトリでも
+        // createDirectories でリンクをそのまま辿らせず、fail-closed で拒否すること（CWE-59 対策）
+        Path realTarget = dir.resolve("real-target");
+        Files.createDirectory(realTarget);
+        Path link = dir.resolve("linked-store");
+        Files.createSymbolicLink(link, realTarget);
+
+        JsonExecutionStore store = new JsonExecutionStore(link);
+        assertThrows(UncheckedIOException.class, store::ensureBaseDirectory);
+    }
+
+    @Test
+    void findAllAndFindRecentTreatSymlinkedBaseDirAsMissing(@TempDir Path dir) throws IOException {
+        // 読み取り系（findAll/findRecent）も同じシンボリックリンクを辿らず、
+        // baseDir が存在しない場合と同様に空リストを返すこと（書き込み経路だけでなく
+        // 読み取り経路でも攻撃者が差し替えたリンク先の内容を読ませない）
+        Path realTarget = dir.resolve("real-target");
+        Files.createDirectory(realTarget);
+        // リンク先には実行結果ファイルを置いておき、それが「見えない」ことを確認する
+        new JsonExecutionStore(realTarget).save(sampleRun("hidden", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+        Path link = dir.resolve("linked-store");
+        Files.createSymbolicLink(link, realTarget);
+
+        JsonExecutionStore store = new JsonExecutionStore(link);
+        assertTrue(store.findAll().isEmpty());
+        assertTrue(store.findRecent(10).isEmpty());
+    }
+
+    @Test
     void findAllAndFindRecentReturnEmptyWithoutCreatingMissingDir(@TempDir Path dir) {
         // ディレクトリ未存在でも読み取り系は空を返し、副作用で作成しないこと
         // （読み取り専用の場所でも list コマンドが動作するための前提）

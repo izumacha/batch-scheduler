@@ -122,9 +122,20 @@ public final class JsonExecutionStore implements ExecutionStore {
      * 書き込みを伴うコマンドが実行前に保存先の使用可否を早期確認（fail fast）
      * したい場合に明示的に呼ぶ。読み取り専用の利用では呼ばないこと。
      *
-     * @throws UncheckedIOException 作成に失敗した場合（例: 既存ファイルと衝突・権限不足）
+     * @throws UncheckedIOException 作成に失敗した場合（例: 既存ファイルと衝突・権限不足）、
+     *     または {@code baseDir} 自体がシンボリックリンクだった場合
      */
     public void ensureBaseDirectory() {
+        // baseDir 自体がシンボリックリンクの場合は拒否する。docs/DESIGN.md の
+        // 「state ディレクトリの安全性（シンボリックリンク非追従）」は個々の <runId>.json
+        // ファイルには NOFOLLOW_LINKS で既に及んでいるが、ベースディレクトリ自体には
+        // この防御が無く、事前にリンクを仕込まれると Files.createDirectories がリンク先を
+        // そのまま辿ってしまい（CWE-59）、以降のすべての実行結果が想定外のディレクトリへ
+        // 書き込まれてしまう。isSymbolicLink はリンクを辿らずパスそのものを判定するため安全
+        if (Files.isSymbolicLink(baseDir)) {
+            throw new UncheckedIOException(
+                    new IOException("refusing to use a symlinked state directory: " + baseDir));
+        }
         try {
             // ベースディレクトリが存在しない場合は再帰的に作成する
             Files.createDirectories(baseDir);
@@ -201,8 +212,10 @@ public final class JsonExecutionStore implements ExecutionStore {
 
     @Override
     public List<ExecutionResult> findAll() {
-        // ベースディレクトリが存在しない場合は空リストを返す
-        if (!Files.isDirectory(baseDir)) {
+        // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（ensureBaseDirectory
+        // と同じ CWE-59 対策。書き込み経路だけでなく読み取り経路も攻撃者が差し替えた
+        // リンク先を辿らないようにする）は空リストを返す
+        if (Files.isSymbolicLink(baseDir) || !Files.isDirectory(baseDir)) {
             return List.of();
         }
         // 読み込んだ実行結果を蓄積するリストを作成する
@@ -280,8 +293,9 @@ public final class JsonExecutionStore implements ExecutionStore {
                     + ".");
             limit = MAX_UNBOUNDED_RESULTS;
         }
-        // ベースディレクトリが存在しない場合は空リストを返す
-        if (!Files.isDirectory(baseDir)) {
+        // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（findAll と同じ
+        // CWE-59 対策）は空リストを返す
+        if (Files.isSymbolicLink(baseDir) || !Files.isDirectory(baseDir)) {
             return List.of();
         }
         // 中身をパースせず、ファイル名だけを集めて絞り込む候補パスのリスト
