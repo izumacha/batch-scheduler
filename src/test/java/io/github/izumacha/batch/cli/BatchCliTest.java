@@ -90,4 +90,28 @@ class BatchCliTest {
         assertFalse(stderr.contains("\tat "),
                 "stack trace must not leak to stderr, got: " + stderr);
     }
+
+    // メッセージを持たない例外（getMessage() が null）でも「error: null」ではなく
+    // 例外クラス名が表示され、最低限の診断情報が残ることを検証する
+    @Test
+    void executionExceptionHandlerFallsBackToClassNameWhenMessageIsNull() throws Exception {
+        // 検証対象のハンドラを生成する（BatchCli.run() が実際に設定するものと同一クラス）
+        BatchCli.SanitizingExecutionExceptionHandler handler =
+                new BatchCli.SanitizingExecutionExceptionHandler();
+        // メッセージ無し（getMessage() が null）の例外を用意する
+        RuntimeException noMessage = new IllegalStateException();
+
+        // ハンドラを直接呼び出す（commandLine/parseResult はこの実装では使われないため null で良い）
+        int exitCode = handler.handleExecutionException(noMessage, null, null);
+
+        // 他の失敗経路と同じ EXIT_CONFIG（3）が返ることを検証する
+        assertEquals(BatchCli.EXIT_CONFIG, exitCode);
+        // 標準エラーの出力内容を取得する
+        String stderr = capturedErr.toString();
+        // 「error: null」ではなく例外クラス名が表示されることを検証する
+        assertTrue(stderr.contains("error: IllegalStateException"),
+                "expected class-name fallback, got: " + stderr);
+        assertFalse(stderr.contains("error: null"),
+                "must not print 'error: null', got: " + stderr);
+    }
 }

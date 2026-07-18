@@ -88,7 +88,11 @@ public final class BatchCli implements Callable<Integer> {
             // しまう（実際に検証用テストでこの回帰を確認した）。他の catch 節が e.getMessage() だけを
             // 使い、生の例外を一切 Logger に渡していないのと同じ理由で、ここでもメッセージ文字列
             // だけを扱う。
-            System.err.println("error: " + ex.getMessage());
+            // メッセージを持たない例外（例: new IllegalStateException()）だと "error: null" と
+            // 表示されて診断価値が無いため、その場合は例外クラス名を代わりに表示する
+            String message = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+            // 1 行のサニタイズ済みメッセージだけを標準エラーへ出力する
+            System.err.println("error: " + message);
             // 個々のコマンドが自前で catch していた場合と同じ EXIT_CONFIG を返す
             return EXIT_CONFIG;
         }
