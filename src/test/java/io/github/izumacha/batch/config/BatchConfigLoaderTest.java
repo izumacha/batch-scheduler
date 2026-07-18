@@ -185,6 +185,33 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void invalidBinaryScalarDoesNotEscapeAsRawRuntimeException() {
+        // Regression guard for the boundsGuard pre-pass: with load() instead of
+        // compose(), SnakeYAML's value-construction stage would throw a raw
+        // IllegalArgumentException (invalid !!binary Base64) that escapes the
+        // YAMLException catch and loses the source-labelled ConfigException
+        // wrapping. Whatever the real parse decides about this document, no
+        // raw runtime exception may leak out of the loader.
+        String yaml = """
+                name: !!binary "not*valid*base64!!"
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo a"]
+                """;
+        try {
+            // Loading may succeed or fail depending on how the real parser
+            // treats the binary scalar; both outcomes satisfy this contract.
+            loader.loadFromString(yaml);
+        } catch (ConfigException expected) {
+            // If it fails, it must be the loader's own wrapped exception,
+            // carrying the source label for diagnosis.
+            assertTrue(expected.getMessage().contains("<string>"), expected.getMessage());
+        }
+        // Any other runtime exception (e.g. IllegalArgumentException from
+        // Base64 decoding) propagates out of the try above and fails the test.
+    }
+
+    @Test
     void malformedYamlSurfacesConfigException() {
         String yaml = "name: etl\njobs: [oops: : :";
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
