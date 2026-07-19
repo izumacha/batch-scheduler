@@ -185,6 +185,33 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void multiDocumentYamlSurfacesConfigException() {
+        // jackson-dataformat-yaml は既定で `---` 区切りの 2 つ目以降のドキュメントを
+        // 黙って読み飛ばすため、「正しい 1 つ目＋2 つ目」のファイルでも `validate` が
+        // OK（終了コード 0）を返し、`run` は先頭ドキュメントのジョブだけを実行して
+        // しまう（サイレントなジョブ喪失）。FAIL_ON_TRAILING_TOKENS の有効化により、
+        // 複数ドキュメントの YAML が ConfigException（終了コード 3）として明示的に
+        // 拒否されることを確認する
+        String yaml = """
+                name: first
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo a"]
+                ---
+                name: second
+                jobs:
+                  - id: b
+                    command: ["sh", "-c", "echo b"]
+                """;
+        // 複数ドキュメントの YAML は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // 他のローダー拒否テストと同様に、設定エラー経路（"invalid batch config"）で
+        // 報告されることをメッセージ文言で検証する
+        assertTrue(ex.getMessage().contains("invalid batch config"),
+                "multi-document YAML must be rejected explicitly, was: " + ex.getMessage());
+    }
+
+    @Test
     void invalidBinaryScalarDoesNotEscapeAsRawRuntimeException() {
         // Regression guard for the boundsGuard pre-pass: with load() instead of
         // compose(), SnakeYAML's value-construction stage would throw a raw

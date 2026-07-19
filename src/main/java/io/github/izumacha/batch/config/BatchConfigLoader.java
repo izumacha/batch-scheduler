@@ -81,6 +81,15 @@ public final class BatchConfigLoader {
                 // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
                 // 小数値は ConfigException（終了コード 3）として明示的に拒否する
                 .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false)
+                // 複数ドキュメント YAML（`---` 区切り）を先頭ドキュメントだけに黙って
+                // 切り詰めない。既定では 2 つ目以降のドキュメントが静かに捨てられ、
+                // 「正しい 1 つ目＋壊れた 2 つ目」のファイルでも `validate` が OK
+                // （終了コード 0）を返し、`run` は先頭ドキュメントのジョブしか実行しない
+                // （= サイレントなジョブ喪失）。本フラグにより最初の Batch 値の後に
+                // トークンが残っていれば MismatchedInputException（JsonMappingException の
+                // サブタイプ）となり、下の catch で ConfigException（終了コード 3）として
+                // 明示的に拒否される（§9 入力は信用しない）
+                .configure(DeserializationFeature.FAIL_ON_TRAILING_TOKENS, true)
                 // 同一マップ内の重複キーを「後勝ち」で黙って採用しない。既定では
                 // ジョブ内に `dependsOn:` が 2 回書かれると（コピペや衝突マージの典型）
                 // 先の宣言が静かに消え、依存関係や command が意図せず差し替わったまま
