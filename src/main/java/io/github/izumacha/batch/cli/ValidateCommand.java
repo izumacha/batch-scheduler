@@ -37,7 +37,8 @@ public final class ValidateCommand implements Callable<Integer> {
             batch = new BatchConfigLoader().load(config);
         } catch (ConfigException e) {
             // 読み込みまたは解析エラーの場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: " + e.getMessage());
+            // （RunCommand/ListCommand と同じく CliFormat.safeMessage でnullメッセージを防ぐ）
+            System.err.println("error: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
 
