@@ -22,6 +22,15 @@ import java.util.Set;
  * {@link Batch} 内のジョブとその依存関係を検証済み・非循環の形で表すクラス。
  * {@link #build(Batch)} で構築し、すべての構造上の問題を一度に検出して
  * {@link ValidationException} として報告する。構築後のクエリは常に成功する。
+ *
+ * <p><b>循環検出の既知の限界:</b> {@link #detectCycles} は反復 DFS で「訪問済み(DONE)」
+ * ノードへの辺を再探索しない標準的な実装のため、複数の異なる循環が同じ合流ノードを
+ * 経由し、かつそのノードが別経路で先に DONE 化されている場合、2 つ目以降の循環は
+ * 同じ validate() 呼び出しでは報告されないことがある（{@link DependencyGraphTest}
+ * の regression テスト参照）。ただしこの種のケースは通常、複数の循環が同一の
+ * 「閉じ辺」を共有するため、報告された 1 件を修正すれば残りも解消される。
+ * 全循環を漏れなく列挙するには強連結成分（Tarjan 等）への刷新が必要だが、
+ * MVP の非目標（大規模グラフアルゴリズムへの投資）とのバランスから見送っている。
  */
 public final class DependencyGraph {
 
