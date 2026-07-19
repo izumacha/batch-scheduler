@@ -11,6 +11,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InMemoryExecutionStoreTest {
@@ -44,6 +45,14 @@ class InMemoryExecutionStoreTest {
     void findByIdNullReturnsEmpty() {
         InMemoryExecutionStore store = new InMemoryExecutionStore();
         assertTrue(store.findById(null).isEmpty());
+    }
+
+    @Test
+    void saveRejectsBlankRunId() {
+        // JsonExecutionStore.save() と同水準の検証: 空白のみの runId も拒否する
+        InMemoryExecutionStore store = new InMemoryExecutionStore();
+        ExecutionResult blank = run("   ", Instant.now(), JobStatus.SUCCEEDED);
+        assertThrows(IllegalArgumentException.class, () -> store.save(blank));
     }
 
     @Test

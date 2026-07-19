@@ -24,9 +24,10 @@ public final class InMemoryExecutionStore implements ExecutionStore {
         if (result == null) {
             throw new IllegalArgumentException("result must not be null");
         }
-        // runId が null の場合も例外を投げる（キーが null ではマップに格納できない）
-        if (result.runId() == null) {
-            throw new IllegalArgumentException("result.runId must not be null");
+        // runId が null または空白の場合も例外を投げる（キーが null/空白ではマップに格納できない。
+        // JsonExecutionStore.save() と同水準の検証にするため isBlank() も拒否する）
+        if (result.runId() == null || result.runId().isBlank()) {
+            throw new IllegalArgumentException("result.runId must not be null or blank");
         }
         // runId をキーにして実行結果をマップに格納する（同じ runId があれば上書きする）
         byRunId.put(result.runId(), result);
