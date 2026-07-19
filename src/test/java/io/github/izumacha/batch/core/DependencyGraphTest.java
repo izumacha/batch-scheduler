@@ -184,6 +184,29 @@ class DependencyGraphTest {
     }
 
     @Test
+    void onlyOneOfTwoCyclesSharingAConfluenceNodeIsReportedPerPass() {
+        // 既知の限界のregressionテスト（DependencyGraph クラス Javadoc参照）:
+        // a は b と c の両方に依存し、b と c はどちらも d に依存し、d は a に依存する
+        // （合流ノード d を経由する2つの独立した循環 a->b->d->a と a->c->d->a を持つ）。
+        // 反復DFSは d を最初の経路(b経由)で DONE 化した後、2つ目の経路(c経由)では
+        // d への辺を再探索しないため、2つ目の循環は同じ validate() 呼び出しでは
+        // 報告されない。この挙動は許容された既知の限界であり、突然変わらないことを
+        // 固定するためのテスト（Tarjan 等への刷新をせずに済ませている根拠）。
+        Batch batch = new Batch("diamond-cycle", List.of(
+                job("a", List.of("b", "c")),
+                job("b", List.of("d")),
+                job("c", List.of("d")),
+                job("d", List.of("a"))));
+        ValidationException ex = assertThrows(ValidationException.class,
+                () -> DependencyGraph.build(batch));
+        long cycleErrorCount = ex.errors().stream()
+                .filter(e -> e.startsWith("dependency cycle detected:"))
+                .count();
+        assertEquals(1, cycleErrorCount,
+                "expected exactly one cycle to be reported per pass, got: " + ex.errors());
+    }
+
+    @Test
     void duplicateDeclarationsOwnErrorsAreStillReported() {
         // 重複 ID の「2 件目」に固有のエラー（今回は不明な依存）があっても、
         // "duplicate job id" とは別にきちんと検出されることを確認する（regression:

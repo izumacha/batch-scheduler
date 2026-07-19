@@ -87,7 +87,12 @@ a successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
   commands — a command whose first token, the program name, is empty or
   whitespace-only can never start — and cycles) and throws a single
   `ValidationException` carrying the full list, so users can fix everything in
-  one pass rather than one error at a time.
+  one pass rather than one error at a time. Cycle detection uses a standard
+  iterative DFS (not full strongly-connected-component enumeration), so in the
+  rare case where two distinct cycles share a confluence node that was already
+  fully explored via another path, only one is guaranteed to be reported per
+  `validate()` call — re-running `validate` after fixing it will surface any
+  remainder. See the Javadoc on `DependencyGraph.detectCycles` for details.
 - **Failure semantics.** Jobs run in topological order. If a job ends `FAILED`,
   every job that depends on it (transitively) is marked `SKIPPED`, and the overall
   run status is `FAILED`. A run is `SUCCEEDED` only if every job succeeded.
