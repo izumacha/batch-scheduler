@@ -167,9 +167,13 @@ public final class BatchConfigLoader {
             // ファイル全体を文字列として読み込む
             content = Files.readString(path);
         } catch (IOException e) {
-            // ファイルが見つからない・読めないなどの IO エラーは ConfigException に包んで投げる
+            // ファイルが見つからない・読めないなどの IO エラーは ConfigException に包んで投げる。
+            // e.getMessage() が null な例外(例: 割り込みによる ClosedByInterruptException)でも
+            // 「(null)」という診断価値の無い文言を埋め込まないよう、他の catch 節と同じ
+            // rootMessage() を使う(CliFormat.safeMessage は例外全体の message が null の場合しか
+            // 救済できず、文中に埋め込まれた "null" までは救済できないため)。
             throw new ConfigException(
-                    "failed to read batch config file: " + path + " (" + e.getMessage() + ")", e);
+                    "failed to read batch config file: " + path + " (" + rootMessage(e) + ")", e);
         }
         // 読み込んだ内容をパースして Batch オブジェクトに変換する
         return parse(content, path.toString());
