@@ -82,6 +82,9 @@ a successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
   which would mean *no timeout at all*. This applies to **all** float literals,
   not just fractional ones: even a whole-number float such as `timeoutSeconds:
   30.0` is rejected — these fields accept integers only.
+- **Single-document YAML only.** A config file containing multiple YAML documents
+  (`---` separators) is rejected as a configuration error (exit code 3) instead of
+  every document after the first being silently dropped (silent job loss).
 - **Validation aggregates all errors.** `DependencyGraph.build` collects every
   structural problem (duplicate ids, unknown/self dependencies, empty or blank
   commands — a command whose first token, the program name, is empty or
