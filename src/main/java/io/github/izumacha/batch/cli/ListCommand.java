@@ -37,10 +37,15 @@ public final class ListCommand implements Callable<Integer> {
 
     @Override
     public Integer call() {
+        // JsonExecutionStore.findRecent は MAX_UNBOUNDED_RESULTS を超える limit を
+        // 静かにクランプするため、先にこちら側でも同じ上限でクランプしておく
+        // （effectiveLimit がストアの安全上限ちょうどになる境界を isTruncated/fetchLimitFor で
+        // 特別扱いするため）
+        int effectiveLimit = effectiveLimit(limit, JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
         // 表示上限ちょうどの件数しかない場合と、上限を超えて切り詰められた場合を区別するため、
-        // 実際に表示する件数より 1 件多く要求する（limit が Integer.MAX_VALUE 付近だと
-        // +1 でオーバーフローするので、その場合は加算しない＝実質「上限なし」として扱う）
-        int fetchLimit = (limit > 0 && limit < Integer.MAX_VALUE) ? limit + 1 : limit;
+        // 実際に表示する件数より 1 件多く要求する（effectiveLimit がストアの安全上限ちょうどの
+        // 場合は +1 すると意図せずクランプされてしまうので、その場合は加算しない）
+        int fetchLimit = fetchLimitFor(effectiveLimit, JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
         // 状態ディレクトリから読み込んだ実行結果リスト（切り詰め判定用に 1 件多い可能性がある）
         List<ExecutionResult> fetched;
         try {
@@ -51,13 +56,16 @@ public final class ListCommand implements Callable<Integer> {
             System.err.println("error: failed to read run state: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
-        // 実際に切り詰められた（隠れた古い実行が存在し得る）かどうか。limit <= 0（全件表示）
-        // でも JsonExecutionStore.findAll の安全上限で切り詰められることがあるため、
+        // 実際に切り詰められた（＝表示されない古い実行が存在し得る）かどうか。
+        // effectiveLimit <= 0（全件表示）でもストアの安全上限で切り詰められることがあるため、
         // 判定は共通ヘルパー isTruncated に委譲する（詳細はそちらの Javadoc 参照）
-        boolean truncated = isTruncated(limit, fetched.size());
-        // 画面に表示するのは常に limit 件まで（limit > 0 で切り詰め判定用に多く取った
-        // 1 件は表示しない。limit <= 0 のときは取得できた全件をそのまま表示する）
-        List<ExecutionResult> runs = (limit > 0 && truncated) ? fetched.subList(0, limit) : fetched;
+        boolean truncated = isTruncated(fetched.size(), effectiveLimit,
+                JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
+        // 画面に表示するのは常に effectiveLimit 件まで（切り詰め判定用に多く取った分は表示しない。
+        // effectiveLimit <= 0 の全件表示では取得できた全件をそのまま表示する）
+        List<ExecutionResult> runs = (effectiveLimit > 0 && truncated)
+                ? fetched.subList(0, Math.min(effectiveLimit, fetched.size()))
+                : fetched;
 
         // 実行記録が 1 件もない場合はその旨を出力して正常終了する
         if (runs.isEmpty()) {
@@ -85,22 +93,51 @@ public final class ListCommand implements Callable<Integer> {
         // 実際に切り詰められた場合のみ、隠れた古い実行があることを注記する
         // （注記文の組み立ては limit の正負で案内が変わるためヘルパーに委譲する）
         if (truncated) {
-            System.out.printf("%n%s%n", truncationNotice(limit));
+            System.out.printf("%n%s%n", truncationNotice(effectiveLimit));
         }
         // 正常終了として EXIT_OK を返す
         return BatchCli.EXIT_OK;
     }
 
     /**
-     * 取得結果が切り詰められた（＝表示されない古い実行が存在し得る）かどうかを判定する。
-     * {@code limit > 0} のときは判定用に 1 件多く要求している前提で「上限より多く取れた」
-     * 場合のみ真。{@code limit <= 0}（全件表示）のときは {@link JsonExecutionStore#findAll}
-     * が内部の安全上限 {@link JsonExecutionStore#MAX_UNBOUNDED_RESULTS} で候補を黙って
-     * 切り詰めることがあるため、取得件数がその上限に達した場合も真とする。ちょうど上限件数
-     * だけが保存されていた（実際には切り詰められていない）場合も真になるが、その区別には
-     * 安全上限を超える全件パースが必要になり本末転倒なため、「最大 N 件まで表示」という
-     * 注記を安全側で出すことを選ぶ（§9 fail-safe。注記文もその曖昧さを含む表現にしている）。
-     * 逆に、安全上限で切り詰められたにもかかわらず破損・読み取り不能ファイルのスキップで
+     * ユーザー指定の limit を、ストアの絶対的な安全上限（storeCeiling）でクランプする。
+     * limit <= 0（上限なし）はそのまま返す。
+     */
+    // JsonExecutionStore.findRecent 側の暗黙のクランプを CLI 側でも先取りして再現する
+    // ヘルパー（実ファイルを大量に用意しなくても単体テストできるよう、ロジックを切り出した）
+    static int effectiveLimit(int limit, int storeCeiling) {
+        // 上限なし指定はそのまま素通しする
+        if (limit <= 0) {
+            return limit;
+        }
+        // ユーザー指定値とストアの安全上限の小さい方を採用する
+        return Math.min(limit, storeCeiling);
+    }
+
+    /**
+     * ストアに問い合わせる実際の件数を決める。切り詰め検出用の「+1 件多く要求する」トリックは、
+     * effectiveLimit がストアの安全上限ちょうど（またはそれ以上）のときは使えない
+     * （+1 しても findRecent 内部で storeCeiling までクランプされ、+1 分の余剰が消えてしまうため）。
+     */
+    static int fetchLimitFor(int effectiveLimit, int storeCeiling) {
+        // 上限なし、またはちょうどストアの安全上限に達している場合はそのまま要求する
+        if (effectiveLimit <= 0 || effectiveLimit >= storeCeiling) {
+            return effectiveLimit;
+        }
+        // 通常時は「+1 件多く要求する」トリックで切り詰め有無を判定する
+        return effectiveLimit + 1;
+    }
+
+    /**
+     * fetched.size() と effectiveLimit（、ストアの安全上限）から、一覧が切り詰められたかを判定する。
+     * effectiveLimit がストアの安全上限ちょうどに達している場合は「+1」トリックが使えないため、
+     * 上限ぴったり返ってきたら（実際には切り詰められていない可能性もあるが）安全側に倒して
+     * 「切り詰められた」とみなす。{@code effectiveLimit <= 0}（全件表示）でも
+     * {@link JsonExecutionStore#findAll} は安全上限 {@link JsonExecutionStore#MAX_UNBOUNDED_RESULTS}
+     * で候補を黙って切り詰めることがあるため、取得件数がその上限に達した場合は同様に
+     * 安全側で「切り詰められた」とみなす（§9 fail-safe。注記文もその曖昧さを含む表現にしている）。
+     *
+     * <p>逆に、安全上限で切り詰められたにもかかわらず破損・読み取り不能ファイルのスキップで
      * 取得件数が上限を下回った場合は注記が出ない（偽陰性）が、これは上限規模（10 万件超）と
      * ファイル破損が同時に起きた場合に限られ、注記はあくまでベストエフォートの案内であるため
      * 許容する（厳密化には上限超の全件パースが必要になり本末転倒）。
@@ -109,27 +146,32 @@ public final class ListCommand implements Callable<Integer> {
      * テストが非現実的なため、{@code JsonExecutionStore.keepMostRecentByFilename} と同様に
      * パッケージプライベートの純粋関数として切り出し、単体テストで検証する。
      */
-    static boolean isTruncated(int limit, int fetchedCount) {
-        // 上限指定あり: +1 件多く要求しているため、上限より多く取れた場合のみ切り詰めと判定する
-        if (limit > 0) {
-            return fetchedCount > limit;
+    static boolean isTruncated(int fetchedSize, int effectiveLimit, int storeCeiling) {
+        // 上限なし（全件表示）: 取得件数がストアの安全上限（サーキットブレーカー）に達して
+        // いれば、それより古い実行が切り捨てられた可能性があるため切り詰めと判定する
+        if (effectiveLimit <= 0) {
+            return fetchedSize >= storeCeiling;
         }
-        // 上限なし（全件表示）: 取得件数が JsonExecutionStore の安全上限（サーキットブレーカー）
-        // に達していれば、それより古い実行が切り捨てられた可能性があるため切り詰めと判定する
-        return fetchedCount >= JsonExecutionStore.MAX_UNBOUNDED_RESULTS;
+        // ストアの安全上限ちょうどに達している場合は、上限ぴったり返ってきたことを
+        // 「まだ隠れているかもしれない」の合図として扱う
+        if (effectiveLimit >= storeCeiling) {
+            return fetchedSize >= storeCeiling;
+        }
+        // 通常時は「+1 件多く要求して、実際に 1 件多く返ってきたか」で判定する
+        return fetchedSize > effectiveLimit;
     }
 
     /**
-     * 切り詰め発生時に表示する注記文を組み立てる。{@code limit > 0} なら従来どおり
-     * {@code --limit 0} で全件表示できる旨を案内し、{@code limit <= 0} なら（既に全件表示を
-     * 要求している利用者へ同じ案内をしても意味がないため）内部の安全上限に達したことを注記する。
-     * {@link #isTruncated} と同じ理由でテスト可能な純粋関数として切り出している。
+     * 切り詰め発生時に表示する注記文を組み立てる。{@code effectiveLimit > 0} なら従来どおり
+     * {@code --limit 0} で全件表示できる旨を案内し、{@code effectiveLimit <= 0} なら（既に
+     * 全件表示を要求している利用者へ同じ案内をしても意味がないため）内部の安全上限に達した
+     * ことを注記する。{@link #isTruncated} と同じ理由でテスト可能な純粋関数として切り出している。
      */
-    static String truncationNotice(int limit) {
+    static String truncationNotice(int effectiveLimit) {
         // 上限指定あり: 全件表示の方法（--limit 0）を案内する従来の注記文を返す
-        if (limit > 0) {
+        if (effectiveLimit > 0) {
             return String.format("(showing up to %d most recent runs; use --limit 0 to list all)",
-                    limit);
+                    effectiveLimit);
         }
         // 上限なし: 安全上限で切り詰められたことを、上限件数とともに注記する
         return String.format(

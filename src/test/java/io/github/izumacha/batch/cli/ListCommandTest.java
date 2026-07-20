@@ -109,15 +109,18 @@ class ListCommandTest {
         // 出なかった）。上限件数分の実ファイルを作るのはテスト実行時間の観点で非現実的な
         // ため、JsonExecutionStore.keepMostRecentByFilename のテストと同様に、切り出された
         // 純粋関数として判定ロジックを検証する。
-        assertTrue(ListCommand.isTruncated(0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
-        assertTrue(ListCommand.isTruncated(-1, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
+        assertTrue(ListCommand.isTruncated(
+                JsonExecutionStore.MAX_UNBOUNDED_RESULTS, 0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
+        assertTrue(ListCommand.isTruncated(
+                JsonExecutionStore.MAX_UNBOUNDED_RESULTS, -1, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
         // 上限未満しか取得されていなければ切り詰めなし（境界値: 上限 - 1）
-        assertFalse(ListCommand.isTruncated(0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS - 1));
+        assertFalse(ListCommand.isTruncated(
+                JsonExecutionStore.MAX_UNBOUNDED_RESULTS - 1, 0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
         // 少数件の通常ケースでも切り詰めなし
-        assertFalse(ListCommand.isTruncated(0, 2));
+        assertFalse(ListCommand.isTruncated(2, 0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
         // limit > 0 の従来判定: 判定用の +1 件が取れた場合のみ切り詰め
-        assertTrue(ListCommand.isTruncated(2, 3));
-        assertFalse(ListCommand.isTruncated(2, 2));
+        assertTrue(ListCommand.isTruncated(3, 2, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
+        assertFalse(ListCommand.isTruncated(2, 2, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
     }
 
     @Test
@@ -146,5 +149,55 @@ class ListCommandTest {
         // --limit に数値でない値を渡すと入力エラー（EXIT_CONFIG）になる
         int code = BatchCli.run("list", "--state-dir", dir.toString(), "--limit", "abc");
         assertEquals(BatchCli.EXIT_CONFIG, code);
+    }
+
+    // 以下は JsonExecutionStore.MAX_UNBOUNDED_RESULTS（100,000）付近の境界動作を検証する
+    // ユニットテスト。実際に 100,000 個の状態ファイルを用意するのは非現実的なため、
+    // ストアの安全上限をパラメータとして受け取れる形に切り出した純粋関数
+    // （effectiveLimit / fetchLimitFor / isTruncated）を、小さな値（storeCeiling=3）で
+    // 代用して検証する（regression: 以前は limit がストアの安全上限ちょうど・それ以上のとき、
+    // 「+1 件多く要求して切り詰めを検出する」トリックが static にクランプされて機能せず、
+    // 切り詰められていても常にフッターが出なかった）。
+
+    @Test
+    void effectiveLimitClampsToStoreCeiling() {
+        // 上限なし（0 以下）はそのまま素通しする
+        assertEquals(0, ListCommand.effectiveLimit(0, 3));
+        assertEquals(-1, ListCommand.effectiveLimit(-1, 3));
+        // ストアの安全上限未満はそのまま
+        assertEquals(2, ListCommand.effectiveLimit(2, 3));
+        // ストアの安全上限ちょうど・それ以上はクランプされる
+        assertEquals(3, ListCommand.effectiveLimit(3, 3));
+        assertEquals(3, ListCommand.effectiveLimit(1000, 3));
+    }
+
+    @Test
+    void fetchLimitForAddsOneOnlyBelowStoreCeiling() {
+        // ストアの安全上限未満なら「+1 件多く要求する」トリックを使う
+        assertEquals(3, ListCommand.fetchLimitFor(2, 3));
+        // ストアの安全上限ちょうどの場合は +1 すると内部でクランプされてしまうので加算しない
+        assertEquals(3, ListCommand.fetchLimitFor(3, 3));
+        // 上限なしはそのまま
+        assertEquals(0, ListCommand.fetchLimitFor(0, 3));
+    }
+
+    @Test
+    void isTruncatedDetectsCutoffAtStoreCeilingBoundary() {
+        // 通常時（ストアの安全上限未満）: +1 件多く返ってきたときだけ切り詰めありと判定する
+        assertTrue(ListCommand.isTruncated(3, 2, 3), "fetched > effectiveLimit のとき切り詰めあり");
+        assertFalse(ListCommand.isTruncated(2, 2, 3), "fetched == effectiveLimit のとき切り詰めなし");
+
+        // regression: effectiveLimit がストアの安全上限ちょうどのとき、+1 トリックが使えないため
+        // 「上限ぴったり返ってきた」こと自体を安全側に倒して切り詰めありと判定しなければならない
+        assertTrue(ListCommand.isTruncated(3, 3, 3),
+                "effectiveLimit がストア上限ちょうどのとき、上限ぴったり返ってきたら切り詰めありとみなす");
+        // 実際に保存件数が上限未満だった場合は誤って切り詰めありとしない
+        assertFalse(ListCommand.isTruncated(2, 3, 3),
+                "effectiveLimit がストア上限ちょうどでも、実際の件数がそれ未満なら切り詰めなし");
+
+        // 上限なし指定でも、取得件数がストアの安全上限に達したら切り詰めありとみなす
+        //（--limit 0 で上限到達時に注記フッターを出すための判定。上限未満なら切り詰めなし）
+        assertTrue(ListCommand.isTruncated(3, 0, 3));
+        assertFalse(ListCommand.isTruncated(2, 0, 3));
     }
 }
