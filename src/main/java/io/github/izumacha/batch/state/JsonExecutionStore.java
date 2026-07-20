@@ -249,6 +249,17 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (runId == null || runId.isBlank()) {
             return Optional.empty();
         }
+        // runId からファイルパスを計算する（パストラバーサル対策の検証を含む）。
+        // ベースディレクトリの存在確認・シンボリックリンク確認より必ず先に実行すること。
+        // fileFor は不正な runId（".."・"/"・"\"・NUL 等を含む）に対して
+        // IllegalArgumentException を投げる契約であり、RunCommand の --rerun-failed 検証は
+        // この契約に依存している（呼び出し元コメント参照）。この検証をディレクトリの
+        // 存在確認より後段に置くと、ベースディレクトリがまだ作成されていない状態
+        // （save()/ensureBaseDirectory() を一度も呼んでいない読み取り専用の利用。
+        // findAll/findRecent が意図的にサポートするのと同じ状況）で不正な runId を渡した際、
+        // 検証が実行される前に「結果なし」を静かに返してしまい契約を破る（回帰。
+        // findByIdValidatesRunIdBeforeCheckingStateDirExists で検証）
+        Path file = fileFor(runId);
         // baseDir 自体がシンボリックリンクの場合、または存在しない場合は「結果なし」として扱う
         // （findAll/findRecent と共通の CWE-59 対策。resolveRealBaseDir() 参照）。ここで得られる
         // 実体パスは、下の tryRead がファイルの実体パスを解決した直後にその配下かどうかを
@@ -257,8 +268,6 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (realBase.isEmpty()) {
             return Optional.empty();
         }
-        // runId からファイルパスを計算する
-        Path file = fileFor(runId);
         // Do not follow symlinks: only read a regular file that lives directly in
         // the state directory, never a link an attacker may have swapped in.
         // シンボリックリンクを辿らずに通常ファイルかどうか確認する（パストラバーサル対策）

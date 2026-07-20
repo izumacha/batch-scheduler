@@ -152,6 +152,31 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdValidatesRunIdBeforeCheckingStateDirExists(@TempDir Path dir) {
+        // findById の runId 検証（fileFor 経由のパストラバーサル対策）は、ベースディレクトリの
+        // 存在確認より必ず先に行われる契約（RunCommand の --rerun-failed 検証はこの契約に
+        // 依存する）。rejectsRunIdsWithPathSeparatorsToPreventTraversal は各 evil id ごとに
+        // store.save(run) を先に呼んでおり、save() は fileFor で例外を投げる前に
+        // ensureBaseDirectory() でディレクトリを作成済みにしてしまうため、その副作用で
+        // ディレクトリが存在する状態のまま findById が呼ばれてしまい、この契約の検証には
+        // なっていなかった（回帰を見逃した経緯）。ここでは save()/ensureBaseDirectory() を
+        // 一切呼ばず、ベースディレクトリが一度も作成されていない状態のまま不正な runId を
+        // findById に渡し、それでも IllegalArgumentException が投げられることを確認する
+        // （findAll/findRecent が意図的にサポートする「読み取り専用でディレクトリ未作成」の
+        // 利用シナリオと同じ状況）
+        Path neverCreated = dir.resolve("never-created-state-dir");
+        assertFalse(Files.exists(neverCreated));
+        JsonExecutionStore store = new JsonExecutionStore(neverCreated);
+
+        for (String evil : List.of("../escape", "a/b", "..", "a\\b")) {
+            assertThrows(IllegalArgumentException.class, () -> store.findById(evil), evil);
+        }
+
+        // 検証だけが行われ、ディレクトリが副作用で作成されていないことも確認する
+        assertFalse(Files.exists(neverCreated));
+    }
+
+    @Test
     void skippedJobsWithNullInstantsRoundTrip(@TempDir Path dir) {
         JsonExecutionStore store = new JsonExecutionStore(dir);
         Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
