@@ -169,20 +169,30 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (result.runId() == null || result.runId().isBlank()) {
             throw new IllegalArgumentException("result.runId must not be null or blank");
         }
-        // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）
+        // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）。
+        // ここで isBaseDirSymlink() による事前チェックが走り、事前に仕込まれたシンボリック
+        // リンクは fail fast で拒否される
         ensureBaseDirectory();
-        // ensureBaseDirectory() 内部のチェックから実際に書き込みが起きる Files.createTempFile
-        // までの間にも、baseDir がシンボリックリンクへ差し替えられる余地が残っていた（TOCTOU）。
-        // Files.createDirectories はリンク先が既存ディレクトリなら「作成済み」として素通りに
-        // 扱ってしまうため、チェック直後～createDirectories 実行中の間に差し替えられると、
-        // 以降の書き込みはリンク先へそのまま向かってしまう。java.nio.file のパス解決 API では
-        // check-then-act の隙間を完全にゼロにはできない（真に原子的にするには
-        // openat 相当の fd 経由操作が必要）ため、実際に書き込みが起きる直前でもう一度だけ
-        // 確認し直し、悪用可能な窓を実務上できる限り狭める（§6 DRY:
-        // isBaseDirSymlink() は既存の判定ロジックをそのまま再利用）
-        if (isBaseDirSymlink()) {
+        // ensureBaseDirectory() の判定から実際に書き込みが完了するまでの間にも、baseDir が
+        // シンボリックリンクへ動的に差し替えられる余地が残っていた（TOCTOU）。
+        // Files.createTempFile と Files.move はどちらも呼び出し時点の baseDir をパスとして
+        // 再解決するため、その途中どこか 1 箇所だけをもう一度 isBaseDirSymlink() で
+        // 再チェックしても、その次の 1 手が実際に差し替えを踏む可能性は残ってしまい
+        // （例えば move 直前だけ確認しても move 自体との間にまだ隙間が残る）、
+        // 何回チェックを増やしても隙間を完全にはゼロにできない。そこで方式を変える:
+        // 書き込みシーケンスの前後で baseDir の実体パス（シンボリックリンクを解決した
+        // 実際のディレクトリ）を記録しておき、書き込みが完了した直後に「実際に書き込んだ
+        // 先」が開始時に確認した実体ディレクトリと一致するかを検証する。シーケンス中の
+        // どの時点で差し替えが起きても、この 1 回の事後検証で必ず検知でき、一致しなければ
+        // 誤って書き込まれたファイルを削除したうえで拒否する（fail-closed）。
+        // ensureBaseDirectory() が baseDir を作成済みなので toRealPath() は例外なく解決できる
+        Path expectedRealBase;
+        try {
+            expectedRealBase = baseDir.toRealPath();
+        } catch (IOException e) {
+            // 実体パスの解決に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
-                    new IOException("refusing to use a symlinked state directory: " + baseDir));
+                    "failed to resolve execution store directory: " + baseDir, e);
         }
         try {
             // runId から書き込み先のファイルパスを計算する
@@ -210,6 +220,9 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
                 Files.deleteIfExists(tmp);
             }
+            // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
+            // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
+            verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -360,6 +373,40 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         return results;
+    }
+
+    /**
+     * Verifies that {@code target} -- the file {@link #save} just finished
+     * writing -- actually landed under {@code expectedRealBase}, the base
+     * directory's resolved real path captured before the write sequence
+     * began, and rejects (deleting the misdirected file first) if not.
+     *
+     * <p>{@link Files#createTempFile} and {@link Files#move} both re-resolve
+     * {@code baseDir} by path rather than through an already-open directory
+     * handle, so a symlink swap at any point during the write sequence -- not
+     * just one swapped in before it started -- would otherwise go undetected.
+     * Comparing real paths after the fact, instead of re-checking {@code
+     * isBaseDirSymlink()} before each individual filesystem call in the
+     * sequence, covers the whole sequence in one pass: no matter which call
+     * the swap happens around, the file's actual final location will not
+     * match {@code expectedRealBase}.
+     *
+     * <p>Package-private, like {@link #keepMostRecentByFilename}, so this
+     * check can be unit-tested directly against two independently-constructed
+     * real directories, without needing to race an actual filesystem swap
+     * into the middle of a single {@link #save} call.
+     */
+    static void verifyWroteUnderExpectedBase(Path target, Path expectedRealBase, Path baseDir) throws IOException {
+        // 実際に書き込んだ場所（target の実体パスの親）が、書き込み開始時に確認した
+        // 実体ディレクトリと一致するかを検証する
+        if (!target.toRealPath().getParent().equals(expectedRealBase)) {
+            // 一致しない場合、シーケンスの途中で baseDir がシンボリックリンクへ差し替えられ、
+            // 意図しない場所へ書き込まれたことを意味するため、誤って書き込まれたファイルを
+            // 削除したうえで拒否する（fail-closed）
+            Files.deleteIfExists(target);
+            throw new UncheckedIOException(new IOException(
+                    "refusing to use a symlinked state directory: " + baseDir));
+        }
     }
 
     /**

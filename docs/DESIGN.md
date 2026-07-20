@@ -134,11 +134,18 @@ malicious resource exhaustion and against tampering with the state directory:
   is itself a symlink (rather than following it via `createDirectories`), and
   `findAll`/`findRecent`/`findById` treat a symlinked base directory the same as
   a missing one, so a pre-planted symlink cannot redirect reads or writes
-  elsewhere. `save()` additionally re-checks immediately before creating the
-  temp file it writes into, narrowing (though, with path-based `java.nio.file`
-  APIs rather than fd-relative operations, not perfectly closing) the window in
-  which the base directory could be swapped for a symlink *during* a call, as
-  opposed to being pre-planted before the tool ever runs.
+  elsewhere. `save()` additionally guards against the base directory being
+  swapped for a symlink *during* the write itself (as opposed to being
+  pre-planted before the tool ever runs): it records the base directory's
+  resolved real path before writing, and after the temp-file-then-atomic-move
+  sequence completes, verifies the file actually landed under that same real
+  directory. A mismatch means the base directory was swapped mid-write, so the
+  misdirected file is deleted and the save is rejected. This "verify after the
+  fact, roll back on mismatch" check covers the entire write sequence in one
+  pass, rather than trying to re-check before every individual filesystem call
+  the sequence makes (which, with path-based `java.nio.file` APIs that
+  re-resolve the base directory on every call, would still leave a gap after
+  the last such check and before the next).
 
 ## Future extensions
 

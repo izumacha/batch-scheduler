@@ -288,13 +288,9 @@ class JsonExecutionStoreTest {
         // save() が実際にそれを呼び出して拒否しているかは別途検証していなかった。baseDir が
         // （事前に仕込まれた）シンボリックリンクの場合、save() 自体が拒否し、かつリンク先の
         // 実ディレクトリには一切ファイルが書き込まれない（＝リンクを辿った先への誤書き込みが
-        // 起きていない）ことまで確認する。なお、save() 内部で書き込み直前に追加した再チェック
-        // （Files.createTempFile 直前の isBaseDirSymlink() 呼び出し）が実際に効くのは
-        // ensureBaseDirectory() 実行中〜完了直後に baseDir が動的に差し替えられるケースであり、
-        // ここで検証している「事前に仕込まれたリンク」は ensureBaseDirectory() 内の 1 回目の
-        // チェックで既に拒否されるため、この単体テストではその再チェック自体は経由しない
-        // （単一スレッドのテストでその一瞬の窓だけを再現するのは非実用的なため、tryRead の
-        // MAX_RECORD_BYTES バイパス対策と同様、静的なケースの回帰確認に留める）
+        // 起きていない）ことまで確認する。これは ensureBaseDirectory() 内の事前チェックで
+        // 拒否される経路であり、書き込み完了後の実体パス検証（verifyWroteUnderExpectedBase、
+        // 別テストで直接検証）はこのテストでは経由しない
         Path realTarget = dir.resolve("real-target");
         Files.createDirectory(realTarget);
         Path link = dir.resolve("linked-store");
@@ -305,6 +301,51 @@ class JsonExecutionStoreTest {
                 () -> store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS))));
         // リンク先の実ディレクトリが空のままであること（書き込みが素通りしていないこと）を確認する
         try (var files = Files.list(realTarget)) {
+            assertTrue(files.findAny().isEmpty());
+        }
+    }
+
+    @Test
+    void verifyWroteUnderExpectedBaseAcceptsMatchingRealPath(@TempDir Path dir) throws IOException {
+        // save() が書き込み完了直後に行う事後検証のハッピーパス。target の実体パスの親が
+        // 期待した実体ディレクトリ（expectedRealBase）と一致する場合は何もせず正常終了し、
+        // 書き込み済みファイルを削除しないこと
+        Path base = dir.resolve("state");
+        Files.createDirectory(base);
+        Path target = base.resolve("run1.json");
+        Files.writeString(target, "{}");
+
+        JsonExecutionStore.verifyWroteUnderExpectedBase(target, base.toRealPath(), base);
+
+        // ファイルが削除されずそのまま残っていること（誤検知でロールバックされていないこと）
+        assertTrue(Files.exists(target));
+    }
+
+    @Test
+    void verifyWroteUnderExpectedBaseRejectsAndRollsBackOnMismatch(@TempDir Path dir) throws IOException {
+        // save() 内部の書き込みシーケンス（Files.createTempFile〜Files.move）はどちらも
+        // 呼び出し時点の baseDir をパスとして再解決するため、シーケンスの途中で baseDir が
+        // シンボリックリンクへ差し替えられると、実際の書き込み先が「期待していた実体
+        // ディレクトリ」とは別の場所になり得る（TOCTOU）。この事後検証はその不一致を
+        // 単一スレッドのテストでも決定的に再現できる: 「期待していた実体ディレクトリ」
+        // (expectedIntendedBase) と「実際に書き込まれてしまった先」(actualWrittenFile,
+        // 別ディレクトリ) を意図的に食い違わせて渡し、拒否＋誤書き込みファイルの削除
+        // （ロールバック）の両方が行われることを確認する
+        Path expectedIntendedBase = dir.resolve("intended-real-target");
+        Files.createDirectory(expectedIntendedBase);
+        Path actualWrittenDir = dir.resolve("attacker-controlled-dir");
+        Files.createDirectory(actualWrittenDir);
+        // シーケンスの途中で差し替えられた結果、実際にはこちらへ書き込まれてしまった体のファイル
+        Path actualWrittenFile = actualWrittenDir.resolve("run1.json");
+        Files.writeString(actualWrittenFile, "{}");
+
+        assertThrows(UncheckedIOException.class, () -> JsonExecutionStore.verifyWroteUnderExpectedBase(
+                actualWrittenFile, expectedIntendedBase.toRealPath(), dir));
+
+        // 誤って書き込まれたファイルが削除され（ロールバック）、意図した実体ディレクトリ側は
+        // 何も書き込まれないままであることの両方を確認する
+        assertFalse(Files.exists(actualWrittenFile));
+        try (var files = Files.list(expectedIntendedBase)) {
             assertTrue(files.findAny().isEmpty());
         }
     }
