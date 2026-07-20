@@ -285,10 +285,16 @@ class JsonExecutionStoreTest {
     void saveRejectsSymlinkedBaseDirAndDoesNotWriteIntoLinkTarget(@TempDir Path dir) throws IOException {
         // save() の公開エントリポイントとしての回帰テスト。ensureBaseDirectory() 単体のテスト
         // (ensureBaseDirectoryRejectsSymlinkedBaseDir) はこの内部ヘルパーだけを直接検証しており、
-        // save() が実際にそれを呼び出しているか・書き込み直前の再チェックまで含めて拒否できているか
-        // は別途検証していなかった。baseDir がシンボリックリンクの場合、save() 自体が拒否し、
-        // かつリンク先の実ディレクトリには一切ファイルが書き込まれない（＝リンクを辿った先への
-        // 誤書き込みが起きていない）ことまで確認する
+        // save() が実際にそれを呼び出して拒否しているかは別途検証していなかった。baseDir が
+        // （事前に仕込まれた）シンボリックリンクの場合、save() 自体が拒否し、かつリンク先の
+        // 実ディレクトリには一切ファイルが書き込まれない（＝リンクを辿った先への誤書き込みが
+        // 起きていない）ことまで確認する。なお、save() 内部で書き込み直前に追加した再チェック
+        // （Files.createTempFile 直前の isBaseDirSymlink() 呼び出し）が実際に効くのは
+        // ensureBaseDirectory() 実行中〜完了直後に baseDir が動的に差し替えられるケースであり、
+        // ここで検証している「事前に仕込まれたリンク」は ensureBaseDirectory() 内の 1 回目の
+        // チェックで既に拒否されるため、この単体テストではその再チェック自体は経由しない
+        // （単一スレッドのテストでその一瞬の窓だけを再現するのは非実用的なため、tryRead の
+        // MAX_RECORD_BYTES バイパス対策と同様、静的なケースの回帰確認に留める）
         Path realTarget = dir.resolve("real-target");
         Files.createDirectory(realTarget);
         Path link = dir.resolve("linked-store");
