@@ -156,6 +156,25 @@ malicious resource exhaustion and against tampering with the state directory:
   (`SecureDirectoryStream`/openat-equivalent) directory operations throughout,
   which is out of scope for this MVP given the trust model above.
 
+  The read path (`findAll`/`findRecent`/`findById`, which all funnel through
+  the shared `tryRead` helper) has the same shape of gap and is closed the
+  same way: `NOFOLLOW_LINKS` on the individual `<runId>.json` file only
+  guards that file's own final path component, so if the base directory
+  itself is swapped for a symlink *during* a read — after the initial
+  symlink/existence check but before the read completes — the intermediate
+  resolution of the file's parent directory would silently follow the swap
+  and serve content from an attacker-controlled location. Each caller
+  resolves the base directory's real path once at the start of the call and
+  passes it to `tryRead`, which reads the file (still bounded by
+  `MAX_RECORD_BYTES` as below) and only *after* the read completes resolves
+  the file's own real path and compares its parent against that captured
+  real base; a mismatch discards the just-read bytes without ever handing
+  them to Jackson, exactly mirroring `save()`'s "verify after the fact"
+  approach rather than re-checking before the read (which would only narrow
+  the window, not close it). The same earlier, not-yet-closed window inside
+  `ensureBaseDirectory()`/the initial check applies here too, for the same
+  reason noted above.
+
 ## Future extensions
 
 - **Parallel execution** of independent jobs (run ready jobs concurrently while

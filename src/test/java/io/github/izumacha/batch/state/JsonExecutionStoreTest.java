@@ -500,6 +500,42 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void tryReadAcceptsFileWhoseRealParentMatchesExpectedBase(@TempDir Path dir) throws IOException {
+        // ハッピーパス: baseDir が差し替えられていない通常のケースでは、事後の実体パス検証が
+        // 誤検知して正常なファイルまで読み飛ばしてしまわないことを確認する
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+
+        Optional<ExecutionResult> result = store.tryRead(dir.resolve("run1.json"), dir.toRealPath());
+
+        assertTrue(result.isPresent());
+        assertEquals("run1", result.get().runId());
+    }
+
+    @Test
+    void tryReadRejectsFileWhoseRealParentDoesNotMatchExpectedBase(@TempDir Path dir) throws IOException {
+        // findById/findAll/findRecent は呼び出し開始時に baseDir の実体パス（expectedRealBase）を
+        // 一度だけ捕捉し、tryRead に渡す。実際に読んだファイルの実体パスの親がそれと食い違う場合
+        // （呼び出しの途中で baseDir がシンボリックリンクへ差し替えられたことを意味する）は、
+        // save() の verifyWroteUnderExpectedBase と同じ「事後に実体パスを比較する」方式で検出し、
+        // 内容を一切 Jackson に渡さず読み飛ばすべきことを、実際の競合を再現せずに直接検証する
+        // （package-private な tryRead を直接呼べるようにしてあるのはこのため）
+        Path expectedBase = dir.resolve("expected-real-base");
+        Files.createDirectory(expectedBase);
+        // 「呼び出し中に差し替えられた結果、実際に読んでしまった」体の別ディレクトリ
+        Path swappedInDir = dir.resolve("swapped-in-dir");
+        Files.createDirectory(swappedInDir);
+        // 中身は有効な JSON にしておき、パース失敗ではなく実体パスの不一致で弾かれることを明確にする
+        new JsonExecutionStore(swappedInDir).save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+        Path actualFile = swappedInDir.resolve("run1.json");
+        JsonExecutionStore store = new JsonExecutionStore(expectedBase);
+
+        Optional<ExecutionResult> result = store.tryRead(actualFile, expectedBase.toRealPath());
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
     void findAllReturnsAllWhenUnderTheSafetyCeiling(@TempDir Path dir) {
         // MAX_UNBOUNDED_RESULTS 件そのものを実ファイルで作って超過させるのはテスト実行時間の
         // 観点で非現実的なため、切り詰めロジック自体は keepMostRecentByFilename の単体テストで
