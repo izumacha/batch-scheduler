@@ -135,6 +135,16 @@ public final class JsonExecutionStore implements ExecutionStore {
      * 書き込みを伴うコマンドが実行前に保存先の使用可否を早期確認（fail fast）
      * したい場合に明示的に呼ぶ。読み取り専用の利用では呼ばないこと。
      *
+     * <p><b>既知の残存リスク:</b> 上の {@code isBaseDirSymlink()} 判定から
+     * {@code Files.createDirectories} 完了までの間に {@code baseDir} がシンボリックリンクへ
+     * 動的に差し替えられる窓は、判定と作成が別々のファイルシステム呼び出しである以上、
+     * path ベースの {@code java.nio.file} API では解消できない（fd 経由の
+     * {@code SecureDirectoryStream}/openat 相当の操作が必要）。{@link #save} 側で
+     * この関数を呼んだ直後に実体パスを記録する事後検証（{@link #verifyWroteUnderExpectedBase}）
+     * も、この窓自体は遡って検知できない — 差し替えが起きた実体パスをそのまま
+     * 「正しい書き込み先」として記録してしまうため。事前に仕込まれたシンボリックリンク
+     * （この関数が呼ばれる前から存在するもの）は上のチェックで確実に拒否される。
+     *
      * @throws UncheckedIOException 作成に失敗した場合（例: 既存ファイルと衝突・権限不足）、
      *     または {@code baseDir} 自体がシンボリックリンクだった場合
      */
