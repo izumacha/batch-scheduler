@@ -117,6 +117,20 @@ public final class JsonExecutionStore implements ExecutionStore {
     }
 
     /**
+     * {@code baseDir} 自体がシンボリックリンクかどうかを判定する（CWE-59 対策）。
+     * {@code ensureBaseDirectory}・{@code findAll}・{@code findRecent}・{@code findById} の
+     * 4 箇所が同一の判定ロジックを必要とするため、判定処理そのものをここに集約する
+     * （§6 DRY: 2〜3 箇所目で重複したら共通化する）。判定結果を受けてどう振る舞うか
+     * （例外を投げる／空を返す）は呼び出し元ごとに異なるため、その後続処理までは
+     * 共通化せず各メソッドに残す。{@code Files.isSymbolicLink} はリンクを辿らずパスそのものを
+     * 判定するため、シンボリックリンクの先を誤って正当な対象として扱うことはない。
+     */
+    private boolean isBaseDirSymlink() {
+        // baseDir がシンボリックリンクかどうかをそのまま返す
+        return Files.isSymbolicLink(baseDir);
+    }
+
+    /**
      * ベースディレクトリを作成・検証する（存在すれば何もしない）。
      * 書き込みを伴うコマンドが実行前に保存先の使用可否を早期確認（fail fast）
      * したい場合に明示的に呼ぶ。読み取り専用の利用では呼ばないこと。
@@ -130,8 +144,8 @@ public final class JsonExecutionStore implements ExecutionStore {
         // ファイルには NOFOLLOW_LINKS で既に及んでいるが、ベースディレクトリ自体には
         // この防御が無く、事前にリンクを仕込まれると Files.createDirectories がリンク先を
         // そのまま辿ってしまい（CWE-59）、以降のすべての実行結果が想定外のディレクトリへ
-        // 書き込まれてしまう。isSymbolicLink はリンクを辿らずパスそのものを判定するため安全
-        if (Files.isSymbolicLink(baseDir)) {
+        // 書き込まれてしまう。判定ロジックは isBaseDirSymlink() に集約している（§6 DRY）
+        if (isBaseDirSymlink()) {
             throw new UncheckedIOException(
                     new IOException("refusing to use a symlinked state directory: " + baseDir));
         }
@@ -203,7 +217,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 末尾コンポーネントにしか効かない）ため、攻撃者が --state-dir を事前にリンクへ差し替えて
         // いた場合、意図しない場所の <runId>.json をそのまま読めてしまう。findAll/findRecent は
         // この対策を既に持つが、findById だけ抜け落ちていた
-        if (Files.isSymbolicLink(baseDir)) {
+        if (isBaseDirSymlink()) {
             return Optional.empty();
         }
         // runId からファイルパスを計算する
@@ -224,7 +238,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（ensureBaseDirectory
         // と同じ CWE-59 対策。書き込み経路だけでなく読み取り経路も攻撃者が差し替えた
         // リンク先を辿らないようにする）は空リストを返す
-        if (Files.isSymbolicLink(baseDir) || !Files.isDirectory(baseDir)) {
+        if (isBaseDirSymlink() || !Files.isDirectory(baseDir)) {
             return List.of();
         }
         // 読み込んだ実行結果を蓄積するリストを作成する
@@ -304,7 +318,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（findAll と同じ
         // CWE-59 対策）は空リストを返す
-        if (Files.isSymbolicLink(baseDir) || !Files.isDirectory(baseDir)) {
+        if (isBaseDirSymlink() || !Files.isDirectory(baseDir)) {
             return List.of();
         }
         // 中身をパースせず、ファイル名だけを集めて絞り込む候補パスのリスト

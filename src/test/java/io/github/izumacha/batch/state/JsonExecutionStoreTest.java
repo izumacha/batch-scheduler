@@ -286,14 +286,7 @@ class JsonExecutionStoreTest {
         // 読み取り系（findAll/findRecent）も同じシンボリックリンクを辿らず、
         // baseDir が存在しない場合と同様に空リストを返すこと（書き込み経路だけでなく
         // 読み取り経路でも攻撃者が差し替えたリンク先の内容を読ませない）
-        Path realTarget = dir.resolve("real-target");
-        Files.createDirectory(realTarget);
-        // リンク先には実行結果ファイルを置いておき、それが「見えない」ことを確認する
-        new JsonExecutionStore(realTarget).save(sampleRun("hidden", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
-        Path link = dir.resolve("linked-store");
-        Files.createSymbolicLink(link, realTarget);
-
-        JsonExecutionStore store = new JsonExecutionStore(link);
+        JsonExecutionStore store = newStoreWithHiddenRunBehindSymlink(dir);
         assertTrue(store.findAll().isEmpty());
         assertTrue(store.findRecent(10).isEmpty());
     }
@@ -305,16 +298,29 @@ class JsonExecutionStoreTest {
         // リンクでないことしか保証しないため、baseDir 自体がリンクだと親ディレクトリの
         // 中間コンポーネントとして素通りに辿られ、リンク先に置かれた <runId>.json を
         // そのまま読めてしまっていた（このテストが直すバグ）
+        JsonExecutionStore store = newStoreWithHiddenRunBehindSymlink(dir);
+        assertTrue(store.findById("hidden").isEmpty());
+    }
+
+    /**
+     * {@code dir} 配下に実行結果を 1 件保存した実ディレクトリを作り、それを指す
+     * シンボリックリンク経由の {@link JsonExecutionStore} を返す共通セットアップ
+     * （findAll/findRecent/findById の 3 つのシンボリックリンク回帰テストで重複していた
+     * 手順を 1 箇所にまとめたもの。§6 DRY: 2〜3 箇所目で重複したら共通化する）。
+     * 保存した実行結果の runId は常に {@code "hidden"} で、各テストはそれが
+     * リンク経由では「見えない」ことを検証する。
+     */
+    private static JsonExecutionStore newStoreWithHiddenRunBehindSymlink(Path dir) throws IOException {
+        // シンボリックリンクの先となる実ディレクトリを作成する
         Path realTarget = dir.resolve("real-target");
         Files.createDirectory(realTarget);
         // リンク先には実行結果ファイルを置いておき、それが「見えない」ことを確認する
-        Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        new JsonExecutionStore(realTarget).save(sampleRun("hidden", start));
+        new JsonExecutionStore(realTarget).save(sampleRun("hidden", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+        // 実ディレクトリを指すシンボリックリンクを作成する
         Path link = dir.resolve("linked-store");
         Files.createSymbolicLink(link, realTarget);
-
-        JsonExecutionStore store = new JsonExecutionStore(link);
-        assertTrue(store.findById("hidden").isEmpty());
+        // シンボリックリンクの方を baseDir として使うストアを返す
+        return new JsonExecutionStore(link);
     }
 
     @Test
