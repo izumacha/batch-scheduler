@@ -152,6 +152,31 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdValidatesRunIdBeforeCheckingStateDirExists(@TempDir Path dir) {
+        // findById の runId 検証（fileFor 経由のパストラバーサル対策）は、ベースディレクトリの
+        // 存在確認より必ず先に行われる契約（RunCommand の --rerun-failed 検証はこの契約に
+        // 依存する）。rejectsRunIdsWithPathSeparatorsToPreventTraversal は各 evil id ごとに
+        // store.save(run) を先に呼んでおり、save() は fileFor で例外を投げる前に
+        // ensureBaseDirectory() でディレクトリを作成済みにしてしまうため、その副作用で
+        // ディレクトリが存在する状態のまま findById が呼ばれてしまい、この契約の検証には
+        // なっていなかった（回帰を見逃した経緯）。ここでは save()/ensureBaseDirectory() を
+        // 一切呼ばず、ベースディレクトリが一度も作成されていない状態のまま不正な runId を
+        // findById に渡し、それでも IllegalArgumentException が投げられることを確認する
+        // （findAll/findRecent が意図的にサポートする「読み取り専用でディレクトリ未作成」の
+        // 利用シナリオと同じ状況）
+        Path neverCreated = dir.resolve("never-created-state-dir");
+        assertFalse(Files.exists(neverCreated));
+        JsonExecutionStore store = new JsonExecutionStore(neverCreated);
+
+        for (String evil : List.of("../escape", "a/b", "..", "a\\b")) {
+            assertThrows(IllegalArgumentException.class, () -> store.findById(evil), evil);
+        }
+
+        // 検証だけが行われ、ディレクトリが副作用で作成されていないことも確認する
+        assertFalse(Files.exists(neverCreated));
+    }
+
+    @Test
     void skippedJobsWithNullInstantsRoundTrip(@TempDir Path dir) {
         JsonExecutionStore store = new JsonExecutionStore(dir);
         Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
@@ -497,6 +522,45 @@ class JsonExecutionStoreTest {
         assertEquals(
                 List.of(Path.of("run-09.json"), Path.of("run-08.json"), Path.of("run-07.json")),
                 kept);
+    }
+
+    @Test
+    void tryReadAcceptsFileWhoseRealParentMatchesExpectedBase(@TempDir Path dir) throws IOException {
+        // ハッピーパス: baseDir が差し替えられていない通常のケースでは、読み込む前に行う
+        // 実体パス検証が誤検知して正常なファイルまで読み飛ばしてしまわないことを確認する
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+
+        Optional<ExecutionResult> result = store.tryRead(dir.resolve("run1.json"), dir.toRealPath());
+
+        assertTrue(result.isPresent());
+        assertEquals("run1", result.get().runId());
+    }
+
+    @Test
+    void tryReadRejectsFileWhoseRealParentDoesNotMatchExpectedBase(@TempDir Path dir) throws IOException {
+        // findById/findAll/findRecent は呼び出し開始時に baseDir の実体パス（expectedRealBase）を
+        // 一度だけ捕捉し、tryRead に渡す。渡された file の実体パスの親がそれと食い違う場合
+        // （呼び出しの途中で baseDir がシンボリックリンクへ差し替えられたことを意味する）は、
+        // tryRead が file を開いて読み込む「前」に実体パスを解決してこの不一致を検出し、
+        // 内容を一切 Jackson に渡さず読み飛ばすべきことを、実際の競合を再現せずに直接検証する
+        // （package-private な tryRead を直接呼べるようにしてあるのはこのため。tryRead の
+        // Javadoc が説明するとおり、事後（読み込んだ後）に比較する方式では baseDir を
+        // 差し替えて読み、検証前に元へ戻す「揺り戻し」で不一致をすり抜けられてしまうため、
+        // 読み込む前に検証してから、その解決済みの実体パス自身を読む設計にしている）
+        Path expectedBase = dir.resolve("expected-real-base");
+        Files.createDirectory(expectedBase);
+        // 「呼び出し中に差し替えられた結果、実際に読んでしまった」体の別ディレクトリ
+        Path swappedInDir = dir.resolve("swapped-in-dir");
+        Files.createDirectory(swappedInDir);
+        // 中身は有効な JSON にしておき、パース失敗ではなく実体パスの不一致で弾かれることを明確にする
+        new JsonExecutionStore(swappedInDir).save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+        Path actualFile = swappedInDir.resolve("run1.json");
+        JsonExecutionStore store = new JsonExecutionStore(expectedBase);
+
+        Optional<ExecutionResult> result = store.tryRead(actualFile, expectedBase.toRealPath());
+
+        assertTrue(result.isEmpty());
     }
 
     @Test

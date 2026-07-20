@@ -249,18 +249,25 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (runId == null || runId.isBlank()) {
             return Optional.empty();
         }
-        // baseDir 自体がシンボリックリンクの場合、findAll/findRecent と同じ CWE-59 対策として
-        // 存在しない場合と同様に扱う。下の Files.isRegularFile(..., NOFOLLOW_LINKS) は解決済み
-        // パスの「末尾コンポーネント」がリンクでないことしか保証せず、baseDir 自体がリンクだと
-        // 親ディレクトリの中間コンポーネントとして素通りに辿られてしまう（NOFOLLOW_LINKS は
-        // 末尾コンポーネントにしか効かない）ため、攻撃者が --state-dir を事前にリンクへ差し替えて
-        // いた場合、意図しない場所の <runId>.json をそのまま読めてしまう。findAll/findRecent は
-        // この対策を既に持つが、findById だけ抜け落ちていた
-        if (isBaseDirSymlink()) {
+        // runId からファイルパスを計算する（パストラバーサル対策の検証を含む）。
+        // ベースディレクトリの存在確認・シンボリックリンク確認より必ず先に実行すること。
+        // fileFor は不正な runId（".."・"/"・"\"・NUL 等を含む）に対して
+        // IllegalArgumentException を投げる契約であり、RunCommand の --rerun-failed 検証は
+        // この契約に依存している（呼び出し元コメント参照）。この検証をディレクトリの
+        // 存在確認より後段に置くと、ベースディレクトリがまだ作成されていない状態
+        // （save()/ensureBaseDirectory() を一度も呼んでいない読み取り専用の利用。
+        // findAll/findRecent が意図的にサポートするのと同じ状況）で不正な runId を渡した際、
+        // 検証が実行される前に「結果なし」を静かに返してしまい契約を破る（回帰。
+        // findByIdValidatesRunIdBeforeCheckingStateDirExists で検証）
+        Path file = fileFor(runId);
+        // baseDir 自体がシンボリックリンクの場合、または存在しない場合は「結果なし」として扱う
+        // （findAll/findRecent と共通の CWE-59 対策。resolveRealBaseDir() 参照）。ここで得られる
+        // 実体パスは、下の tryRead がファイルの実体パスを解決した直後にその配下かどうかを
+        // 検証するための基準点として渡す（理由は tryRead の Javadoc 参照）
+        Optional<Path> realBase = resolveRealBaseDir();
+        if (realBase.isEmpty()) {
             return Optional.empty();
         }
-        // runId からファイルパスを計算する
-        Path file = fileFor(runId);
         // Do not follow symlinks: only read a regular file that lives directly in
         // the state directory, never a link an attacker may have swapped in.
         // シンボリックリンクを辿らずに通常ファイルかどうか確認する（パストラバーサル対策）
@@ -269,15 +276,17 @@ public final class JsonExecutionStore implements ExecutionStore {
             return Optional.empty();
         }
         // 読み込み・パース・壊れたファイルの読み飛ばしは findAll/findRecent と共通のヘルパーに委譲する
-        return tryRead(file);
+        return tryRead(file, realBase.get());
     }
 
     @Override
     public List<ExecutionResult> findAll() {
         // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（ensureBaseDirectory
         // と同じ CWE-59 対策。書き込み経路だけでなく読み取り経路も攻撃者が差し替えた
-        // リンク先を辿らないようにする）は空リストを返す
-        if (isBaseDirSymlink() || !Files.isDirectory(baseDir)) {
+        // リンク先を辿らないようにする）は空リストを返す。得られる実体パスは tryRead が
+        // ファイルの実体パスを検証する基準点に使う（resolveRealBaseDir() / tryRead の Javadoc 参照）
+        Optional<Path> realBase = resolveRealBaseDir();
+        if (realBase.isEmpty()) {
             return List.of();
         }
         // 読み込んだ実行結果を蓄積するリストを作成する
@@ -305,12 +314,45 @@ public final class JsonExecutionStore implements ExecutionStore {
             candidates = keepMostRecentByFilename(candidates, MAX_UNBOUNDED_RESULTS);
         }
         // 絞り込んだ候補だけを実際にパースする（読み込み・パース・壊れたファイルの読み飛ばしは
-        // 共通ヘルパー tryRead に委譲する）
-        candidates.forEach(p -> tryRead(p).ifPresent(results::add));
+        // 共通ヘルパー tryRead に委譲する。expectedRealBase は呼び出し開始時に確認した実体パスで、
+        // tryRead は各候補ファイルの実体パスを読み込む前に検証してから、その実体パス自身を読む）
+        Path expectedRealBase = realBase.get();
+        candidates.forEach(p -> tryRead(p, expectedRealBase).ifPresent(results::add));
         // 結果を開始日時の降順（最新順）に並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         // 並べ替え済みのリストを返す
         return results;
+    }
+
+    /**
+     * {@code baseDir} の実体パスを解決する。{@link #isBaseDirSymlink()} が真、または
+     * {@code baseDir} がディレクトリとして存在しない（未作成・削除済み・通常ファイルとの衝突等）
+     * 場合は {@link Optional#empty()} を返し、{@link #findAll}/{@link #findRecent}/{@link #findById}
+     * はこれを「結果なし」として扱う（既存の CWE-59 対策をそのまま踏襲）。
+     *
+     * <p>返す実体パスは単なる存在確認ではなく、{@link #tryRead} が「これから読もうとしている
+     * ファイルの実体パスが、この実体ディレクトリ配下にあるか」を読み込む前に検証するための
+     * 基準点として使う（{@link #tryRead} の Javadoc 参照）。{@code save()} が書き込み開始時に
+     * {@code baseDir.toRealPath()} を一度だけ捕捉するのと同じ考え方を読み取り経路にも適用したもの。
+     */
+    private Optional<Path> resolveRealBaseDir() {
+        // baseDir 自体がシンボリックリンクの場合は「存在しない」として扱う
+        if (isBaseDirSymlink()) {
+            return Optional.empty();
+        }
+        // ディレクトリとして存在しない場合（未作成・削除済み・通常ファイルとの衝突等）も
+        // 「存在しない」として扱う（findAll/findRecent が従来持っていた判定を集約）
+        if (!Files.isDirectory(baseDir)) {
+            return Optional.empty();
+        }
+        try {
+            // 実体パスを解決して返す（以降、この呼び出し内で読み込む全ファイルの基準点になる）
+            return Optional.of(baseDir.toRealPath());
+        } catch (IOException e) {
+            // 直前の isDirectory 確認との間に削除された等、まれな競合も「存在しない」として
+            // 扱う（fail-safe。例外を伝播させて呼び出し元をクラッシュさせない）
+            return Optional.empty();
+        }
     }
 
     /**
@@ -356,8 +398,10 @@ public final class JsonExecutionStore implements ExecutionStore {
             limit = MAX_UNBOUNDED_RESULTS;
         }
         // ベースディレクトリが存在しない場合、またはシンボリックリンクの場合（findAll と同じ
-        // CWE-59 対策）は空リストを返す
-        if (isBaseDirSymlink() || !Files.isDirectory(baseDir)) {
+        // CWE-59 対策）は空リストを返す。得られる実体パスは tryRead がファイルの実体パスを
+        // 検証する基準点に使う（resolveRealBaseDir() / tryRead の Javadoc 参照）
+        Optional<Path> realBase = resolveRealBaseDir();
+        if (realBase.isEmpty()) {
             return List.of();
         }
         // 中身をパースせず、ファイル名だけを集めて絞り込む候補パスのリスト
@@ -379,8 +423,9 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 絞り込んだ候補ファイルだけを実際にパースする（全件パースを避けて資源枯渇を防ぐ）。
         // 読み込み・パース・壊れたファイルの読み飛ばしは findAll と共通のヘルパー tryRead に委譲する
         List<ExecutionResult> results = new ArrayList<>();
+        Path expectedRealBase = realBase.get();
         for (Path p : candidates) {
-            tryRead(p).ifPresent(results::add);
+            tryRead(p, expectedRealBase).ifPresent(results::add);
         }
         // ファイル名の降順とstartedAtの降順は通常一致するが、契約どおりの順序を厳密に保証するため
         // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
@@ -466,8 +511,105 @@ public final class JsonExecutionStore implements ExecutionStore {
      * instead of throwing. Shared by {@link #findById}, {@link #findAll}, and
      * {@link #findRecent} so the "skip broken files" contract documented on
      * this class lives in exactly one place.
+     *
+     * <p><b>TOCTOU on the read path.</b> Every caller resolves {@code
+     * expectedRealBase} -- {@code baseDir}'s resolved real path -- via {@link
+     * #resolveRealBaseDir()} once, before this method is ever invoked (findById
+     * directly; findAll/findRecent once for the whole batch of candidates).
+     * {@code file} itself may still traverse {@code baseDir} as an
+     * intermediate path component, and (as documented on {@link #findById})
+     * {@link LinkOption#NOFOLLOW_LINKS} only guards a path's own final
+     * component -- so if {@code baseDir} were swapped for a symlink and this
+     * method simply opened {@code file} (as originally passed in) with
+     * {@code NOFOLLOW_LINKS}, the intermediate resolution would silently
+     * follow the swap.
+     *
+     * <p>An earlier version of this method opened {@code file} first and
+     * compared its real path against {@code expectedRealBase} only
+     * <em>after</em> the read completed. That is exactly the pattern {@link
+     * #save} uses for the write side via {@link #verifyWroteUnderExpectedBase}
+     * -- but it does not translate safely to reads: {@code save()}'s
+     * post-write check inspects the file it just physically created, which
+     * cannot un-happen, so a real-path mismatch reliably proves the write
+     * went to the wrong place. A read's "verify after" check instead
+     * re-resolves {@code file} from scratch, independently of the
+     * already-completed read -- so a caller could swap {@code baseDir} to a
+     * symlink, let the read follow it and return attacker-controlled bytes,
+     * then swap {@code baseDir} back to the legitimate directory <em>before</em>
+     * the post-read check runs. That check would then resolve cleanly to
+     * {@code expectedRealBase} and wrongly accept bytes that were never read
+     * from there.
+     *
+     * <p>This method instead resolves {@code file}'s real path <em>first</em>,
+     * verifies it under {@code expectedRealBase}, and then reads from that
+     * <b>already-resolved</b> real path rather than from {@code file} again.
+     * Because a fully-resolved real path contains no symlink components by
+     * definition, no later swap of {@code baseDir} -- the original,
+     * possibly-symlinked path -- can redirect an open of it: the open no
+     * longer mentions {@code baseDir} at all. This is only possible because,
+     * unlike a write's target, a read's target already exists and can be
+     * resolved before being touched. {@link LinkOption#NOFOLLOW_LINKS} is
+     * still applied to that final open, so if the file at the resolved real
+     * path is itself replaced by a symlink in the narrow window between the
+     * resolve and the open, the read fails closed instead of following it.
+     * The residual window is therefore the same one already accepted
+     * elsewhere in this class (see {@link #ensureBaseDirectory()}): an
+     * attacker who can rewrite the *already-resolved, real* target location
+     * itself (as opposed to redirecting a symlink the tool follows) is
+     * outside this defense's threat model.
+     *
+     * <p>読み取り経路の TOCTOU 対策: 呼び出し元は本メソッドを呼ぶ前に一度だけ
+     * {@link #resolveRealBaseDir()} で {@code baseDir} の実体パス（{@code expectedRealBase}）を
+     * 捕捉する（findById は都度、findAll/findRecent は候補全体に対して 1 回）。当初の実装は
+     * {@code file} を先に読み込み、読み込みが完了した「後」に実体パスを解決して比較していた
+     * （{@code save()} の {@link #verifyWroteUnderExpectedBase} と同じ「事後検証」方式）。
+     * しかしこれは書き込み側と違って安全に成立しない: {@code save()} の事後検証は「実際に今しがた
+     * 物理的に作成したファイル」を検証するため、そのファイルは検証時点でも動かしようがなく、
+     * 不一致は確実に「誤った場所へ書いた」ことの証拠になる。一方、読み取りの「事後検証」は
+     * 既に完了した読み込みとは独立に {@code file} を改めて解決し直すだけなので、呼び出し元が
+     * baseDir をシンボリックリンクへ差し替えて攻撃者の内容を読ませたあと、事後検証が走る前に
+     * baseDir を正規のディレクトリへ戻せば、検証は何事もなかったかのように成功し、実際には
+     * 読んでいない正規ディレクトリの実体パスと「一致した」と誤判定してしまう（読み込み自体は
+     * 差し替え中に行われ、攻撃者の内容が既に呼び出し元へ返ってしまっている）。
+     *
+     * <p>そこで本メソッドは、{@code file} の実体パスを「先に」解決し、{@code expectedRealBase}
+     * 配下であることを検証してから、{@code file} を再度使うのではなく、その「解決済みの実体パス」
+     * 自身から読み込む。完全に解決済みの実体パスはその文字列自体にシンボリックリンクの要素を
+     * 一切含まないため（定義上）、以降 baseDir（差し替え得る元のパス）がどう差し替えられても、
+     * その実体パスの open はもはや baseDir を経由しないので影響を受けない。これは書き込みと違い
+     * 読み取り対象が既に存在し、触れる前に解決できるからこそ可能な方式である。最終的な open にも
+     * {@link LinkOption#NOFOLLOW_LINKS} を適用しており、解決から open までのごく短い間に、その
+     * 実体パスのファイル自体がシンボリックリンクへ差し替えられた場合は fail-closed で読み込みを
+     * 拒否する。残る隙間は本クラスの他所（{@link #ensureBaseDirectory()}）で既に許容している
+     * ものと同種で、シンボリックリンクの誘導ではなく「解決済みの実体そのもの」を書き換えられる
+     * 攻撃者はこの防御の脅威モデル外である。
+     *
+     * <p>Package-private, like {@link #keepMostRecentByFilename} and {@link
+     * #verifyWroteUnderExpectedBase}, so this check can be unit-tested
+     * directly against two independently-constructed real directories, without
+     * needing to race an actual filesystem swap into the middle of a call.
      */
-    private Optional<ExecutionResult> tryRead(Path file) {
+    Optional<ExecutionResult> tryRead(Path file, Path expectedRealBase) {
+        // file の実体パスを先に解決する。存在しない・解決できない場合は壊れたファイルと同様に
+        // 読み飛ばす（読み込みを試みる前にここで弾くため、無駄な読み込みも発生しない）
+        Path realFile;
+        try {
+            realFile = file.toRealPath();
+        } catch (IOException e) {
+            LOGGER.warning("Skipping execution result file '" + file
+                    + "': failed to resolve its real path (" + e.getMessage() + ")");
+            return Optional.empty();
+        }
+        // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ
+        // （expectedRealBase）と一致するかを検証する。ここで検証してから読むことで、以降の
+        // 読み込みは baseDir の差し替えに一切影響されない実体パスを直接使うことになる
+        // （このメソッドの Javadoc 参照）
+        if (!expectedRealBase.equals(realFile.getParent())) {
+            LOGGER.warning("Skipping execution result file '" + file
+                    + "': resolved outside the expected state directory "
+                    + "(baseDir may have been swapped to a symlink)");
+            return Optional.empty();
+        }
         try {
             // Bound the parse the same way BatchConfigLoader bounds config
             // parsing, but do it via a bounded read rather than a
@@ -480,10 +622,11 @@ public final class JsonExecutionStore implements ExecutionStore {
             // MAX_RECORD_BYTES + 1 bytes up front makes the actual bytes
             // handed to Jackson the thing that is bounded, so no
             // post-check growth can smuggle an oversized document through.
-            // Every caller of tryRead has already confirmed the path is a
-            // regular file via NOFOLLOW_LINKS before reaching this method
-            // (findById directly, findAll/findRecent via their
-            // Files.isRegularFile(..., NOFOLLOW_LINKS) candidate filter).
+            // NOFOLLOW_LINKS on realFile guards against the narrow window
+            // between the toRealPath() resolution above and this open (see
+            // this method's Javadoc): if the file at that exact resolved
+            // location is itself swapped for a symlink in that window, the
+            // open fails closed instead of following it.
             // Jackson にファイルを渡す前にサイズを確認する（BatchConfigLoader と同じ
             // 「パース前にサイズを拒否する」防御）。ただし「サイズを確認してから開く」
             // 2 段階の方式だと、確認と読み込みの間（TOCTOU の隙間）に別プロセスが
@@ -491,9 +634,11 @@ public final class JsonExecutionStore implements ExecutionStore {
             // パースしてしまう（ストリーム自体には何の上限もかかっていないため）。
             // そこで実際に読む量そのものを MAX_RECORD_BYTES + 1 バイトまでに制限し、
             // 「Jackson に渡すバイト列」自身を上限内に収める設計にすることで、
-            // 確認後の肥大化では上限をすり抜けられないようにする。呼び出し元は
-            // tryRead に渡す前に NOFOLLOW_LINKS で通常ファイルであることを確認済み
-            try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            // 確認後の肥大化では上限をすり抜けられないようにする。realFile への
+            // NOFOLLOW_LINKS は、上の toRealPath() 解決からこの open までの短い隙間で
+            // その実体パスのファイル自体がシンボリックリンクへ差し替えられた場合の
+            // fail-closed 対策（このメソッドの Javadoc 参照）
+            try (InputStream in = Files.newInputStream(realFile, LinkOption.NOFOLLOW_LINKS)) {
                 // 上限+1バイトまで読み込む（+1は「ちょうど上限」と「上限超過」を区別するため）
                 byte[] bytes = in.readNBytes((int) MAX_RECORD_BYTES + 1);
                 // 読み込めたバイト数が上限を超えていれば、壊れたファイルと同様に読み飛ばす

@@ -156,6 +156,38 @@ malicious resource exhaustion and against tampering with the state directory:
   (`SecureDirectoryStream`/openat-equivalent) directory operations throughout,
   which is out of scope for this MVP given the trust model above.
 
+  The read path (`findAll`/`findRecent`/`findById`, which all funnel through
+  the shared `tryRead` helper) has the same shape of gap: `NOFOLLOW_LINKS` on
+  the individual `<runId>.json` file only guards that file's own final path
+  component, so if the base directory itself is swapped for a symlink
+  *during* a read — after the initial symlink/existence check but before the
+  read completes — the intermediate resolution of the file's parent
+  directory would silently follow the swap and serve content from an
+  attacker-controlled location. Unlike `save()`, this is *not* closed by
+  reading first and comparing real paths afterward ("verify after the
+  fact"): a write's post-write check inspects a file it just physically
+  created, which cannot un-happen, so a real-path mismatch reliably proves
+  the write landed in the wrong place. A read's post-read check instead
+  re-resolves the file from scratch, independently of the already-completed
+  read — so the base directory could be swapped to a symlink for the read
+  and swapped back to the legitimate directory before the check runs, which
+  would then resolve cleanly and wrongly accept bytes that were never read
+  from there. Because a read's target already exists (unlike a write's,
+  which doesn't exist until the write happens), this class resolves the
+  file's real path *first*, verifies it under the base directory's real path
+  (captured once per call), and only then opens and reads from that
+  already-resolved real path — which by definition contains no symlink
+  components — rather than from the original, possibly-symlinked path. No
+  later swap of the base directory can redirect that open, because the open
+  no longer mentions the base directory at all; `NOFOLLOW_LINKS` still
+  guards the narrow window between the resolve and the open in case the
+  resolved file itself is replaced by a symlink in that instant. The
+  residual window is the same one already accepted elsewhere in this class
+  (see `ensureBaseDirectory()`, above): an attacker who can rewrite the
+  *already-resolved, real* target location itself — as opposed to
+  redirecting a symlink the tool follows — is outside this defense's threat
+  model.
+
 ## Future extensions
 
 - **Parallel execution** of independent jobs (run ready jobs concurrently while
