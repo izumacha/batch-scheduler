@@ -291,19 +291,9 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         // 読み込んだ実行結果を蓄積するリストを作成する
         List<ExecutionResult> results = new ArrayList<>();
-        // パース対象の候補パス（中身はまだ読まない。ファイル名一覧の取得は軽量なので先に全件集める）
-        List<Path> candidates;
-        try (Stream<Path> files = Files.list(baseDir)) {
-            // ベースディレクトリ内のファイルをフィルタリングして候補リストを作る
-            candidates = files
-                    .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
-                    .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
-                    .toList();
-        } catch (IOException e) {
-            // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
-            throw new UncheckedIOException(
-                    "failed to list execution results under " + baseDir, e);
-        }
+        // パース対象の候補パス（中身はまだ読まない。ファイル名一覧の取得は軽量なので先に全件集める。
+        // 一覧取得・フィルタリング自体は findRecent と共通のヘルパーに委譲する。§6 DRY）
+        List<Path> candidates = listJsonCandidates();
         // 候補が安全上限を超えている場合は、ファイル名（=時系列）の新しい順に絞り込んでから
         // パースする（全件の内容パースによる資源枯渇を避ける。MAX_UNBOUNDED_RESULTS 参照）
         if (candidates.size() > MAX_UNBOUNDED_RESULTS) {
@@ -352,6 +342,34 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 直前の isDirectory 確認との間に削除された等、まれな競合も「存在しない」として
             // 扱う（fail-safe。例外を伝播させて呼び出し元をクラッシュさせない）
             return Optional.empty();
+        }
+    }
+
+    /**
+     * {@code baseDir} 直下のファイルのうち、保存済み実行結果の候補（シンボリックリンクを除いた
+     * 通常ファイルで、かつファイル名が {@value #SUFFIX} で終わるもの）だけを一覧して返す。
+     * 中身はまだ読まない（ファイル名一覧の取得だけなら軽量なので、内容パースの前に絞り込みへ使う）。
+     *
+     * <p>{@link #findAll} と {@link #findRecent} はどちらも「候補ファイルの一覧を得てから、
+     * 安全上限や limit で絞り込み、最後に {@link #tryRead} でパースする」という同じ形の処理を
+     * 必要とするため、一覧取得・フィルタリング自体をここへ集約する（§6 DRY: 2 箇所目の重複で
+     * 共通化する）。呼び出し元は本メソッドが返す前に {@link #resolveRealBaseDir} で
+     * ベースディレクトリの存在・非シンボリックリンクを確認済みであることが前提だが、
+     * {@code Files.list} 自体は独立した呼び出しのため、その確認からこの一覧取得までの間に
+     * ベースディレクトリが差し替えられても、後段の {@link #tryRead} が候補ごとに実体パスを
+     * 検証するため安全性には影響しない（{@link #tryRead} の Javadoc 参照）。
+     */
+    private List<Path> listJsonCandidates() {
+        try (Stream<Path> files = Files.list(baseDir)) {
+            // ベースディレクトリ内のファイルをフィルタリングして候補リストを作る
+            return files
+                    .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
+                    .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
+                    .toList();
+        } catch (IOException e) {
+            // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
+            throw new UncheckedIOException(
+                    "failed to list execution results under " + baseDir, e);
         }
     }
 
@@ -405,17 +423,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             return List.of();
         }
         // 中身をパースせず、ファイル名だけを集めて絞り込む候補パスのリスト
-        List<Path> candidates;
-        try (Stream<Path> files = Files.list(baseDir)) {
-            candidates = files
-                    .filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) // シンボリックリンクを除外する
-                    .filter(p -> p.getFileName().toString().endsWith(SUFFIX))        // .json 拡張子のファイルのみ対象にする
-                    .toList();
-        } catch (IOException e) {
-            // ディレクトリ一覧の取得に失敗した場合はチェックなし例外に包んで投げる
-            throw new UncheckedIOException(
-                    "failed to list execution results under " + baseDir, e);
-        }
+        // （一覧取得・フィルタリング自体は findAll と共通のヘルパーに委譲する。§6 DRY）
+        List<Path> candidates = listJsonCandidates();
         // runId が "yyyyMMdd-HHmmss-XXXXXX" 形式で辞書順=時系列順になることを利用し、
         // ファイル名の降順（新しい実行が先頭）だけで limit 件に絞り込む。中身を読まずに絞り込める
         // （findAll の安全上限絞り込みと同じヘルパーを再利用。§6 DRY）
