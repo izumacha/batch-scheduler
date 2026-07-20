@@ -134,7 +134,11 @@ malicious resource exhaustion and against tampering with the state directory:
   is itself a symlink (rather than following it via `createDirectories`), and
   `findAll`/`findRecent`/`findById` treat a symlinked base directory the same as
   a missing one, so a pre-planted symlink cannot redirect reads or writes
-  elsewhere.
+  elsewhere. `save()` additionally re-checks immediately before creating the
+  temp file it writes into, narrowing (though, with path-based `java.nio.file`
+  APIs rather than fd-relative operations, not perfectly closing) the window in
+  which the base directory could be swapped for a symlink *during* a call, as
+  opposed to being pre-planted before the tool ever runs.
 
 ## Future extensions
 

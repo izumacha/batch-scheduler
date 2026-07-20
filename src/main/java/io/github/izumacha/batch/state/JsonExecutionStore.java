@@ -171,6 +171,19 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）
         ensureBaseDirectory();
+        // ensureBaseDirectory() 内部のチェックから実際に書き込みが起きる Files.createTempFile
+        // までの間にも、baseDir がシンボリックリンクへ差し替えられる余地が残っていた（TOCTOU）。
+        // Files.createDirectories はリンク先が既存ディレクトリなら「作成済み」として素通りに
+        // 扱ってしまうため、チェック直後～createDirectories 実行中の間に差し替えられると、
+        // 以降の書き込みはリンク先へそのまま向かってしまう。java.nio.file のパス解決 API では
+        // check-then-act の隙間を完全にゼロにはできない（真に原子的にするには
+        // openat 相当の fd 経由操作が必要）ため、実際に書き込みが起きる直前でもう一度だけ
+        // 確認し直し、悪用可能な窓を実務上できる限り狭める（§6 DRY:
+        // isBaseDirSymlink() は既存の判定ロジックをそのまま再利用）
+        if (isBaseDirSymlink()) {
+            throw new UncheckedIOException(
+                    new IOException("refusing to use a symlinked state directory: " + baseDir));
+        }
         try {
             // runId から書き込み先のファイルパスを計算する
             Path target = fileFor(result.runId());

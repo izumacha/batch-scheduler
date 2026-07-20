@@ -282,6 +282,28 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void saveRejectsSymlinkedBaseDirAndDoesNotWriteIntoLinkTarget(@TempDir Path dir) throws IOException {
+        // save() の公開エントリポイントとしての回帰テスト。ensureBaseDirectory() 単体のテスト
+        // (ensureBaseDirectoryRejectsSymlinkedBaseDir) はこの内部ヘルパーだけを直接検証しており、
+        // save() が実際にそれを呼び出しているか・書き込み直前の再チェックまで含めて拒否できているか
+        // は別途検証していなかった。baseDir がシンボリックリンクの場合、save() 自体が拒否し、
+        // かつリンク先の実ディレクトリには一切ファイルが書き込まれない（＝リンクを辿った先への
+        // 誤書き込みが起きていない）ことまで確認する
+        Path realTarget = dir.resolve("real-target");
+        Files.createDirectory(realTarget);
+        Path link = dir.resolve("linked-store");
+        Files.createSymbolicLink(link, realTarget);
+
+        JsonExecutionStore store = new JsonExecutionStore(link);
+        assertThrows(UncheckedIOException.class,
+                () -> store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS))));
+        // リンク先の実ディレクトリが空のままであること（書き込みが素通りしていないこと）を確認する
+        try (var files = Files.list(realTarget)) {
+            assertTrue(files.findAny().isEmpty());
+        }
+    }
+
+    @Test
     void findAllAndFindRecentTreatSymlinkedBaseDirAsMissing(@TempDir Path dir) throws IOException {
         // 読み取り系（findAll/findRecent）も同じシンボリックリンクを辿らず、
         // baseDir が存在しない場合と同様に空リストを返すこと（書き込み経路だけでなく
