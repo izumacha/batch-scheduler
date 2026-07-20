@@ -69,7 +69,10 @@ public final class BatchExecutor {
      * モードとして動作し、そこで {@link JobStatus#SUCCEEDED} だったジョブは再実行せず
      * 前回の結果をそのまま採用する（docs/DESIGN.md Future extensions
      * 「Resume / rerun-failed」に対応）。前回 FAILED/SKIPPED だったジョブや、
-     * 前回に存在しなかった新規ジョブは通常どおり実行する。
+     * 前回に存在しなかった新規ジョブは通常どおり実行する。ただし前回 SUCCEEDED だった
+     * ジョブでも、その依存ジョブが「今回の実行内で」FAILED/SKIPPED になった場合は流用せず、
+     * 新規実行と同様に SKIPPED として記録する（依存が失敗したのに SUCCEEDED という矛盾した
+     * 実行記録を残さないため）。
      *
      * <p>不正なバッチは最初のジョブが実行される前に
      * {@link io.github.izumacha.batch.config.ValidationException} をスローする。
@@ -119,20 +122,25 @@ public final class BatchExecutor {
 
             // ジョブをトポロジカル順に実行する
             for (Job job : order) {
-                // rerun-failed モードで、このジョブが前回 SUCCEEDED していれば再実行せず
-                // 前回の結果をそのまま流用する（依存側のブロック判定にもこの結果を使う）
-                JobResult reused = reusablePriorResult(priorResultsById, job.id());
-                if (reused != null) {
-                    results.put(job.id(), reused);
-                    continue;
-                }
-                // このジョブをブロックしている依存ジョブがあるか確認する
+                // このジョブをブロックしている依存ジョブがあるか確認する。
+                // なぜ前回結果の流用判定より「先に」行うか（§6 設計判断）: rerun-failed では
+                // 前回 SUCCEEDED だったジョブでも、バッチ定義の編集（例: 新規ジョブへの依存追加）
+                // により、その依存ジョブが「今回の実行内で」FAILED/SKIPPED になり得る。流用を
+                // 先に判定すると「依存が失敗したのに SUCCEEDED」という、新規実行では決して
+                // 起こらない矛盾した実行記録が生まれてしまうため、通常実行と同じ SKIPPED を優先する
                 String blockingDep = firstBlockingDependency(job, results);
                 // ブロックしている依存がある場合はジョブをスキップして結果を記録する
                 if (blockingDep != null) {
                     results.put(job.id(), JobResult.skipped(
                             job.id(),
                             "skipped: dependency '" + blockingDep + "' did not succeed"));
+                    continue;
+                }
+                // rerun-failed モードで、このジョブが前回 SUCCEEDED していれば再実行せず
+                // 前回の結果をそのまま流用する（依存側のブロック判定にもこの結果を使う）
+                JobResult reused = reusablePriorResult(priorResultsById, job.id());
+                if (reused != null) {
+                    results.put(job.id(), reused);
                     continue;
                 }
                 // ブロックがない場合は JobRunner でジョブを実行し、結果を記録する

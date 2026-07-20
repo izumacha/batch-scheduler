@@ -53,9 +53,9 @@ public final class JsonExecutionStore implements ExecutionStore {
     // .batch-state に大量のファイルが蓄積した場合でも、内容の全文パースが無制限に
     // ならないようにする（現実的な利用規模を大きく超えた場合のみ効くサーキットブレーカー）。
     // public にしているのは ListCommand（cli パッケージ）が「ユーザー指定の limit が
-    // この安全上限そのものに達している／超えている」ケースを区別できるようにするため
-    // （この安全上限に達したときは findRecent 内部でクランプが発生し、呼び出し側の
-    // 「+1 件多く要求して切り詰めを検出する」トリックが使えなくなるため、別扱いが必要）
+    // この安全上限そのものに達している／超えている」ケースの区別と、「limit<=0 でも
+    // この上限で切り詰められた」ことの利用者への注記の両方で参照するため
+    // （しきい値の一元管理。§6 マジックナンバーを散らさない）
     public static final int MAX_UNBOUNDED_RESULTS = 100_000;
     /**
      * Upper bound on a single stored execution-result JSON document, mirroring

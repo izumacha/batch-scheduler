@@ -171,6 +171,38 @@ class BatchExecutorTest {
     }
 
     @Test
+    void rerunFailedDoesNotReuseSucceededJobWhoseDependencyFailsInCurrentRun() {
+        // 前回実行: a と b は互いに独立で、どちらも成功する。
+        Batch priorBatch = new Batch("edited", List.of(
+                ok("a", List.of()),
+                ok("b", List.of())));
+        ExecutionResult priorResult = executor().execute(priorBatch);
+        assertEquals(JobStatus.SUCCEEDED, priorResult.status());
+
+        // 今回はバッチ定義を編集し、失敗する新規ジョブ c を追加して b を c に依存させる。
+        Batch editedBatch = new Batch("edited", List.of(
+                ok("a", List.of()),
+                fail("c", List.of()),
+                ok("b", List.of("c"))));
+        ExecutionResult rerun = executor().execute(editedBatch, priorResult);
+
+        // 新規ジョブ c は前回結果に存在しないため通常どおり実行され、失敗する。
+        assertEquals(JobStatus.FAILED, rerun.status());
+        assertEquals(JobStatus.FAILED, rerun.result("c").orElseThrow().status());
+        // b は前回 SUCCEEDED だったが、依存 c が今回の実行内で失敗したため流用されず、
+        // 新規実行と同じ SKIPPED になる（SUCCEEDED のまま流用すると「依存が失敗したのに
+        // 成功」という矛盾した実行記録になってしまう。regression: 以前は流用判定を
+        // 依存ブロック判定より先に行っており、この場合でも b を SUCCEEDED として流用していた）。
+        JobResult b = rerun.result("b").orElseThrow();
+        assertEquals(JobStatus.SKIPPED, b.status());
+        assertTrue(b.message().contains("dependency 'c'"), b.message());
+        // a は依存に問題がないため、従来どおり前回の結果がそのまま流用される。
+        assertEquals(priorResult.result("a").orElseThrow().startedAt(),
+                rerun.result("a").orElseThrow().startedAt(),
+                "a should be reused verbatim from the prior result, not re-executed");
+    }
+
+    @Test
     void rerunFailedRejectsPriorResultFromADifferentBatch() {
         // 「other」という名前の別バッチの前回結果を用意する（たまたま同じ job id "a" を含む）。
         Batch otherBatch = new Batch("other", List.of(ok("a", List.of())));
