@@ -132,8 +132,9 @@ malicious resource exhaustion and against tampering with the state directory:
   This now also covers the base directory itself, not just individual
   `<runId>.json` files: `ensureBaseDirectory()` refuses to operate if `--state-dir`
   is itself a symlink (rather than following it via `createDirectories`), and
-  `findAll`/`findRecent` treat a symlinked base directory the same as a missing
-  one, so a pre-planted symlink cannot redirect reads or writes elsewhere.
+  `findAll`/`findRecent`/`findById` treat a symlinked base directory the same as
+  a missing one, so a pre-planted symlink cannot redirect reads or writes
+  elsewhere.
 
 ## Future extensions
 

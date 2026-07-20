@@ -299,6 +299,25 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdTreatsSymlinkedBaseDirAsMissing(@TempDir Path dir) throws IOException {
+        // findById も findAll/findRecent と同じシンボリックリンク対策を持つこと（regression）。
+        // Files.isRegularFile(file, NOFOLLOW_LINKS) は解決済みパスの「末尾コンポーネント」が
+        // リンクでないことしか保証しないため、baseDir 自体がリンクだと親ディレクトリの
+        // 中間コンポーネントとして素通りに辿られ、リンク先に置かれた <runId>.json を
+        // そのまま読めてしまっていた（このテストが直すバグ）
+        Path realTarget = dir.resolve("real-target");
+        Files.createDirectory(realTarget);
+        // リンク先には実行結果ファイルを置いておき、それが「見えない」ことを確認する
+        Instant start = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        new JsonExecutionStore(realTarget).save(sampleRun("hidden", start));
+        Path link = dir.resolve("linked-store");
+        Files.createSymbolicLink(link, realTarget);
+
+        JsonExecutionStore store = new JsonExecutionStore(link);
+        assertTrue(store.findById("hidden").isEmpty());
+    }
+
+    @Test
     void findAllAndFindRecentReturnEmptyWithoutCreatingMissingDir(@TempDir Path dir) {
         // ディレクトリ未存在でも読み取り系は空を返し、副作用で作成しないこと
         // （読み取り専用の場所でも list コマンドが動作するための前提）

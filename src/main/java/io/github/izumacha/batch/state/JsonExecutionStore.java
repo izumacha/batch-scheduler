@@ -196,6 +196,16 @@ public final class JsonExecutionStore implements ExecutionStore {
         if (runId == null || runId.isBlank()) {
             return Optional.empty();
         }
+        // baseDir 自体がシンボリックリンクの場合、findAll/findRecent と同じ CWE-59 対策として
+        // 存在しない場合と同様に扱う。下の Files.isRegularFile(..., NOFOLLOW_LINKS) は解決済み
+        // パスの「末尾コンポーネント」がリンクでないことしか保証せず、baseDir 自体がリンクだと
+        // 親ディレクトリの中間コンポーネントとして素通りに辿られてしまう（NOFOLLOW_LINKS は
+        // 末尾コンポーネントにしか効かない）ため、攻撃者が --state-dir を事前にリンクへ差し替えて
+        // いた場合、意図しない場所の <runId>.json をそのまま読めてしまう。findAll/findRecent は
+        // この対策を既に持つが、findById だけ抜け落ちていた
+        if (Files.isSymbolicLink(baseDir)) {
+            return Optional.empty();
+        }
         // runId からファイルパスを計算する
         Path file = fileFor(runId);
         // Do not follow symlinks: only read a regular file that lives directly in
