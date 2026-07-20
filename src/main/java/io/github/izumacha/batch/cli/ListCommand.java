@@ -37,10 +37,15 @@ public final class ListCommand implements Callable<Integer> {
 
     @Override
     public Integer call() {
+        // JsonExecutionStore.findRecent は MAX_UNBOUNDED_RESULTS を超える limit を
+        // 静かにクランプするため、先にこちら側でも同じ上限でクランプしておく
+        // （effectiveLimit がストアの安全上限ちょうどになる境界を isTruncated/fetchLimitFor で
+        // 特別扱いするため）
+        int effectiveLimit = effectiveLimit(limit, JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
         // 表示上限ちょうどの件数しかない場合と、上限を超えて切り詰められた場合を区別するため、
-        // 実際に表示する件数より 1 件多く要求する（limit が Integer.MAX_VALUE 付近だと
-        // +1 でオーバーフローするので、その場合は加算しない＝実質「上限なし」として扱う）
-        int fetchLimit = (limit > 0 && limit < Integer.MAX_VALUE) ? limit + 1 : limit;
+        // 実際に表示する件数より 1 件多く要求する（effectiveLimit がストアの安全上限ちょうどの
+        // 場合は +1 すると意図せずクランプされてしまうので、その場合は加算しない）
+        int fetchLimit = fetchLimitFor(effectiveLimit, JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
         // 状態ディレクトリから読み込んだ実行結果リスト（切り詰め判定用に 1 件多い可能性がある）
         List<ExecutionResult> fetched;
         try {
@@ -51,10 +56,13 @@ public final class ListCommand implements Callable<Integer> {
             System.err.println("error: failed to read run state: " + CliFormat.safeMessage(e));
             return BatchCli.EXIT_CONFIG;
         }
-        // 実際に limit を超えて切り詰められたかどうか（+1 件多く取れた場合のみ真）
-        boolean truncated = limit > 0 && fetched.size() > limit;
-        // 画面に表示するのは常に limit 件まで（切り詰め判定用に多く取った 1 件は表示しない）
-        List<ExecutionResult> runs = truncated ? fetched.subList(0, limit) : fetched;
+        // 実際に effectiveLimit を超えて切り詰められたかどうか
+        boolean truncated = isTruncated(fetched.size(), effectiveLimit,
+                JsonExecutionStore.MAX_UNBOUNDED_RESULTS);
+        // 画面に表示するのは常に effectiveLimit 件まで（切り詰め判定用に多く取った分は表示しない）
+        List<ExecutionResult> runs = truncated
+                ? fetched.subList(0, Math.min(effectiveLimit, fetched.size()))
+                : fetched;
 
         // 実行記録が 1 件もない場合はその旨を出力して正常終了する
         if (runs.isEmpty()) {
@@ -82,9 +90,58 @@ public final class ListCommand implements Callable<Integer> {
         // 実際に切り詰められた場合のみ、隠れた古い実行があることを注記する
         if (truncated) {
             System.out.printf("%n(showing up to %d most recent runs; use --limit 0 to list all)%n",
-                    limit);
+                    effectiveLimit);
         }
         // 正常終了として EXIT_OK を返す
         return BatchCli.EXIT_OK;
+    }
+
+    /**
+     * ユーザー指定の limit を、ストアの絶対的な安全上限（storeCeiling）でクランプする。
+     * limit <= 0（上限なし）はそのまま返す。
+     */
+    // JsonExecutionStore.findRecent 側の暗黙のクランプを CLI 側でも先取りして再現する
+    // ヘルパー（実ファイルを大量に用意しなくても単体テストできるよう、ロジックを切り出した）
+    static int effectiveLimit(int limit, int storeCeiling) {
+        // 上限なし指定はそのまま素通しする
+        if (limit <= 0) {
+            return limit;
+        }
+        // ユーザー指定値とストアの安全上限の小さい方を採用する
+        return Math.min(limit, storeCeiling);
+    }
+
+    /**
+     * ストアに問い合わせる実際の件数を決める。切り詰め検出用の「+1 件多く要求する」トリックは、
+     * effectiveLimit がストアの安全上限ちょうど（またはそれ以上）のときは使えない
+     * （+1 しても findRecent 内部で storeCeiling までクランプされ、+1 分の余剰が消えてしまうため）。
+     */
+    static int fetchLimitFor(int effectiveLimit, int storeCeiling) {
+        // 上限なし、またはちょうどストアの安全上限に達している場合はそのまま要求する
+        if (effectiveLimit <= 0 || effectiveLimit >= storeCeiling) {
+            return effectiveLimit;
+        }
+        // 通常時は「+1 件多く要求する」トリックで切り詰め有無を判定する
+        return effectiveLimit + 1;
+    }
+
+    /**
+     * fetched.size() と effectiveLimit（、ストアの安全上限）から、一覧が切り詰められたかを判定する。
+     * effectiveLimit がストアの安全上限ちょうどに達している場合は「+1」トリックが使えないため、
+     * 上限ぴったり返ってきたら（実際には切り詰められていない可能性もあるが）安全側に倒して
+     * 「切り詰められた」とみなす。
+     */
+    static boolean isTruncated(int fetchedSize, int effectiveLimit, int storeCeiling) {
+        // 上限なし指定なら切り詰めは発生しない
+        if (effectiveLimit <= 0) {
+            return false;
+        }
+        // ストアの安全上限ちょうどに達している場合は、上限ぴったり返ってきたことを
+        // 「まだ隠れているかもしれない」の合図として扱う
+        if (effectiveLimit >= storeCeiling) {
+            return fetchedSize >= storeCeiling;
+        }
+        // 通常時は「+1 件多く要求して、実際に 1 件多く返ってきたか」で判定する
+        return fetchedSize > effectiveLimit;
     }
 }
