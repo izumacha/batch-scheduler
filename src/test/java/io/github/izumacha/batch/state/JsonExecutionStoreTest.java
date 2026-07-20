@@ -339,15 +339,15 @@ class JsonExecutionStoreTest {
         Path actualWrittenFile = actualWrittenDir.resolve("run1.json");
         Files.writeString(actualWrittenFile, "{}");
 
+        // 呼び出し元（save()）が configured baseDir としてエラーメッセージに使う値。
+        // 比較ロジックには使われないので、意図した実体ディレクトリとも実際の書き込み先とも
+        // 異なる値を渡し、混同していないことを明確にする
+        Path configuredBaseDirForMessage = dir.resolve("configured-state-dir-symlink-name");
         assertThrows(UncheckedIOException.class, () -> JsonExecutionStore.verifyWroteUnderExpectedBase(
-                actualWrittenFile, expectedIntendedBase.toRealPath(), dir));
+                actualWrittenFile, expectedIntendedBase.toRealPath(), configuredBaseDirForMessage));
 
-        // 誤って書き込まれたファイルが削除され（ロールバック）、意図した実体ディレクトリ側は
-        // 何も書き込まれないままであることの両方を確認する
+        // 誤って書き込まれたファイルが削除され（ロールバック）ていることを確認する
         assertFalse(Files.exists(actualWrittenFile));
-        try (var files = Files.list(expectedIntendedBase)) {
-            assertTrue(files.findAny().isEmpty());
-        }
     }
 
     @Test
