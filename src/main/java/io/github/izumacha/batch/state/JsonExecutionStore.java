@@ -13,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -365,41 +364,40 @@ public final class JsonExecutionStore implements ExecutionStore {
     private Optional<ExecutionResult> tryRead(Path file) {
         try {
             // Bound the parse the same way BatchConfigLoader bounds config
-            // parsing: check the size before handing the file to Jackson, so
-            // a single oversized record (see MAX_RECORD_BYTES) can never
-            // force an unbounded in-memory parse. Every caller of tryRead has
-            // already confirmed the path is a regular file via NOFOLLOW_LINKS
-            // before reaching this method (findById directly, findAll/
-            // findRecent via their Files.isRegularFile(..., NOFOLLOW_LINKS)
-            // candidate filter) -- but that check and this one are two
-            // separate filesystem calls, so a NOFOLLOW_LINKS-respecting size
-            // read (rather than plain Files.size(), which always follows
-            // symlinks) keeps this method's own symlink-safety invariant
-            // self-contained instead of depending on the caller's earlier,
-            // separate check to still hold. If the path was swapped for a
-            // symlink in that window, this reports the link's own (tiny)
-            // size, not its target's, so it is never mistaken for oversized;
-            // the read just below still fails closed via NOFOLLOW_LINKS.
+            // parsing, but do it via a bounded read rather than a
+            // stat-then-open size check: a separate Files.size() (or
+            // readAttributes) call followed later by Files.newInputStream()
+            // has a TOCTOU window between the two filesystem calls in which
+            // another process could grow the file past MAX_RECORD_BYTES, and
+            // Jackson would then parse the enlarged content in full because
+            // nothing bounds the stream itself. Reading at most
+            // MAX_RECORD_BYTES + 1 bytes up front makes the actual bytes
+            // handed to Jackson the thing that is bounded, so no
+            // post-check growth can smuggle an oversized document through.
+            // Every caller of tryRead has already confirmed the path is a
+            // regular file via NOFOLLOW_LINKS before reaching this method
+            // (findById directly, findAll/findRecent via their
+            // Files.isRegularFile(..., NOFOLLOW_LINKS) candidate filter).
             // Jackson にファイルを渡す前にサイズを確認する（BatchConfigLoader と同じ
-            // 「パース前にサイズを拒否する」防御）。呼び出し元は tryRead に渡す前に
-            // NOFOLLOW_LINKS で通常ファイルであることを確認済みだが、その確認とこの
-            // サイズ取得は別々のファイルシステム呼び出しのため、ここでも
-            // NOFOLLOW_LINKS を指定してこのメソッド単体でシンボリックリンク安全性を
-            // 完結させる（単純な Files.size() はシンボリックリンクを常に辿ってしまう）。
-            // この間にファイルがシンボリックリンクへ差し替えられていても、ここで
-            // 取得できるのはリンク自体の（小さい）サイズであり実体の大きさではないため
-            // 誤って「巨大」と判定されることはなく、直後の読み込みは NOFOLLOW_LINKS により
-            // 引き続き安全側に失敗する
-            long size = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).size();
-            // サイズが上限を超えるファイルは壊れたファイルと同様に読み飛ばす
-            if (size > MAX_RECORD_BYTES) {
-                LOGGER.warning("Skipping oversized execution result file '" + file + "' ("
-                        + size + " bytes, limit " + MAX_RECORD_BYTES + ")");
-                return Optional.empty();
-            }
+            // 「パース前にサイズを拒否する」防御）。ただし「サイズを確認してから開く」
+            // 2 段階の方式だと、確認と読み込みの間（TOCTOU の隙間）に別プロセスが
+            // ファイルを肥大化させても、Jackson は肥大化後の中身をそのまま全部
+            // パースしてしまう（ストリーム自体には何の上限もかかっていないため）。
+            // そこで実際に読む量そのものを MAX_RECORD_BYTES + 1 バイトまでに制限し、
+            // 「Jackson に渡すバイト列」自身を上限内に収める設計にすることで、
+            // 確認後の肥大化では上限をすり抜けられないようにする。呼び出し元は
+            // tryRead に渡す前に NOFOLLOW_LINKS で通常ファイルであることを確認済み
             try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-                // ファイルを読み込んで ExecutionResult に変換し、Optional でラップして返す
-                return Optional.of(mapper.readValue(in, ExecutionResult.class));
+                // 上限+1バイトまで読み込む（+1は「ちょうど上限」と「上限超過」を区別するため）
+                byte[] bytes = in.readNBytes((int) MAX_RECORD_BYTES + 1);
+                // 読み込めたバイト数が上限を超えていれば、壊れたファイルと同様に読み飛ばす
+                if (bytes.length > MAX_RECORD_BYTES) {
+                    LOGGER.warning("Skipping oversized execution result file '" + file + "' (>"
+                            + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
+                    return Optional.empty();
+                }
+                // 上限内に収まったバイト列を ExecutionResult に変換し、Optional でラップして返す
+                return Optional.of(mapper.readValue(bytes, ExecutionResult.class));
             }
         } catch (IOException e) {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
