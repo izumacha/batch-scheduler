@@ -141,11 +141,20 @@ malicious resource exhaustion and against tampering with the state directory:
   sequence completes, verifies the file actually landed under that same real
   directory. A mismatch means the base directory was swapped mid-write, so the
   misdirected file is deleted and the save is rejected. This "verify after the
-  fact, roll back on mismatch" check covers the entire write sequence in one
-  pass, rather than trying to re-check before every individual filesystem call
-  the sequence makes (which, with path-based `java.nio.file` APIs that
-  re-resolve the base directory on every call, would still leave a gap after
-  the last such check and before the next).
+  fact, roll back on mismatch" check covers the whole span from the moment the
+  real path is captured through the end of the write, in one pass, rather than
+  trying to re-check before every individual filesystem call the sequence
+  makes (which, with path-based `java.nio.file` APIs that re-resolve the base
+  directory on every call, would still leave a gap after the last such check
+  and before the next). It does not reach backward into the separate,
+  already-noted check-then-act window inside `ensureBaseDirectory()` itself
+  (between its own symlink check and `createDirectories` completing) — a swap
+  timed into exactly that earlier window is adopted as the trusted real path
+  rather than caught, since resolving a symlink doesn't distinguish "was
+  always there" from "was just swapped in". That earlier window is not new or
+  widened by this mechanism; closing it fully would require fd-relative
+  (`SecureDirectoryStream`/openat-equivalent) directory operations throughout,
+  which is out of scope for this MVP given the trust model above.
 
 ## Future extensions
 

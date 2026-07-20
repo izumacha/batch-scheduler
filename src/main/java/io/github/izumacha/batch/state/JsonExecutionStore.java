@@ -171,21 +171,24 @@ public final class JsonExecutionStore implements ExecutionStore {
         }
         // ベースディレクトリが存在しない場合は再帰的に作成する（同時実行でも安全）。
         // ここで isBaseDirSymlink() による事前チェックが走り、事前に仕込まれたシンボリック
-        // リンクは fail fast で拒否される
+        // リンクは fail fast で拒否される。なお、この判定から Files.createDirectories 完了
+        // までの間に baseDir が動的に差し替えられる窓は、この PR 以前から存在する既知の
+        // 残存リスクであり（判定と作成が別々のファイルシステム呼び出しである以上、
+        // path ベースの API では解消できない）、以下の事後検証の対象外
         ensureBaseDirectory();
-        // ensureBaseDirectory() の判定から実際に書き込みが完了するまでの間にも、baseDir が
+        // ensureBaseDirectory() が返ってから実際に書き込みが完了するまでの間にも、baseDir が
         // シンボリックリンクへ動的に差し替えられる余地が残っていた（TOCTOU）。
         // Files.createTempFile と Files.move はどちらも呼び出し時点の baseDir をパスとして
         // 再解決するため、その途中どこか 1 箇所だけをもう一度 isBaseDirSymlink() で
         // 再チェックしても、その次の 1 手が実際に差し替えを踏む可能性は残ってしまい
         // （例えば move 直前だけ確認しても move 自体との間にまだ隙間が残る）、
         // 何回チェックを増やしても隙間を完全にはゼロにできない。そこで方式を変える:
-        // 書き込みシーケンスの前後で baseDir の実体パス（シンボリックリンクを解決した
-        // 実際のディレクトリ）を記録しておき、書き込みが完了した直後に「実際に書き込んだ
-        // 先」が開始時に確認した実体ディレクトリと一致するかを検証する。シーケンス中の
-        // どの時点で差し替えが起きても、この 1 回の事後検証で必ず検知でき、一致しなければ
-        // 誤って書き込まれたファイルを削除したうえで拒否する（fail-closed）。
-        // ensureBaseDirectory() が baseDir を作成済みなので toRealPath() は例外なく解決できる
+        // 今この時点での baseDir の実体パス（シンボリックリンクを解決した実際のディレクトリ）
+        // を記録しておき、書き込みが完了した直後に「実際に書き込んだ先」がこの実体パスと
+        // 一致するかを検証する。この直後から Files.move 完了までの間に差し替えが起きれば
+        // この 1 回の事後検証で必ず検知でき、一致しなければ誤って書き込まれたファイルを
+        // 削除したうえで拒否する（fail-closed）。ensureBaseDirectory() が baseDir を
+        // 作成済みなので toRealPath() は例外なく解決できる
         Path expectedRealBase;
         try {
             expectedRealBase = baseDir.toRealPath();
@@ -383,13 +386,22 @@ public final class JsonExecutionStore implements ExecutionStore {
      *
      * <p>{@link Files#createTempFile} and {@link Files#move} both re-resolve
      * {@code baseDir} by path rather than through an already-open directory
-     * handle, so a symlink swap at any point during the write sequence -- not
-     * just one swapped in before it started -- would otherwise go undetected.
-     * Comparing real paths after the fact, instead of re-checking {@code
-     * isBaseDirSymlink()} before each individual filesystem call in the
-     * sequence, covers the whole sequence in one pass: no matter which call
-     * the swap happens around, the file's actual final location will not
-     * match {@code expectedRealBase}.
+     * handle, so a symlink swap at any point from immediately after {@code
+     * expectedRealBase} was captured through the end of the write sequence --
+     * not just one swapped in before the sequence started -- would otherwise
+     * go undetected. Comparing real paths after the fact, instead of
+     * re-checking {@code isBaseDirSymlink()} before each individual
+     * filesystem call in the sequence, covers that whole span in one pass: no
+     * matter which call within it the swap happens around, the file's actual
+     * final location will not match {@code expectedRealBase}. This does not
+     * extend backward to the separate, pre-existing check-then-act window
+     * inside {@link #ensureBaseDirectory()} itself (between its own {@code
+     * isBaseDirSymlink()} check and {@code Files.createDirectories}
+     * completing) -- a swap timed into exactly that earlier window would be
+     * silently adopted as {@code expectedRealBase} here, since {@link
+     * Path#toRealPath} simply follows whatever the symlink now points to.
+     * That earlier window is not new or widened by this method; it is the
+     * same accepted residual noted on {@link #ensureBaseDirectory()}.
      *
      * <p>Package-private, like {@link #keepMostRecentByFilename}, so this
      * check can be unit-tested directly against two independently-constructed
