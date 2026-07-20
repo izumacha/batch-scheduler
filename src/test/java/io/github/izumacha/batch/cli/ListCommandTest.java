@@ -115,4 +115,52 @@ class ListCommandTest {
         int code = BatchCli.run("list", "--state-dir", dir.toString(), "--limit", "abc");
         assertEquals(BatchCli.EXIT_CONFIG, code);
     }
+
+    // 以下は JsonExecutionStore.MAX_UNBOUNDED_RESULTS（100,000）付近の境界動作を検証する
+    // ユニットテスト。実際に 100,000 個の状態ファイルを用意するのは非現実的なため、
+    // ストアの安全上限をパラメータとして受け取れる形に切り出した純粋関数
+    // （effectiveLimit / fetchLimitFor / isTruncated）を、小さな値（storeCeiling=3）で
+    // 代用して検証する（regression: 以前は limit がストアの安全上限ちょうど・それ以上のとき、
+    // 「+1 件多く要求して切り詰めを検出する」トリックが static にクランプされて機能せず、
+    // 切り詰められていても常にフッターが出なかった）。
+
+    @Test
+    void effectiveLimitClampsToStoreCeiling() {
+        // 上限なし（0 以下）はそのまま素通しする
+        assertEquals(0, ListCommand.effectiveLimit(0, 3));
+        assertEquals(-1, ListCommand.effectiveLimit(-1, 3));
+        // ストアの安全上限未満はそのまま
+        assertEquals(2, ListCommand.effectiveLimit(2, 3));
+        // ストアの安全上限ちょうど・それ以上はクランプされる
+        assertEquals(3, ListCommand.effectiveLimit(3, 3));
+        assertEquals(3, ListCommand.effectiveLimit(1000, 3));
+    }
+
+    @Test
+    void fetchLimitForAddsOneOnlyBelowStoreCeiling() {
+        // ストアの安全上限未満なら「+1 件多く要求する」トリックを使う
+        assertEquals(3, ListCommand.fetchLimitFor(2, 3));
+        // ストアの安全上限ちょうどの場合は +1 すると内部でクランプされてしまうので加算しない
+        assertEquals(3, ListCommand.fetchLimitFor(3, 3));
+        // 上限なしはそのまま
+        assertEquals(0, ListCommand.fetchLimitFor(0, 3));
+    }
+
+    @Test
+    void isTruncatedDetectsCutoffAtStoreCeilingBoundary() {
+        // 通常時（ストアの安全上限未満）: +1 件多く返ってきたときだけ切り詰めありと判定する
+        assertTrue(ListCommand.isTruncated(3, 2, 3), "fetched > effectiveLimit のとき切り詰めあり");
+        assertFalse(ListCommand.isTruncated(2, 2, 3), "fetched == effectiveLimit のとき切り詰めなし");
+
+        // regression: effectiveLimit がストアの安全上限ちょうどのとき、+1 トリックが使えないため
+        // 「上限ぴったり返ってきた」こと自体を安全側に倒して切り詰めありと判定しなければならない
+        assertTrue(ListCommand.isTruncated(3, 3, 3),
+                "effectiveLimit がストア上限ちょうどのとき、上限ぴったり返ってきたら切り詰めありとみなす");
+        // 実際に保存件数が上限未満だった場合は誤って切り詰めありとしない
+        assertFalse(ListCommand.isTruncated(2, 3, 3),
+                "effectiveLimit がストア上限ちょうどでも、実際の件数がそれ未満なら切り詰めなし");
+
+        // 上限なし指定なら常に切り詰めなし
+        assertFalse(ListCommand.isTruncated(100, 0, 3));
+    }
 }
