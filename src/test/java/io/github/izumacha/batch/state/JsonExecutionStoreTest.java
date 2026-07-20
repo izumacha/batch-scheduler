@@ -501,8 +501,8 @@ class JsonExecutionStoreTest {
 
     @Test
     void tryReadAcceptsFileWhoseRealParentMatchesExpectedBase(@TempDir Path dir) throws IOException {
-        // ハッピーパス: baseDir が差し替えられていない通常のケースでは、事後の実体パス検証が
-        // 誤検知して正常なファイルまで読み飛ばしてしまわないことを確認する
+        // ハッピーパス: baseDir が差し替えられていない通常のケースでは、読み込む前に行う
+        // 実体パス検証が誤検知して正常なファイルまで読み飛ばしてしまわないことを確認する
         JsonExecutionStore store = new JsonExecutionStore(dir);
         store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
 
@@ -515,11 +515,14 @@ class JsonExecutionStoreTest {
     @Test
     void tryReadRejectsFileWhoseRealParentDoesNotMatchExpectedBase(@TempDir Path dir) throws IOException {
         // findById/findAll/findRecent は呼び出し開始時に baseDir の実体パス（expectedRealBase）を
-        // 一度だけ捕捉し、tryRead に渡す。実際に読んだファイルの実体パスの親がそれと食い違う場合
+        // 一度だけ捕捉し、tryRead に渡す。渡された file の実体パスの親がそれと食い違う場合
         // （呼び出しの途中で baseDir がシンボリックリンクへ差し替えられたことを意味する）は、
-        // save() の verifyWroteUnderExpectedBase と同じ「事後に実体パスを比較する」方式で検出し、
+        // tryRead が file を開いて読み込む「前」に実体パスを解決してこの不一致を検出し、
         // 内容を一切 Jackson に渡さず読み飛ばすべきことを、実際の競合を再現せずに直接検証する
-        // （package-private な tryRead を直接呼べるようにしてあるのはこのため）
+        // （package-private な tryRead を直接呼べるようにしてあるのはこのため。tryRead の
+        // Javadoc が説明するとおり、事後（読み込んだ後）に比較する方式では baseDir を
+        // 差し替えて読み、検証前に元へ戻す「揺り戻し」で不一致をすり抜けられてしまうため、
+        // 読み込む前に検証してから、その解決済みの実体パス自身を読む設計にしている）
         Path expectedBase = dir.resolve("expected-real-base");
         Files.createDirectory(expectedBase);
         // 「呼び出し中に差し替えられた結果、実際に読んでしまった」体の別ディレクトリ
