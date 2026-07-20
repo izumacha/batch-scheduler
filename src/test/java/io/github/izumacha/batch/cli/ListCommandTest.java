@@ -102,6 +102,38 @@ class ListCommandTest {
     }
 
     @Test
+    void isTruncatedTreatsSafetyCeilingHitAsTruncatedWhenLimitIsUnbounded() {
+        // limit <= 0（全件表示）でも、取得件数が JsonExecutionStore の安全上限
+        //（サーキットブレーカー）に達した場合は切り詰めとして扱う（regression: 以前は
+        // limit > 0 のときしか切り詰めと判定せず、--limit 0 で上限に達しても注記フッターが
+        // 出なかった）。上限件数分の実ファイルを作るのはテスト実行時間の観点で非現実的な
+        // ため、JsonExecutionStore.keepMostRecentByFilename のテストと同様に、切り出された
+        // 純粋関数として判定ロジックを検証する。
+        assertTrue(ListCommand.isTruncated(0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
+        assertTrue(ListCommand.isTruncated(-1, JsonExecutionStore.MAX_UNBOUNDED_RESULTS));
+        // 上限未満しか取得されていなければ切り詰めなし（境界値: 上限 - 1）
+        assertFalse(ListCommand.isTruncated(0, JsonExecutionStore.MAX_UNBOUNDED_RESULTS - 1));
+        // 少数件の通常ケースでも切り詰めなし
+        assertFalse(ListCommand.isTruncated(0, 2));
+        // limit > 0 の従来判定: 判定用の +1 件が取れた場合のみ切り詰め
+        assertTrue(ListCommand.isTruncated(2, 3));
+        assertFalse(ListCommand.isTruncated(2, 2));
+    }
+
+    @Test
+    void truncationNoticeMentionsSafetyCeilingWhenLimitIsUnbounded() {
+        // limit > 0 のとき: 従来どおり --limit 0 で全件表示できる旨を案内する
+        assertTrue(ListCommand.truncationNotice(2).contains("--limit 0 to list all"));
+        // limit <= 0 のとき: 既に全件表示を要求している利用者に --limit 0 を案内しても
+        // 意味がないため、安全上限に達した旨と上限件数を注記する
+        String notice = ListCommand.truncationNotice(0);
+        assertTrue(notice.contains(String.valueOf(JsonExecutionStore.MAX_UNBOUNDED_RESULTS)),
+                notice);
+        assertTrue(notice.contains("safety ceiling"), notice);
+        assertFalse(notice.contains("--limit 0 to list all"), notice);
+    }
+
+    @Test
     void emptyStateDirReportsNoRuns(@TempDir Path dir) {
         // 記録が 1 件もない状態で実行する
         String out = runListCapturingStdout("list", "--state-dir", dir.toString());

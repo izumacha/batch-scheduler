@@ -51,8 +51,10 @@ public final class JsonExecutionStore implements ExecutionStore {
      */
     // 「上限なし」（findAll / findRecent(limit<=0)）の絶対的な安全上限。長期運用で
     // .batch-state に大量のファイルが蓄積した場合でも、内容の全文パースが無制限に
-    // ならないようにする（現実的な利用規模を大きく超えた場合のみ効くサーキットブレーカー）
-    static final int MAX_UNBOUNDED_RESULTS = 100_000;
+    // ならないようにする（現実的な利用規模を大きく超えた場合のみ効くサーキットブレーカー）。
+    // public なのは ListCommand が「limit<=0 でもこの上限で切り詰められた」ことを利用者へ
+    // 注記するために参照するため（しきい値の一元管理。§6 マジックナンバーを散らさない）
+    public static final int MAX_UNBOUNDED_RESULTS = 100_000;
     /**
      * Upper bound on a single stored execution-result JSON document, mirroring
      * {@link io.github.izumacha.batch.config.BatchConfigLoader#MAX_CONFIG_BYTES}'s
