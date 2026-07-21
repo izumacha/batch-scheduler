@@ -362,6 +362,25 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void malformedUtf8FileIsRejected(@TempDir Path dir) throws IOException {
+        // load(Path) now reads bytes directly and decodes them itself (bounded
+        // read, see the "why" comment in BatchConfigLoader.load) instead of
+        // delegating to Files.readString(Path). Files.readString decodes
+        // strictly and throws on a malformed byte sequence rather than
+        // silently substituting the U+FFFD replacement character; this test
+        // pins that the hand-rolled decode preserves the same strictness
+        // (StandardCharsets.UTF_8.newDecoder() defaults to CodingErrorAction
+        // .REPORT, unlike the lenient `new String(bytes, UTF_8)` constructor).
+        Path file = dir.resolve("bad-encoding.yaml");
+        // 0x80 is a lone UTF-8 continuation byte with no leading byte before
+        // it: not valid UTF-8 on its own.
+        Files.write(file, new byte[] {'n', 'a', 'm', 'e', ':', ' ', (byte) 0x80});
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.load(file));
+        assertTrue(ex.getMessage().contains("failed to read batch config file"),
+                "message should explain the read/decode failure, was: " + ex.getMessage());
+    }
+
+    @Test
     void nonRegularFilePathIsRejected(@TempDir Path dir) {
         // A directory is not a regular file; Files.size()/Files.readString() would
         // either throw an unrelated IOException or behave in a confusing way. The

@@ -14,6 +14,8 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.error.YAMLException;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -168,13 +170,42 @@ public final class BatchConfigLoader {
         // ファイル内容を格納する変数を宣言する
         String content;
         try {
-            // Reject oversized files before reading them whole into memory.
-            // ファイルをメモリに読む前にサイズを確認して、大きすぎる場合は拒否する
-            long size = Files.size(path);
-            // ファイルサイズが上限を超えている場合はエラーを投げる(ラベルは呼び出し元のパスそのもの)
-            rejectIfOversized(size, path.toString());
-            // ファイル全体を文字列として読み込む
-            content = Files.readString(path);
+            // Bound the actual bytes read rather than stat-then-read-whole. A
+            // separate Files.size() check followed later by a full
+            // Files.readString() has a TOCTOU window between the two calls in
+            // which the file can grow past MAX_CONFIG_BYTES (a concurrent
+            // writer still appending, a network filesystem still flushing,
+            // ...), silently defeating the "reject before reading" guarantee
+            // this class documents: the size check would pass, then the
+            // now-oversized file gets read into memory in full anyway.
+            // Reading at most MAX_CONFIG_BYTES + 1 bytes up front makes the
+            // bytes actually handed to the parser the thing that is bounded,
+            // so no post-check growth can smuggle an oversized document
+            // through. Mirrors the same fix already applied to
+            // JsonExecutionStore.tryRead (see that method's Javadoc for the
+            // full rationale).
+            // 「サイズを確認してから丸ごと読む」の2段階方式だと、確認と読み込みの間
+            // （TOCTOUの隙間）に別プロセスの追記中ファイルやネットワークFS越しの書き込み
+            // 継続などでファイルが上限を超えて肥大化しても、そのまま全文が読み込まれて
+            // しまい「パース前にオーバーサイズを拒否する」というこのクラスの契約を
+            // すり抜けてしまう。そこで実際に読む量そのものを MAX_CONFIG_BYTES + 1 バイト
+            // までに制限し、パーサーに渡すバイト列自身を上限内に収める設計にすることで、
+            // 確認後の肥大化では上限をすり抜けられないようにする。JsonExecutionStore.tryRead
+            // に既に適用済みの同種の修正と揃える（そちらの Javadoc に詳しい理由がある）。
+            byte[] bytes;
+            try (InputStream in = Files.newInputStream(path)) {
+                // 上限+1バイトまで読み込む(+1は「ちょうど上限」と「上限超過」を区別するため)
+                bytes = in.readNBytes(MAX_CONFIG_BYTES + 1);
+            }
+            // 読み込めたバイト数が上限を超えている場合はエラーを投げる(ラベルは呼び出し元のパスそのもの)。
+            // 上限超過を切り詰めた不完全なバイト列のまま次のデコードに進ませないよう、
+            // デコードより先に必ずこのチェックを行う(そうしないと、切り詰め位置がマルチバイト
+            // 文字の途中に来た場合に「サイズ超過」ではなく紛らわしい「不正なUTF-8」エラーになる)
+            rejectIfOversized(bytes.length, path.toString());
+            // 上限内に収まったバイト列をUTF-8として厳密にデコードする(不正なバイト列があれば
+            // Files.readString と同じく例外を投げる。newDecoder() の既定動作は REPORT であり、
+            // String(byte[], Charset) のように不正バイト列を黙って置換文字に変換したりしない)
+            content = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
         } catch (IOException e) {
             // ファイルが見つからない・読めないなどの IO エラーは ConfigException に包んで投げる。
             // e.getMessage() が null な例外(例: 割り込みによる ClosedByInterruptException)でも
