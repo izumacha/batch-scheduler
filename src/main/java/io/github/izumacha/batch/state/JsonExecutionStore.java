@@ -230,7 +230,16 @@ public final class JsonExecutionStore implements ExecutionStore {
                             StandardCopyOption.ATOMIC_MOVE);
                 } catch (IOException atomicFailed) {
                     // Some filesystems don't support atomic moves; fall back.
+                    // Note: on such filesystems this fallback may not be atomic (could
+                    // internally copy+delete), so the "readers never observe a half-written
+                    // file" guarantee above is weaker here; tryRead() already tolerates a
+                    // partially-written/corrupt file by skipping it, so the only user-visible
+                    // effect is that one row is transiently missing from list/find results.
                     // アトミック移動に対応していないファイルシステムの場合は通常の移動にフォールバックする
+                    // （/code-review ultra 指摘対応: この分岐は内部的にコピー→削除になりうるため、
+                    // 上記の「読者が半端なファイルを読まない」保証はこの経路には及ばない。ただし
+                    // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
+                    // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
                     Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
                 }
             } finally {
