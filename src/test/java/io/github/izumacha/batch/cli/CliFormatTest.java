@@ -138,4 +138,66 @@ class CliFormatTest {
     void safeMessage_withoutMessage_returnsClassSimpleName() {
         assertEquals("IllegalStateException", CliFormat.safeMessage(new IllegalStateException()));
     }
+
+    /**
+     * セキュリティ回帰テスト: ジョブ出力由来のメッセージに含まれる端末制御文字
+     * （ESC・BEL・CSI 等）が除去され、生の 0x1B / 0x07 が表示文字列へ漏れないこと
+     * （旧実装は空白しか圧縮せず、タイトル偽装・文字消去などの端末注入を許していた）。
+     */
+    @Test
+    void shortMessage_stripsTerminalControlCharacters() {
+        // OSC タイトル偽装（ESC ] 0 ; ... BEL）と CSI 画面消去（ESC [ 2 J）を含む攻撃的な入力
+        String hostile = "\u001B]0;evil\u0007ok \u001B[2Jdone";
+        // サニタイズ後の表示文字列を取得する
+        String sanitized = CliFormat.shortMessage(hostile, 60);
+        // ESC（0x1B）が残っていないことを確認する
+        assertTrue(sanitized.indexOf('\u001B') < 0, sanitized);
+        // BEL（0x07）が残っていないことを確認する
+        assertTrue(sanitized.indexOf('\u0007') < 0, sanitized);
+        // 制御文字だけが消え、可視文字はそのまま残ることを確認する
+        assertEquals("]0;evilok [2Jdone", sanitized);
+    }
+
+    /** DEL（0x7F）と C1 制御文字（CSI=0x9B 等）も除去されることを確認する */
+    @Test
+    void shortMessage_stripsDelAndC1Controls() {
+        // DEL と 1 バイト CSI（U+009B）を含む入力がどちらも除去される
+        assertEquals("ab31mred", CliFormat.shortMessage("a\u007Fb\u009B31mred", 60));
+    }
+
+    /** 制御文字を含む長いメッセージでも、切り詰め（最大文字数＋省略記号）が従来どおり働くこと */
+    @Test
+    void shortMessage_truncationStillWorksAfterSanitization() {
+        // ESC を混ぜた 70 文字超の入力を用意する（サニタイズ後は "[31m"＋"x"×70 の 74 文字）
+        String longMessage = "\u001B[31m" + "x".repeat(70);
+        // 60 文字上限で切り詰めた結果を取得する
+        String truncated = CliFormat.shortMessage(longMessage, 60);
+        // 全体の長さが上限の 60 文字ちょうどになることを確認する
+        assertEquals(60, truncated.length());
+        // 末尾が省略記号（…）で終わることを確認する
+        assertTrue(truncated.endsWith("…"), truncated);
+    }
+
+    /** 制御文字を含まない日本語の通常メッセージは変化しないこと（偽陽性の除去がないこと） */
+    @Test
+    void shortMessage_plainJapaneseTextPassesUnchanged() {
+        // 日本語のエラーメッセージがそのまま返る
+        assertEquals("ジョブが失敗しました: 終了コード 1",
+                CliFormat.shortMessage("ジョブが失敗しました: 終了コード 1", 60));
+    }
+
+    /**
+     * ListCommand の runId 表示が使う stripControlChars 単体の挙動:
+     * 制御文字だけを除去し、切り詰めは行わないこと。null は null のまま返すこと。
+     */
+    @Test
+    void stripControlChars_removesControlsWithoutTruncating() {
+        // UUID 風の runId に ESC シーケンスを混ぜても制御文字だけが消える
+        assertEquals("0123456789abcdef-0123-0123[31m-esc",
+                CliFormat.stripControlChars("0123456789abcdef-0123-0123\u001B[31m-esc"));
+        // 長い文字列でも切り詰めは発生しない（65 文字がそのまま返る）
+        assertEquals(65, CliFormat.stripControlChars("y".repeat(65)).length());
+        // null は null のまま返す
+        assertEquals(null, CliFormat.stripControlChars(null));
+    }
 }

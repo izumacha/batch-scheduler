@@ -140,6 +140,16 @@ malicious resource exhaustion and against tampering with the state directory:
   dedicated thread (so a full pipe never blocks the child) and only a bounded
   tail is retained; an individual line is capped so a single runaway line cannot
   exhaust memory.
+- **Display sanitization of untrusted job output.** Although the batch file is
+  trusted, the *runtime output* a job produces (and values read back from state
+  files, such as run ids) is untrusted data. Before any of it is echoed into
+  the run-summary tables, `CliFormat` collapses whitespace and strips the
+  remaining non-printable control characters (C0 controls such as ESC/BEL, DEL,
+  and C1 controls such as CSI), so a failed job's captured output cannot inject
+  terminal escape sequences into the operator's terminal (title spoofing,
+  hidden text, cursor manipulation). `CliFormat.shortMessage` is the single
+  choke point for table cells, and `ListCommand` runs run ids through the same
+  `stripControlChars` helper.
 - **Iterative graph algorithms.** Validation, cycle detection, and topological
   sort are iterative, so a deeply-nested or very long dependency chain cannot
   overflow the call stack.

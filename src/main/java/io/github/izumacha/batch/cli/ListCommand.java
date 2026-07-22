@@ -82,9 +82,11 @@ public final class ListCommand implements Callable<Integer> {
         System.out.println("-".repeat(header.length()));
         // 各実行記録を 1 行ずつ表示する
         for (ExecutionResult run : runs) {
-            // 実行 ID・バッチ名・ステータス・開始時刻・実行時間を整形して出力する
+            // 実行 ID・バッチ名・ステータス・開始時刻・実行時間を整形して出力する。
+            // runId は state ファイル由来の信頼できない値のため、端末制御文字を
+            // 除去してから表示する（切り詰めはせず、注入だけを防ぐ）
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
-                    run.runId(),
+                    CliFormat.stripControlChars(run.runId()),
                     CliFormat.shortMessage(run.batchName(), 20),
                     run.status(),
                     CliFormat.instant(run.startedAt()),
