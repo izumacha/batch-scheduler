@@ -51,7 +51,8 @@ public final class JobRunner {
     // Attempt.message が「プレーンなメッセージ」か「キャプチャした出力の末尾」かを
     // 区別するための内部プレフィックス。Attempt 生成側と summarize の剥がし側で
     // 同一文字列を共有するため、1 箇所に定数化する（綴り違いで出力末尾が黙って消える事故を防ぐ）。
-    private static final String OUTPUT_PREFIX = "OUTPUT:";
+    // summarize と同じくテスト（JobRunnerTest）から参照するためパッケージプライベート
+    static final String OUTPUT_PREFIX = "OUTPUT:";
 
     // キャプチャする出力の最大行数（コンストラクタで設定する）
     private final int maxCapturedOutputLines;
@@ -391,12 +392,19 @@ public final class JobRunner {
         }
     }
 
-    private static String summarize(boolean succeeded,
-                                    int exitCode,
-                                    int attempts,
-                                    boolean timedOut,
-                                    String lastMessage,
-                                    Job job) {
+    // テストから直接呼び出して整形結果を検証できるようパッケージプライベートにしている
+    // （Windows でしか再現しない終了コード -1 のプロセスを実テストで用意できないため）
+    static String summarize(boolean succeeded,
+                            int exitCode,
+                            int attempts,
+                            boolean timedOut,
+                            String lastMessage,
+                            Job job) {
+        // 最後のメッセージが出力キャプチャ（内部プレフィックス付き）の場合は本文を取り出しておく。
+        // 下の各分岐（番兵値の分岐と、末尾での「出力の最終行」追記）で共通に使う
+        String tail = lastMessage != null && lastMessage.startsWith(OUTPUT_PREFIX)
+                ? lastMessage.substring(OUTPUT_PREFIX.length())
+                : null;
         // サマリーを組み立てる StringBuilder を作成する
         StringBuilder sb = new StringBuilder();
         if (succeeded) {
@@ -414,8 +422,21 @@ public final class JobRunner {
                 sb.append(" (").append(attempts).append(" attempts)");
             }
         } else if (exitCode == JobResult.NO_EXIT_CODE) {
-            // 終了コードが取得できない場合（起動失敗など）は最後のメッセージを表示する
-            sb.append(lastMessage);
+            // 終了コードが取得できない場合（起動失敗など）の分岐。
+            // 既知の制限: 番兵値 NO_EXIT_CODE（-1）は「終了コード未取得」を表すが、
+            // Windows ではプロセスが本当に -1 で終了できるため衝突する（POSIX の終了
+            // コードは 0..255 で -1 は起こり得ない）。その場合 lastMessage は起動失敗の
+            // 説明文ではなく、内部プレフィックス付きの出力キャプチャ（出力が無ければ
+            // null）になるため、内部表現の "OUTPUT:..." や文字列 "null" をそのまま
+            // 表示しないよう、通常の失敗と同じ「exit -1」表記へフォールバックする
+            // （出力の最終行はメソッド末尾の共通処理が追記する）
+            if (lastMessage == null || tail != null) {
+                // Windows の実プロセスが -1 で終了したケース: 実際の終了コードとして表示する
+                sb.append("exit ").append(exitCode);
+            } else {
+                // 本来の用途（起動失敗の "failed to start: ..." 等）の説明メッセージはそのまま表示する
+                sb.append(lastMessage);
+            }
             // 複数回試行した場合は試行回数も表示する
             if (attempts > 1) {
                 sb.append(" (").append(attempts).append(" attempts)");
@@ -429,10 +450,6 @@ public final class JobRunner {
             }
         }
 
-        // 最後のメッセージが出力キャプチャの場合はその末尾行を追記してコンテキストを補足する
-        String tail = lastMessage != null && lastMessage.startsWith(OUTPUT_PREFIX)
-                ? lastMessage.substring(OUTPUT_PREFIX.length())
-                : null;
         // 失敗時かつ出力がある場合は「出力の最終行」をサマリーに付加する。
         // OutputCollector は古い行を捨てて末尾 maxLines 行だけを保持するリングバッファ
         // なので、その「先頭行」は単に「総行数 − 保持行数」番目にあった任意の途中行

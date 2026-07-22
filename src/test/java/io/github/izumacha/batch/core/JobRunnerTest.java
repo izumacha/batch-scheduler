@@ -272,4 +272,51 @@ class JobRunnerTest {
             return true;
         }
     }
+
+    // ---- summarize（サマリー整形）のユニットテスト ----
+    // 番兵値 NO_EXIT_CODE(-1) と Windows の実終了コード -1 の衝突は POSIX 環境の
+    // 実プロセスでは再現できない(終了コードは 0..255)ため、整形ロジックを直接検証する。
+
+    /**
+     * 回帰テスト: 実プロセスが -1 で終了し出力もあるケース(Windows で到達可能)では、
+     * 内部プレフィックス "OUTPUT:" をそのまま漏らさず「exit -1: 最終行」形式になること。
+     */
+    @Test
+    void summarize_realMinusOneExitWithOutput_stripsInternalPrefix() {
+        // 出力キャプチャを模した内部プレフィックス付きメッセージを組み立てる
+        String captured = JobRunner.OUTPUT_PREFIX + "progress...\nboom happened\n";
+        // 番兵値と同じ -1 の終了コード・出力ありでサマリーを整形する
+        String summary = JobRunner.summarize(
+                false, JobResult.NO_EXIT_CODE, 1, false, captured,
+                job("w", List.of("cmd"), 0, 0));
+        // 内部プレフィックスが表示に漏れていないことを確認する
+        assertFalse(summary.contains(JobRunner.OUTPUT_PREFIX), summary);
+        // 終了コードと出力の最終行が表示されることを確認する
+        assertEquals("exit -1: boom happened", summary);
+    }
+
+    /**
+     * 回帰テスト: 実プロセスが -1 で終了し出力が無いケースでは、
+     * 文字列 "null" ではなく "exit -1" と表示されること。
+     */
+    @Test
+    void summarize_realMinusOneExitWithoutOutput_showsExitCodeNotNull() {
+        // lastMessage が null(出力なしの Attempt.completed 相当)でサマリーを整形する
+        String summary = JobRunner.summarize(
+                false, JobResult.NO_EXIT_CODE, 1, false, null,
+                job("w", List.of("cmd"), 0, 0));
+        // "null" 表示にならず終了コードが表示されることを確認する
+        assertEquals("exit -1", summary);
+    }
+
+    /** 従来動作の固定: 起動失敗の説明メッセージ(プレフィックス無し)はそのまま表示されること。 */
+    @Test
+    void summarize_failedToStartMessage_isShownVerbatim() {
+        // 起動失敗を模したプレーンな説明メッセージで、2 回試行のサマリーを整形する
+        String summary = JobRunner.summarize(
+                false, JobResult.NO_EXIT_CODE, 2, false, "failed to start: not found",
+                job("w", List.of("cmd"), 1, 0));
+        // 説明メッセージと試行回数がそのまま表示されることを確認する
+        assertEquals("failed to start: not found (2 attempts)", summary);
+    }
 }

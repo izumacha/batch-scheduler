@@ -1,10 +1,15 @@
 package io.github.izumacha.batch.config;
 
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.deser.std.NumberDeserializers;
 import com.fasterxml.jackson.databind.exc.ValueInstantiationException;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.fasterxml.jackson.databind.util.AccessPattern;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.izumacha.batch.model.Batch;
@@ -83,6 +88,19 @@ public final class BatchConfigLoader {
                 // `retries: 2.9` が 2 に静かに丸められ、意図と異なる実行になるため、
                 // 小数値は ConfigException（終了コード 3）として明示的に拒否する
                 .configure(DeserializationFeature.ACCEPT_FLOAT_AS_INT, false)
+                // null をプリミティブ型（int/long）フィールドへ黙って 0 に変換しない。
+                // 既定では値を書き忘れた `timeoutSeconds:`（YAML では null になる）が
+                // 0（= タイムアウト無し）、`retries:` が 0（= リトライ無し）へ静かに化け、
+                // 特にタイムアウトは「無制限実行」という危険側へ倒れるため、明示的な
+                // null は ConfigException（終了コード 3）として拒否する（§9 入力は信用しない）。
+                // この違反は MismatchedInputException（JsonMappingException のサブタイプ）
+                // となり、下の catch で対象フィールド名を含むメッセージ付きで包み直される。
+                // 注意: 本フラグ単独だと「キー自体の省略」まで巻き添えで拒否されてしまう
+                // （Job はレコードでコンストラクタ経由のデシリアライズとなり、省略された
+                // 引数の補完 getAbsentValue が既定実装では getNullValue へ委譲し、そこで
+                // 本フラグが誤発動するため）。省略は従来どおり既定値 0 として扱えるよう、
+                // 直後に registerModule する absentTolerantPrimitivesModule とセットで機能する
+                .configure(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES, true)
                 // 複数ドキュメント YAML（`---` 区切り）を先頭ドキュメントだけに黙って
                 // 切り詰めない。既定では 2 つ目以降のドキュメントが静かに捨てられ、
                 // 「正しい 1 つ目＋壊れた 2 つ目」のファイルでも `validate` が OK
@@ -101,6 +119,10 @@ public final class BatchConfigLoader {
                 // 経由でしか効かず、jackson-dataformat-yaml のパース経路では機能しないため、
                 // Jackson のストリーム層で検出できる本フラグを使う
                 .configure(JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true);
+        // FAIL_ON_NULL_FOR_PRIMITIVES（上）とセットで、「明示的な null は拒否・キー省略は
+        // 既定値 0」という区別を成立させるためのデシリアライザ群を登録する（詳細は
+        // absentTolerantPrimitivesModule の Javadoc を参照）
+        this.mapper.registerModule(absentTolerantPrimitivesModule());
 
         // jackson-dataformat-yaml の YAMLParser は SnakeYAML の Scanner/Parser の
         // イベント列を直接 Jackson のトークンへ橋渡ししており、maxAliasesForCollections /
@@ -404,6 +426,85 @@ public final class BatchConfigLoader {
         }
         // alias 上限超過、またはネスト深度上限超過のどちらかのメッセージ文言に一致するかを確認する
         return message.contains("exceeds the specified max") || message.contains("Nesting Depth exceeded max");
+    }
+
+    /**
+     * Builds the module that lets {@code FAIL_ON_NULL_FOR_PRIMITIVES} reject an
+     * <em>explicit</em> {@code null} (a key written with no value, e.g. a bare
+     * {@code timeoutSeconds:}) while still treating an <em>omitted</em> key as
+     * the usual default of {@code 0}.
+     *
+     * <p>The distinction matters because {@link io.github.izumacha.batch.model.Job}
+     * is a record deserialized through its canonical constructor: Jackson fills
+     * every constructor argument, and for an omitted key it asks the property's
+     * {@code NullValueProvider.getAbsentValue}, whose default implementation
+     * delegates to {@code getNullValue} — the exact method where
+     * {@code FAIL_ON_NULL_FOR_PRIMITIVES} fires. With the feature alone, simply
+     * leaving {@code retries}/{@code timeoutSeconds} out of the YAML (the normal,
+     * documented way to get the defaults) would be rejected too. The wrapper
+     * below overrides only {@code getAbsentValue} to return the default without
+     * consulting the feature, restoring the omitted-key behavior.
+     */
+    private static SimpleModule absentTolerantPrimitivesModule() {
+        // 登録用のモジュールを作成する（名前はデバッグ表示用）
+        SimpleModule module = new SimpleModule("absent-tolerant-primitives");
+        // long 型（timeoutSeconds が使用）: 標準デシリアライザに委譲しつつ、キー省略時だけ既定値 0L を使う
+        module.addDeserializer(long.class, new AbsentTolerantPrimitiveDeserializer<>(
+                new NumberDeserializers.LongDeserializer(Long.TYPE, 0L), 0L));
+        // int 型（retries が使用）: 同上（既定値 0）
+        module.addDeserializer(int.class, new AbsentTolerantPrimitiveDeserializer<>(
+                new NumberDeserializers.IntegerDeserializer(Integer.TYPE, 0), 0));
+        // 組み立てたモジュールを返す
+        return module;
+    }
+
+    /**
+     * プリミティブ数値用の委譲デシリアライザ。値の読み取り（小数拒否などの厳密な
+     * 数値パース）と明示的 null の扱い（{@code FAIL_ON_NULL_FOR_PRIMITIVES} による拒否）は
+     * 標準デシリアライザにそのまま委譲し、「キーが省略された場合」だけ
+     * {@link #getAbsentValue} で既定値を返すよう上書きする（理由は
+     * {@link #absentTolerantPrimitivesModule()} を参照）。
+     */
+    private static final class AbsentTolerantPrimitiveDeserializer<T> extends JsonDeserializer<T> {
+        // 実際の値の読み取りを担う標準デシリアライザ（委譲先）
+        private final JsonDeserializer<T> delegate;
+        // キー省略時に使う既定値（プリミティブのゼロ値）
+        private final T absentDefault;
+
+        AbsentTolerantPrimitiveDeserializer(JsonDeserializer<T> delegate, T absentDefault) {
+            // 委譲先のデシリアライザを保持する
+            this.delegate = delegate;
+            // キー省略時の既定値を保持する
+            this.absentDefault = absentDefault;
+        }
+
+        @Override
+        public T deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+            // 実際の値（数値トークン）の読み取りは標準デシリアライザにそのまま任せる
+            return delegate.deserialize(p, ctxt);
+        }
+
+        @Override
+        public T getNullValue(DeserializationContext ctxt) throws JsonMappingException {
+            // 明示的な null（値を書き忘れたキー）は標準実装に委譲する。
+            // FAIL_ON_NULL_FOR_PRIMITIVES が有効なため、ここで
+            // 「Cannot map `null` into type ...」の入力不一致例外が投げられる
+            return delegate.getNullValue(ctxt);
+        }
+
+        @Override
+        public Object getAbsentValue(DeserializationContext ctxt) {
+            // キー自体が書かれていない場合は、既定実装のような getNullValue への委譲
+            // （＝null 拒否の誤発動）をせず、従来どおりの既定値を返す
+            return absentDefault;
+        }
+
+        @Override
+        public AccessPattern getNullAccessPattern() {
+            // getNullValue は例外を投げうるため「毎回呼び出して判定する」動的パターンを宣言する
+            // （定数扱いにされると null 拒否がスキップされてしまう）
+            return AccessPattern.DYNAMIC;
+        }
     }
 
     private static String rootMessage(Throwable t) {
