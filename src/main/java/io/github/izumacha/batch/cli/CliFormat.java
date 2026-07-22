@@ -20,6 +20,15 @@ final class CliFormat {
     // （§6: マジック文字列を避け、単一の参照元に置く）
     private static final String PLACEHOLDER = "-";
 
+    // 端末表示から取り除く制御文字のパターン（§6: 意図のある値は名前付き定数に置く）。
+    // \p{Cntrl} は ASCII の C0 制御文字（ESC=0x1B・BEL=0x07 など）と DEL（0x7F）、
+    // U+0080〜U+009F は C1 制御文字（CSI=0x9B など）。ジョブの出力は信頼できない
+    // 実行時データ（DESIGN.md の信頼モデル参照）なので、生の制御文字を端末へ
+    // そのまま流すとタイトル偽装・文字消去・カーソル操作などの端末乗っ取りを許して
+    // しまう。改行・タブ等の空白系は shortMessage が先にスペースへ圧縮するため、
+    // ここでは「空白圧縮後に残る非表示文字」をまとめて削除する
+    private static final String CONTROL_CHARS_PATTERN = "[\\p{Cntrl}\\u0080-\\u009F]";
+
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private CliFormat() {
     }
@@ -106,7 +115,11 @@ final class CliFormat {
         return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
     }
 
-    /** テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める */
+    /**
+     * テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める。
+     * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
+     * {@link #stripControlChars(String)} で端末制御文字も除去する（唯一のチョークポイント）。
+     */
     static String shortMessage(String message, int max) {
         // null または空白のみの場合は空文字を返す
         if (message == null || message.isBlank()) {
@@ -114,11 +127,27 @@ final class CliFormat {
         }
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
         String oneLine = message.replaceAll("\\s+", " ").trim();
+        // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
+        oneLine = stripControlChars(oneLine);
         // 最大文字数以内であればそのまま返す
         if (oneLine.length() <= max) {
             return oneLine;
         }
         // 最大文字数を超える場合は末尾を省略記号（…）で置き換えて返す
         return oneLine.substring(0, Math.max(0, max - 1)) + "…";
+    }
+
+    /**
+     * 端末をあやつる制御文字（ESC・BEL・CSI・DEL など）を文字列から取り除く。
+     * ジョブ出力や state ファイル由来の信頼できない値（runId 等）を端末へ表示する
+     * 直前のサニタイズとして使う（§9: 出力もエスケープする）。null は null のまま返す。
+     */
+    static String stripControlChars(String value) {
+        // null はそのまま返す（呼び出し元の null 扱いを変えないため）
+        if (value == null) {
+            return null;
+        }
+        // 定数パターンに一致する制御文字をすべて削除した文字列を返す
+        return value.replaceAll(CONTROL_CHARS_PATTERN, "");
     }
 }

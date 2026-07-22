@@ -45,6 +45,10 @@ public final class JobRunner {
     private static final int MAX_KILL_SWEEPS = 10;
     // 親プロセスを一時停止する kill コマンド自体の完了を待つ上限時間
     private static final Duration KILL_COMMAND_TIMEOUT = Duration.ofSeconds(1);
+    // kill コマンドの終了を待つ 1 回分のポーリング間隔。waitFor でスレッドを
+    // 眠らせて待つことで、旧実装のスピン待ちが CPU コアを最大 1 秒占有していた
+    // 問題を避ける（§8: 重い処理でスレッドを空回りさせない）
+    private static final long KILL_WAIT_POLL_MILLIS = 50;
     // kill コマンド不在の警告を初回のみ出すためのフラグ（毎タイムアウトのログ洪水を防ぐ）
     private static final AtomicBoolean KILL_UNAVAILABLE_LOGGED = new AtomicBoolean(false);
 
@@ -349,11 +353,31 @@ public final class JobRunner {
             closeQuietly(kill.getOutputStream());
             // kill コマンド自体がハングしないよう短い上限付きで終了を待つ。
             // 呼び出し元スレッドが割り込み済み（タイムアウト後の cancel 経路）でも
-            // 待機を省略しないよう、InterruptedException を投げない spin 待ちを使う
+            // 待機を省略しない「例外を投げない」契約は維持しつつ、旧実装の
+            // Thread.onSpinWait スピンが CPU コアを最大 1 秒占有していたため、
+            // waitFor(50ms) の短いポーリングでスレッドを眠らせて待つ方式に変更する。
+            // InterruptedException はローカルフラグに記録してループを継続し、
+            // ループ後に割り込み状態を復元することで呼び出し元へ伝える
             long deadlineNanos = System.nanoTime() + KILL_COMMAND_TIMEOUT.toNanos();
+            // 待機中に割り込みを受けたかどうかを記録するローカルフラグ
+            boolean interrupted = false;
             while (kill.isAlive() && System.nanoTime() < deadlineNanos) {
-                // 短命コマンドの終了待ちなので CPU に軽いスピン待機で足りる
-                Thread.onSpinWait();
+                try {
+                    // 最大 50ms だけスレッドを停めて kill コマンドの終了を待つ
+                    // （終了していれば true が返るのでループを抜ける）
+                    if (kill.waitFor(KILL_WAIT_POLL_MILLIS, TimeUnit.MILLISECONDS)) {
+                        break;
+                    }
+                } catch (InterruptedException e) {
+                    // 割り込みは握り潰さずフラグへ記録し、期限までの待機は続行する
+                    // （このメソッドの「例外を投げない」契約を守るため）
+                    interrupted = true;
+                }
+            }
+            // 待機中に割り込みを受けていた場合は、呼び出し元スレッドの
+            // 割り込み状態を復元して割り込みの事実を失わせない
+            if (interrupted) {
+                Thread.currentThread().interrupt();
             }
             // 万一終わらなければ kill コマンドを強制終了して先へ進む
             if (kill.isAlive()) {
