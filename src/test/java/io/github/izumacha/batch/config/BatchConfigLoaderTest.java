@@ -146,6 +146,45 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void nullTimeoutSecondsSurfacesConfigException() {
+        // 値を書き忘れた `timeoutSeconds:`（YAML では null）が既定の Jackson では
+        // 0（= タイムアウト無し）へ静かに化け、無制限実行という危険側に倒れてしまう。
+        // null→0 変換を無効化した結果、明示的な null が ConfigException として
+        // 拒否されることを確認する
+        String yaml = """
+                name: bad
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo x"]
+                    timeoutSeconds:
+                """;
+        // 値の無い timeoutSeconds は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「null を数値フィールドに入れられない」ことと
+        // 対象フィールド名の両方を含み、利用者が原因箇所を特定できることを検証する
+        assertTrue(ex.getMessage().contains("null") && ex.getMessage().contains("timeoutSeconds"),
+                "message should mention the null value and the field, was: " + ex.getMessage());
+    }
+
+    @Test
+    void nullRetriesSurfacesConfigException() {
+        // `retries:` に値を書き忘れると既定では 0（= リトライ無し）へ静かに化け、
+        // 利用者の意図と異なる実行になるため、明示的な null が拒否されることを確認する
+        String yaml = """
+                name: bad
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo x"]
+                    retries:
+                """;
+        // 値の無い retries は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージから対象フィールドが分かることを検証する
+        assertTrue(ex.getMessage().contains("null") && ex.getMessage().contains("retries"),
+                "message should mention the null value and the field, was: " + ex.getMessage());
+    }
+
+    @Test
     void duplicateDependsOnKeyWithinJobSurfacesConfigException() {
         // A job block declaring dependsOn twice (typical of a bad merge or
         // copy-paste) must be rejected instead of silently keeping only the

@@ -81,7 +81,16 @@ a successful batch reports the persistence failure as exit 3 (`EXIT_CONFIG`).
   `BatchConfigLoader`, so `timeoutSeconds: 0.9` can never silently become `0` —
   which would mean *no timeout at all*. This applies to **all** float literals,
   not just fractional ones: even a whole-number float such as `timeoutSeconds:
-  30.0` is rejected — these fields accept integers only.
+  30.0` is rejected — these fields accept integers only. The same reasoning
+  covers **explicit nulls**: a key written with no value (a bare
+  `timeoutSeconds:` — YAML parses it as `null`) would by default be silently
+  coerced to `0`, again meaning *no timeout at all*, so
+  `FAIL_ON_NULL_FOR_PRIMITIVES` turns it into a configuration error (exit
+  code 3) instead. *Omitting* the key entirely remains the documented way to
+  get the default of `0`; a small deserializer wrapper in `BatchConfigLoader`
+  keeps that omitted-key path working (Jackson's record deserialization would
+  otherwise treat an omitted constructor argument like a null and reject it
+  too).
 - **Single-document YAML only.** A config file containing multiple YAML documents
   (`---` separators) is rejected as a configuration error (exit code 3) instead of
   every document after the first being silently dropped (silent job loss).
