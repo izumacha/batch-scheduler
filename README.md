@@ -8,6 +8,14 @@ retrying and timing out individual jobs as configured, skipping the dependents o
 anything that fails, and persisting a JSON record of every run so its history and
 outcome can be inspected afterwards.
 
+## Demo
+
+The representative flow with `examples/etl.yaml` (extract → transform → load →
+notify): reading the batch definition, validating the dependency DAG, running
+the jobs in topological order, and listing the persisted run history.
+
+![examples/etl.yaml のバッチ定義を表示し、DAG を検証してからトポロジカル順に実行し、実行履歴を一覧表示する端末操作のデモ](docs/demo.gif)
+
 ## Features
 
 - **DAG dependencies** — jobs declare `dependsOn` and run in a validated
