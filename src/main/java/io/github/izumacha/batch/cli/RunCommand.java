@@ -15,6 +15,7 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
@@ -108,6 +109,19 @@ public final class RunCommand implements Callable<Integer> {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '" + rerunFailedRunId
                         + "' under " + stateDir.toAbsolutePath());
+                // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
+                // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では
+                // 読まれない。その場合に真因（symlink / 非ディレクトリ拒否）が
+                // 「見つからない」の裏に隠れないよう、診断用のヒントを併記する
+                if (Files.isSymbolicLink(stateDir)) {
+                    // state ディレクトリ自体がシンボリックリンクなら、安全のため読まない旨を案内する
+                    System.err.println("note: " + stateDir.toAbsolutePath()
+                            + " is a symbolic link; prior runs are never read through a symlinked state directory");
+                } else if (Files.exists(stateDir) && !Files.isDirectory(stateDir)) {
+                    // ディレクトリ以外（通常ファイル等）が既に存在する場合もその旨を案内する
+                    System.err.println("note: " + stateDir.toAbsolutePath()
+                            + " exists but is not a directory; prior runs cannot be read from it");
+                }
                 return BatchCli.EXIT_CONFIG;
             }
         }
