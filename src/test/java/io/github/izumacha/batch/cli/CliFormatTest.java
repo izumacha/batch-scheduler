@@ -2,9 +2,13 @@ package io.github.izumacha.batch.cli;
 
 // アサーション（assertEquals 等）を静的インポートする
 import static org.junit.jupiter.api.Assertions.assertEquals;
+// 正規表現マッチのアサーションに使う
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 // 期間（Duration）を生成するために使う
 import java.time.Duration;
+// 時刻（Instant）を生成するために使う
+import java.time.Instant;
 // テストメソッドであることを示すアノテーション
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +68,59 @@ class CliFormatTest {
         assertEquals("1m00.0s", CliFormat.duration(Duration.ofMillis(59_950)));
         // 59.95 秒の直前（59.94 秒）は繰り上がらず 59.9s のまま
         assertEquals("59.9s", CliFormat.duration(Duration.ofMillis(59_940)));
+    }
+
+    /**
+     * 回帰テスト: ミリ秒換算が long を桁あふれするほど巨大な Duration でも
+     * 例外を漏らさずプレースホルダ "-" を返すこと（旧実装は ArithmeticException を
+     * 投げ、list コマンドのテーブル描画が途中で打ち切られて終了コード 3 になっていた）。
+     */
+    @Test
+    void duration_overflowingToMillis_returnsPlaceholder() {
+        // Long.MAX_VALUE 秒（toMillis() が必ず桁あふれする値）はプレースホルダになる
+        assertEquals("-", CliFormat.duration(Duration.ofSeconds(Long.MAX_VALUE)));
+        // 桁あふれ境界のわずかに上（Long.MAX_VALUE ミリ秒 + 1ms 相当）もプレースホルダになる
+        assertEquals("-", CliFormat.duration(
+                Duration.ofMillis(Long.MAX_VALUE).plusMillis(1)));
+    }
+
+    /** 桁あふれしないギリギリの巨大な Duration は従来どおり通常整形されることを確認する */
+    @Test
+    void duration_hugeButNotOverflowing_stillFormats() {
+        // Long.MAX_VALUE ミリ秒ちょうどは桁あふれしないため "Xm..s" 形式で整形される
+        String formatted = CliFormat.duration(Duration.ofMillis(Long.MAX_VALUE));
+        // 「分+秒」形式（例: "153722867280912m55.8s"）で返ることを確認する
+        assertTrue(formatted.matches("\\d+m\\d{2}\\.\\ds"), formatted);
+    }
+
+    /** 通常の Instant は「yyyy-MM-dd HH:mm:ss」形式に整形されることを確認する */
+    @Test
+    void instant_normal_formatsTimestamp() {
+        // 2026-01-02T03:04:05Z を整形する（表示はシステムタイムゾーン依存のため形式のみ検証する）
+        String formatted = CliFormat.instant(Instant.parse("2026-01-02T03:04:05Z"));
+        // 「4桁年-2桁月-2桁日 時:分:秒」の形式になっていることを確認する
+        assertTrue(formatted.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"), formatted);
+    }
+
+    /** null の Instant はプレースホルダ "-" になることを確認する */
+    @Test
+    void instant_null_returnsPlaceholder() {
+        // null はハイフンで表示される
+        assertEquals("-", CliFormat.instant(null));
+    }
+
+    /**
+     * 回帰テスト: ローカル日時へ変換できない極端な Instant でも例外を漏らさず
+     * プレースホルダ "-" を返すこと（旧実装は DateTimeException を投げ、
+     * 壊れた state ファイル 1 件で list の一覧全体が中断して終了コード 3 になっていた）。
+     */
+    @Test
+    void instant_extremeValues_returnPlaceholder() {
+        // Instant.MIN（負の 10 億年）はタイムゾーン変換で EpochDay の下限を踏み越えるため
+        // プレースホルダになる
+        assertEquals("-", CliFormat.instant(Instant.parse("-1000000000-01-01T00:00:00Z")));
+        // Instant.MAX（+10 億年）も同様に EpochDay の上限を踏み越えるためプレースホルダになる
+        assertEquals("-", CliFormat.instant(Instant.MAX));
     }
 
     /** メッセージを持つ例外はそのメッセージをそのまま返すことを確認する */

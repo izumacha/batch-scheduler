@@ -1,5 +1,6 @@
 package io.github.izumacha.batch.cli;
 
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -14,24 +15,59 @@ final class CliFormat {
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
+    // 「値が無い / 整形できない」ことを表すテーブル表示用のプレースホルダ文字列。
+    // null の Instant と、フォーマッタの表現範囲を超えて整形できない値の両方で共用する
+    // （§6: マジック文字列を避け、単一の参照元に置く）
+    private static final String PLACEHOLDER = "-";
+
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private CliFormat() {
     }
 
-    /** Instant をローカルタイムスタンプとして整形する。null の場合は {@code "-"} を返す */
+    /**
+     * Instant をローカルタイムスタンプとして整形する。null の場合、および
+     * {@link Instant#MIN}/{@link Instant#MAX} 近傍のようにローカル日時へ変換できない
+     * 極端な時刻（手書き・破損した state ファイル由来など。タイムゾーンのオフセットを
+     * 足すと LocalDate の表現範囲＝EpochDay の上下限を踏み越えてしまう値）の場合は
+     * {@code "-"} を返す。ここで例外を漏らすと {@code list} のテーブル描画ループが
+     * 途中で打ち切られ、1 件の壊れた記録が他の正常な記録の表示まで巻き込んで
+     * しまうため（fail-safe、§9）。
+     */
     static String instant(Instant instant) {
-        // null の場合はハイフンを返し、そうでなければフォーマッタで整形して返す
-        return instant == null ? "-" : TIMESTAMP.format(instant);
+        // null の場合は表示用プレースホルダを返す
+        if (instant == null) {
+            return PLACEHOLDER;
+        }
+        try {
+            // フォーマッタで「yyyy-MM-dd HH:mm:ss」形式に整形して返す
+            return TIMESTAMP.format(instant);
+        } catch (DateTimeException e) {
+            // ローカル日時へ変換できない極端な時刻は、例外を呼び出し元へ漏らさず
+            // プレースホルダで縮退表示する
+            return PLACEHOLDER;
+        }
     }
 
-    /** Duration をコンパクトな形式で整形する（例: {@code "1m03.4s"}、{@code "850ms"}） */
+    /**
+     * Duration をコンパクトな形式で整形する（例: {@code "1m03.4s"}、{@code "850ms"}）。
+     * ミリ秒換算が long を桁あふれするほど巨大な値（破損した state ファイル由来など）は
+     * {@code "-"} を返す。{@link #instant(Instant)} と同じく、1 件の壊れた記録で
+     * {@code list} のテーブル描画を中断させないための fail-safe（§9）。
+     */
     static String duration(Duration duration) {
         // null・ゼロ・負の値はすべて "0ms" として返す
         if (duration == null || duration.isZero() || duration.isNegative()) {
             return "0ms";
         }
-        // ミリ秒単位の値を取得する
-        long millis = duration.toMillis();
+        // ミリ秒単位の値を格納する変数を宣言する
+        long millis;
+        try {
+            // ミリ秒単位の値を取得する（約 2.9 億年を超えると long を桁あふれして例外になる）
+            millis = duration.toMillis();
+        } catch (ArithmeticException e) {
+            // 桁あふれするほど巨大な期間は「0ms」と偽らず、整形不能のプレースホルダで縮退表示する
+            return PLACEHOLDER;
+        }
         // 1000ms 未満の場合は「XXXms」形式で返す
         if (millis < 1000) {
             return millis + "ms";
@@ -39,7 +75,10 @@ final class CliFormat {
         // 先に 0.1 秒(=100ms)単位へ四捨五入してから分・秒へ分解する。
         // %.1f に丸めを任せると 59.95 秒が 60.0 に丸め上がっても分桁へ繰り上がらず
         // "1m60.0s" のような不正表示になるため、整数演算で丸めて桁上がりを正しく扱う。
-        long tenths = (millis + 50) / 100;
+        // 単純な (millis + 50) / 100 は millis が Long.MAX_VALUE 近傍のとき +50 が
+        // 桁あふれして "-55.-7s" のような不正表示になるため、商と余りに分けてから
+        // 丸める数学的に等価な式（q + (r+50)/100。r<100 なので加算があふれない）を使う
+        long tenths = millis / 100 + (millis % 100 + 50) / 100;
         // 分の部分を計算する（600 個の 0.1 秒 = 60 秒 = 1 分）
         long minutes = tenths / 600;
         // 分を除いた残りを 0.1 秒単位で求める
