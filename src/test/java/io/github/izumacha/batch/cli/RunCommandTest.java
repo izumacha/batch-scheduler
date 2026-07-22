@@ -198,6 +198,34 @@ class RunCommandTest {
     }
 
     @Test
+    void rerunFailedWithUnknownRunIdDoesNotCreateStateDir(@TempDir Path dir) throws IOException {
+        // 構造的には有効なバッチ定義を書き出す（runId 検索の失敗でジョブは実行されない想定）
+        Path config = dir.resolve("batch.yaml");
+        Files.writeString(config, """
+                name: irrelevant
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        // まだ存在しない保存先ディレクトリのパスを用意する（作られないことを検証する）
+        Path stateDir = dir.resolve("brand/new/state");
+
+        // 存在しない runId を --rerun-failed に指定して run コマンドを実行する
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(),
+                "--rerun-failed", "does-not-exist", "-q");
+
+        // 前回結果が見つからない場合は設定・IO エラー（3）として終了するはず
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        // 見つからなかった旨のエラーメッセージが標準エラーに出力されているはず
+        assertTrue(outcome.stderr().contains("no prior run found"), outcome.stderr());
+        // 実行前の失敗（runId 検索の失敗）では --state-dir のディレクトリツリーが
+        // 副作用として作られていないこと（docs/DESIGN.md の契約）
+        assertFalse(Files.exists(stateDir),
+                "a failed --rerun-failed lookup must not create the state directory as a side effect");
+    }
+
+    @Test
     void rerunFailedWithMalformedRunIdFailsCleanlyInsteadOfThrowing(@TempDir Path dir)
             throws IOException {
         // マルフォームな runId（パストラバーサル文字列）を --rerun-failed に渡す。
