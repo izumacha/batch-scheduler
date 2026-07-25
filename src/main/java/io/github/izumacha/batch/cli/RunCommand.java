@@ -15,6 +15,7 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
@@ -76,29 +77,19 @@ public final class RunCommand implements Callable<Integer> {
             return BatchCli.EXIT_VALIDATION;
         }
 
-        // 状態保存ストアを格納する変数を宣言する
-        JsonExecutionStore store;
-        try {
-            // ジョブを 1 つも実行する前に保存先ディレクトリを作成・検証する（fail fast）。
-            // 使えない --state-dir（例: 既存の通常ファイル）を実行後に発見すると、
-            // ジョブは走ったのに記録が残らず、終了コード 3 が本来のバッチ結果を
-            // 覆い隠してしまうため、先にストアを構築し保存先を明示的に作成・検証する
-            // （コンストラクタはディレクトリを作らないため、書き込み系のここでだけ呼ぶ）
-            store = new JsonExecutionStore(stateDir);
-            store.ensureBaseDirectory();
-        } catch (RuntimeException e) {
-            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
-            Throwable cause = e.getCause();
-            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
-            String detail = cause != null ? " (" + cause + ")" : "";
-            // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to prepare state directory: " + CliFormat.safeMessage(e) + detail);
-            return BatchCli.EXIT_CONFIG;
-        }
+        // 状態保存ストアのインスタンスを構築する。コンストラクタはディレクトリを作らない
+        // 副作用ゼロの処理なので（JsonExecutionStore のコンストラクタ参照）、保存先を
+        // 実際に作成・検証するより前の、この時点で安全に構築できる
+        JsonExecutionStore store = new JsonExecutionStore(stateDir);
 
         // --rerun-failed が指定されていれば、その runId の前回結果を state ディレクトリから
-        // 読み込む。ジョブを 1 つも実行する前に検証することで、存在しない runId を
-        // 指定した設定ミスをジョブ実行後ではなく fail fast で発見できる
+        // 読み込む。保存先ディレクトリを作成するより前・ジョブを 1 つも実行するより前に
+        // 検証することで、存在しない runId を指定した設定ミスを fail fast で発見でき、
+        // かつ失敗した場合でも --state-dir のディレクトリツリーが副作用として残らない
+        // （docs/DESIGN.md「実行前の失敗は state ディレクトリに副作用を残さない」契約）。
+        // findById はディレクトリの存在確認より先に runId を検証し、ディレクトリが未作成
+        // なら例外ではなく「結果なし」を返す契約であるため、この時点で呼んでも安全
+        // （findByIdValidatesRunIdBeforeCheckingStateDirExists で検証済み）
         ExecutionResult priorResult = null;
         if (rerunFailedRunId != null) {
             try {
@@ -118,8 +109,39 @@ public final class RunCommand implements Callable<Integer> {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '" + rerunFailedRunId
                         + "' under " + stateDir.toAbsolutePath());
+                // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
+                // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では
+                // 読まれない。その場合に真因（symlink / 非ディレクトリ拒否）が
+                // 「見つからない」の裏に隠れないよう、診断用のヒントを併記する
+                if (Files.isSymbolicLink(stateDir)) {
+                    // state ディレクトリ自体がシンボリックリンクなら、安全のため読まない旨を案内する
+                    System.err.println("note: " + stateDir.toAbsolutePath()
+                            + " is a symbolic link; prior runs are never read through a symlinked state directory");
+                } else if (Files.exists(stateDir) && !Files.isDirectory(stateDir)) {
+                    // ディレクトリ以外（通常ファイル等）が既に存在する場合もその旨を案内する
+                    System.err.println("note: " + stateDir.toAbsolutePath()
+                            + " exists but is not a directory; prior runs cannot be read from it");
+                }
                 return BatchCli.EXIT_CONFIG;
             }
+        }
+
+        try {
+            // ジョブを 1 つも実行する前に保存先ディレクトリを作成・検証する（fail fast）。
+            // 使えない --state-dir（例: 既存の通常ファイル）を実行後に発見すると、
+            // ジョブは走ったのに記録が残らず、終了コード 3 が本来のバッチ結果を
+            // 覆い隠してしまうため、実行前にここで保存先を明示的に作成・検証する
+            // （上の --rerun-failed 検証より後に置くのは、検索に失敗して実行に至らない
+            //  場合にディレクトリだけが副作用として残るのを防ぐため）
+            store.ensureBaseDirectory();
+        } catch (RuntimeException e) {
+            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
+            Throwable cause = e.getCause();
+            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
+            String detail = cause != null ? " (" + cause + ")" : "";
+            // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
+            System.err.println("error: failed to prepare state directory: " + CliFormat.safeMessage(e) + detail);
+            return BatchCli.EXIT_CONFIG;
         }
 
         // バッチを実行して結果を取得する。BatchExecutor.execute は内部で依存グラフを

@@ -57,7 +57,12 @@ goes all the way through execution and persistence; `list` reads stored results.
 `run` validates the DAG (exit code 2 on structural errors) *before* touching
 the state directory, so an invalid batch never creates the `--state-dir` tree
 as a side effect and validation errors are never masked by a state-directory
-error. It then prepares the state directory **before** executing any job: the
+error. The `--rerun-failed` lookup is likewise resolved *before* the state
+directory is prepared (the store reads a run id against a not-yet-created
+directory as simply "not found"), so an unknown or malformed run id (exit
+code 3) also leaves no `--state-dir` tree behind: pre-run failures leave no
+side effects in the state directory. It then prepares the state directory
+**before** executing any job: the
 pre-run step creates the directory and catches structurally-unusable paths —
 for example a path that is an existing regular file — failing fast with exit
 code 3 while no job has run yet. This pre-run step is *not* a full writability
