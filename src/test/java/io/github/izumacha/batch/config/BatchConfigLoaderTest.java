@@ -339,6 +339,133 @@ class BatchConfigLoaderTest {
     }
 
     @Test
+    void aliasInValuePositionIsRejectedNotSilentlyCorrupted() {
+        // jackson-dataformat-yaml は SnakeYAML の Composer（エイリアス解決段階）を
+        // 通さないため、値の位置の `*base` が黙って文字列 "base" に化け、ジョブが
+        // アンカーの参照先とは別の（間違った）コマンドを実行してしまっていた。
+        // エイリアスを含むドキュメントが ConfigException（終了コード 3）として
+        // 明示的に拒否されることを確認する
+        String yaml = """
+                name: etl
+                defaults: &base ["sh", "-c", "echo real"]
+                jobs:
+                  - id: a
+                    command: *base
+                """;
+        // エイリアス入りの YAML は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「未対応」であることとソース名を含み、原因を特定できることを検証する
+        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("<string>"),
+                "alias must be rejected with the unsupported-feature message, was: " + ex.getMessage());
+    }
+
+    @Test
+    void anchorIsRejectedEvenWithoutAlias() {
+        // アンカー（&name）はエイリアスの参照先であり、mapper はアンカーも解決しない。
+        // エイリアス側だけ拒否しても片手落ちになるため、アンカー単独のドキュメントも
+        // 拒否されることを確認する
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: &cmd ["sh", "-c", "echo a"]
+                """;
+        // アンカー入りの YAML は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「未対応」とアンカー名を含むことを検証する
+        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("cmd"),
+                "anchor must be rejected with the unsupported-feature message, was: " + ex.getMessage());
+    }
+
+    @Test
+    void undefinedAliasIsRejectedNotDegradedToLiteralString() {
+        // アンカーが定義されていないエイリアスは compose() では ComposerException になる
+        // （safety-limit ガードは意図的に無視する）が、mapper はそれでも `*x` を
+        // 文字列 "x" に化けさせてしまう。イベントレベルの走査によって、未定義の
+        // エイリアスも漏れなく拒否されることを確認する
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", *missing]
+                """;
+        // 未定義エイリアス入りの YAML も ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「未対応」を含むことを検証する
+        assertTrue(ex.getMessage().contains("未対応"),
+                "a dangling alias must be rejected, was: " + ex.getMessage());
+    }
+
+    @Test
+    void mergeKeyIsRejectedNotSilentlyDropped() {
+        // `<<: *defaults` のマージキーは mapper では未知フィールド "<<" として扱われ、
+        // FAIL_ON_UNKNOWN_PROPERTIES=false / @JsonIgnoreProperties が黙って読み捨てる
+        // （retries/timeoutSeconds が静かに失われても `validate` は OK を返す）。
+        // マージキーを含むドキュメントが拒否されることを確認する
+        String yaml = """
+                name: etl
+                defaults: &defaults
+                  retries: 2
+                  timeoutSeconds: 30
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo a"]
+                    <<: *defaults
+                """;
+        // マージキー入りの YAML は ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「未対応」を含むことを検証する（アンカーが先に検出されても
+        // マージキーが先に検出されても、どちらも同じ未対応機能エラーになる）
+        assertTrue(ex.getMessage().contains("未対応"),
+                "a merge key must be rejected, was: " + ex.getMessage());
+    }
+
+    @Test
+    void bareMergeKeyWithoutAnchorIsRejected() {
+        // アンカー・エイリアスを一切使わない裸のマージキー（`<<:` にインラインの
+        // マップを渡す形）も、mapper では同様に黙って読み捨てられるため拒否される
+        // ことを確認する（アンカー検出に依存しないマージキー単独の検出経路の検証）
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "echo a"]
+                    <<: {retries: 2}
+                """;
+        // 裸のマージキー入りの YAML も ConfigException として表面化するはず
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // エラーメッセージが「未対応」とマージキーの表記を含むことを検証する
+        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("<<"),
+                "a bare merge key must be rejected, was: " + ex.getMessage());
+    }
+
+    @Test
+    void quotedMergeKeyLookalikeStringIsStillAllowed() {
+        // クォート付きの "<<" はマージキーではなく通常の文字列。コマンド引数として
+        // 正当に使われうる（例: ヒアドキュメント風の引数）ため、拒否されずに
+        // そのまま値として読み込まれることを確認する（偽陽性の回帰防止）
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "cat", "<<"]
+                """;
+        // クォート済みの "<<" を含む YAML は正常に読み込めるはず
+        Batch batch = loader.loadFromString(yaml);
+        // コマンド引数として "<<" がそのまま保持されていることを検証する
+        assertEquals("<<", batch.jobs().get(0).command().get(3));
+    }
+
+    @Test
+    void plainDocumentWithoutAnchorsStillParses() {
+        // アンカー・エイリアス・マージキーを使わない従来どおりのドキュメントが、
+        // 新しい未対応機能ガードの巻き添えで拒否されないことを確認する（回帰防止）
+        Batch batch = loader.loadFromString(VALID_YAML);
+        // 3 つのジョブがそのまま読み込まれることを検証する
+        assertEquals(3, batch.jobs().size());
+    }
+
+    @Test
     void yamlAliasBombIsRejected() {
         // Classic "billion laughs": many aliases to one anchor inside a single
         // collection. `jobs: []` stays structurally valid so the thrown

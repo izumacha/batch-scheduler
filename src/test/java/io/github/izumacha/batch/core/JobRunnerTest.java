@@ -273,6 +273,87 @@ class JobRunnerTest {
         }
     }
 
+    // ---- finishTimedOutAttempt（タイムアウト後始末）のユニットテスト ----
+    // 「タイムアウト検出後の後始末待ちの最中に割り込まれる」というミリ秒単位の窓は、
+    // 実プロセス相手では決定的に再現できないため、waitFor が必ず割り込まれる偽の
+    // Process を使ってパッケージプライベートの後始末メソッドを直接検証する。
+
+    /**
+     * 回帰テスト: タイムアウト確定後の後始末（kill 後の waitFor）が割り込まれても、
+     * 結果が「起動失敗（interrupted while waiting for process）」に再分類されず、
+     * タイムアウトのまま記録されること。旧実装は外側の catch に吸われて
+     * Attempt.failedToStart になり、永続化される実行記録からタイムアウトの事実が
+     * 失われていた。
+     */
+    @Test
+    void finishTimedOutAttempt_interruptDuringCleanup_stillReportsTimeout() throws Exception {
+        // 後始末の waitFor(long, TimeUnit) が必ず InterruptedException を投げる偽プロセスを用意する
+        Process interruptingProcess = new Process() {
+            @Override
+            public java.io.OutputStream getOutputStream() {
+                // 標準入力は使わないので何も書けないダミーストリームを返す
+                return java.io.OutputStream.nullOutputStream();
+            }
+
+            @Override
+            public java.io.InputStream getInputStream() {
+                // 標準出力は使わないので空のダミーストリームを返す
+                return java.io.InputStream.nullInputStream();
+            }
+
+            @Override
+            public java.io.InputStream getErrorStream() {
+                // 標準エラーも使わないので空のダミーストリームを返す
+                return java.io.InputStream.nullInputStream();
+            }
+
+            @Override
+            public int waitFor() {
+                // 引数なしの待機は使われない（呼ばれても即終了扱いにする）
+                return 0;
+            }
+
+            @Override
+            public boolean waitFor(long timeout, java.util.concurrent.TimeUnit unit)
+                    throws InterruptedException {
+                // 後始末の待機がちょうど割り込まれた状況を決定的に再現する
+                throw new InterruptedException("simulated interrupt during cleanup");
+            }
+
+            @Override
+            public int exitValue() {
+                // kill 済みプロセスの終了コード相当のダミー値を返す
+                return 137;
+            }
+
+            @Override
+            public void destroy() {
+                // 偽プロセスなので何もしない
+            }
+        };
+        // すぐ終わるダミーのリーダースレッドを起動して終了まで待つ
+        Thread reader = new Thread(() -> { });
+        // スレッドを開始する
+        reader.start();
+        // スレッドの終了を待つ（join 対象が生きているとテストの検証がぶれるため）
+        reader.join();
+
+        // タイムアウト後始末を直接呼び出し、割り込まれても timedOut が返ることを検証する
+        JobRunner.Attempt attempt = JobRunner.finishTimedOutAttempt(
+                interruptingProcess,
+                job("slow", List.of("sh", "-c", "sleep 5"), 0, 1),
+                reader,
+                () -> "some captured output");
+        // 割り込みフラグが復元されていることを確認しつつ、後続テストへ漏れないようクリアする
+        assertTrue(Thread.interrupted(), "interrupt flag must be restored for the retry loop");
+        // 結果がタイムアウトとして分類されていること（起動失敗ではないこと）を確認する
+        assertTrue(attempt.timedOut(), "timeout must not be reclassified on interrupt");
+        // 起動失敗フラグが立っていないことを確認する
+        assertFalse(attempt.failedToStart(), "must not be reported as failed-to-start");
+        // メッセージにキャプチャ済み出力（OUTPUT: プレフィックス付き）が保持されていることを確認する
+        assertTrue(attempt.message().contains("some captured output"), attempt.message());
+    }
+
     // ---- summarize（サマリー整形）のユニットテスト ----
     // 番兵値 NO_EXIT_CODE(-1) と Windows の実終了コード -1 の衝突は POSIX 環境の
     // 実プロセスでは再現できない(終了コードは 0..255)ため、整形ロジックを直接検証する。

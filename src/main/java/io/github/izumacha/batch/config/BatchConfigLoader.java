@@ -17,6 +17,10 @@ import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.error.YAMLException;
+import org.yaml.snakeyaml.events.AliasEvent;
+import org.yaml.snakeyaml.events.Event;
+import org.yaml.snakeyaml.events.NodeEvent;
+import org.yaml.snakeyaml.events.ScalarEvent;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -47,15 +51,20 @@ public final class BatchConfigLoader {
     private static final int MAX_YAML_ALIASES = 50;
     // YAML のネスト深度の上限（深すぎる構造による解析遅延を防ぐ）
     private static final int MAX_YAML_NESTING_DEPTH = 100;
+    // YAML マージキー（`<<: *defaults` の `<<`）を検出するためのリテラル
+    // （§6: マジック文字列を避け、名前付き定数として単一の参照元に置く）
+    private static final String MERGE_KEY_INDICATOR = "<<";
 
     // Jackson の ObjectMapper インスタンス（YAML/JSON 双方のパースに使う）
     private final ObjectMapper mapper;
     /**
-     * A second, independent SnakeYAML loader used only to enforce the alias-count
-     * and nesting-depth bounds below in {@link #enforceYamlSafetyLimits}, because
-     * {@link #mapper} alone does not enforce them despite sharing the same
-     * {@link LoaderOptions} (see that field's construction below and
-     * {@link #enforceYamlSafetyLimits} for why).
+     * A second, independent SnakeYAML loader used to enforce the alias-count
+     * and nesting-depth bounds in {@link #enforceYamlSafetyLimits}, and to scan
+     * the raw event stream for unsupported YAML features (anchors, aliases,
+     * merge keys) in {@link #rejectUnsupportedYamlFeatures}, because
+     * {@link #mapper} alone does neither despite sharing the same
+     * {@link LoaderOptions} (see that field's construction below and the two
+     * methods for why).
      */
     // 「billion-laughs」エイリアス爆弾・過剰ネストを検出する専用の SnakeYAML ローダー
     // （mapper とは別インスタンス。理由は下の enforceYamlSafetyLimits を参照）
@@ -298,8 +307,14 @@ public final class BatchConfigLoader {
             throw new ConfigException("batch config is empty: " + source);
         }
         // mapper に読ませる前に、alias 爆弾・過剰ネストを検出する専用パスを通す
-        // （mapper 自身はこれらを検出できないため。boundsGuard フィールドの説明を参照）
+        // （mapper 自身はこれらを検出できないため。boundsGuard フィールドの説明を参照）。
+        // 爆弾系はこちらが先に「safety limits」として拒否するよう、下の未対応機能
+        // チェックより前に実行する（巨大な alias 爆弾を機能チェックの過程で
+        // 展開・走査しないためでもある）
         enforceYamlSafetyLimits(content, source);
+        // mapper が黙って壊してしまう YAML 機能（アンカー・エイリアス・マージキー）を
+        // 含むドキュメントを、パースに進む前に明示的に拒否する（fail-closed）
+        rejectUnsupportedYamlFeatures(content, source);
         // パース結果を格納する変数を宣言する
         Batch batch;
         try {
@@ -426,6 +441,82 @@ public final class BatchConfigLoader {
         }
         // alias 上限超過、またはネスト深度上限超過のどちらかのメッセージ文言に一致するかを確認する
         return message.contains("exceeds the specified max") || message.contains("Nesting Depth exceeded max");
+    }
+
+    /**
+     * Rejects any document that uses YAML anchors ({@code &name}), aliases
+     * ({@code *name}), or merge keys ({@code <<}) with a {@link ConfigException}
+     * (exit code 3), because {@link #mapper} would silently corrupt them instead
+     * of honoring or reporting them: jackson-dataformat-yaml's {@code YAMLParser}
+     * bridges SnakeYAML's raw event stream straight into Jackson tokens without
+     * running SnakeYAML's {@code Composer} (the stage that resolves anchors and
+     * aliases), so an alias {@code *x} in value position degrades into the
+     * literal string {@code "x"} (the job would execute the wrong command), and
+     * {@code <<: *defaults} surfaces as an unknown {@code "<<"} field that
+     * {@code FAIL_ON_UNKNOWN_PROPERTIES=false} / {@code @JsonIgnoreProperties}
+     * silently drops (timeouts/retries silently lost while {@code validate}
+     * still prints OK). Rejecting these features outright is the minimal
+     * fail-closed fix; see the "Bounded config parsing" bullet in
+     * {@code docs/DESIGN.md}.
+     *
+     * <p>The scan iterates the raw event stream ({@link Yaml#parse}), not the
+     * composed node tree, deliberately: an alias whose anchor was never defined
+     * makes {@code compose()} fail with a {@code ComposerException} that
+     * {@link #enforceYamlSafetyLimits} intentionally ignores, yet the mapper
+     * would still turn that dangling {@code *x} into the string {@code "x"} —
+     * only the event level sees every anchor/alias regardless of validity.
+     * A plain (unquoted) scalar {@code <<} is rejected wherever it appears;
+     * a quoted {@code "<<"} is an ordinary string and stays allowed.
+     * Syntax errors raised while iterating are ignored here so the real parse
+     * keeps producing its clearer error message (same pattern as
+     * {@link #enforceYamlSafetyLimits}).
+     *
+     * @throws ConfigException if the document contains an anchor, alias, or
+     *                         merge key
+     */
+    private void rejectUnsupportedYamlFeatures(String content, String source) {
+        try {
+            // 生のイベント列を 1 つずつ調べる（Composer を通さないので、未定義の
+            // エイリアスや複数ドキュメント内のアンカーも漏れなく検出できる）
+            for (Event event : boundsGuard.parse(new java.io.StringReader(content))) {
+                // エイリアス（*name）は mapper が黙って文字列 "name" に化けさせるため拒否する
+                if (event instanceof AliasEvent alias) {
+                    throw new ConfigException(unsupportedYamlFeatureMessage(
+                            source, "エイリアス *" + alias.getAnchor()));
+                }
+                // アンカー（&name）はエイリアスの参照先であり、mapper はアンカー自体も
+                // 解決しないため同様に拒否する（エイリアス側だけ拒否しても片手落ちになる）
+                if (event instanceof NodeEvent node && node.getAnchor() != null) {
+                    throw new ConfigException(unsupportedYamlFeatureMessage(
+                            source, "アンカー &" + node.getAnchor()));
+                }
+                // プレーンな（クォートされていない）スカラー `<<` はマージキーであり、
+                // mapper では未知フィールド "<<" として黙って読み捨てられるため拒否する。
+                // クォート付きの "<<" は通常の文字列なので従来どおり許可する
+                if (event instanceof ScalarEvent scalar
+                        && scalar.isPlain()
+                        && MERGE_KEY_INDICATOR.equals(scalar.getValue())) {
+                    throw new ConfigException(unsupportedYamlFeatureMessage(
+                            source, "マージキー " + MERGE_KEY_INDICATOR));
+                }
+            }
+        } catch (YAMLException e) {
+            // 文法エラー等はこのガードの守備範囲外なので握り潰し、直後の
+            // mapper.readValue に本来の分かりやすいエラー報告を任せる
+            // （そちらも同じ文法エラーで ConfigException を投げるため未報告にはならない。
+            // enforceYamlSafetyLimits と同じ方針）
+        }
+    }
+
+    /**
+     * {@link #rejectUnsupportedYamlFeatures} が投げる例外の日本語メッセージを
+     * 組み立てる（3 箇所で同じ説明文を繰り返さないための共通化、§6 DRY）。
+     */
+    private static String unsupportedYamlFeatureMessage(String source, String feature) {
+        // 検出した機能名・ソース名・対処方法（値を直接書く）を 1 つの文面にまとめて返す
+        return "YAML の" + feature + " は未対応です: " + source
+                + " (このツールのパーサーはアンカー/エイリアスを黙って文字列に化けさせ、"
+                + "マージキーを黙って読み捨ててしまうため、参照させたい値は各ジョブに直接書いてください)";
     }
 
     /**
