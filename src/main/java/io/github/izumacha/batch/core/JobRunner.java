@@ -238,22 +238,10 @@ public final class JobRunner {
                 if (!finished) {
                     // タイムアウトした場合はプロセスツリーを強制終了する
                     killTree(process);
-                    // プロセスが終了するまで短時間だけ待機する（孤立した子孫プロセス対策）
-                    // waitFor の戻り値: true=タイムアウト前に終了、false=まだ終了していない
-                    boolean cleanedUp = process.waitFor(READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-                    // 短時間待ちでも終了しなかった場合はログに残す（孤立プロセスの可能性）
-                    if (!cleanedUp) {
-                        LOGGER.warning("Process did not exit within cleanup window after kill for job: " + job.id());
-                    }
-                    // リーダースレッドが残りの出力を読み終えるまで待機する。
-                    // プロセスは上の waitFor で終了確認済みなのでパイプは閉じており通常は即座に返るが、
-                    // 負荷の高い環境で末尾のバッファ排出が遅れても出力が欠けないよう、
-                    // 成功パスと同じ READER_JOIN_TIMEOUT を上限にする（短すぎると末尾の出力が切れる）。
-                    joinQuietly(reader, READER_JOIN_TIMEOUT);
-                    // タイムアウト結果を返す
-                    return Attempt.timedOut(
-                            "timed out after " + job.timeoutSeconds() + "s",
-                            collector.tail());
+                    // タイムアウトはこの時点で確定事実。以降の後始末が割り込まれても
+                    // 分類を「起動失敗」へ差し替えず、必ずタイムアウト結果を返す
+                    // （後始末は専用メソッド内の nested try/catch で割り込みを処理する）
+                    return finishTimedOutAttempt(process, job, reader, collector::tail);
                 }
             } else {
                 // タイムアウトなしの場合はプロセスが終了するまで無制限に待機する
@@ -275,6 +263,54 @@ public final class JobRunner {
         int exitCode = process.exitValue();
         // 正常終了した試行結果を返す（出力の末尾も含める）
         return Attempt.completed(exitCode, collector.tail());
+    }
+
+    /**
+     * タイムアウト検出・{@link #killTree(Process)} 実行後の後始末を行い、必ず
+     * タイムアウトの {@link Attempt} を返す。
+     *
+     * <p>切り出しの理由（バグ修正）: 旧実装では kill 後の {@code process.waitFor}
+     * が外側の {@code catch (InterruptedException)} に覆われていたため、後始末中に
+     * 割り込まれると、既に確定していたタイムアウトが
+     * {@code Attempt.failedToStart("interrupted while waiting for process")} に
+     * 再分類され、永続化される実行記録から「タイムアウトした」という事実が
+     * 失われていた。本メソッドは後始末の待機を内側の try/catch で処理し、
+     * 割り込みフラグを復元した上でもタイムアウト結果を返すことを保証する。
+     * 割り込み時の {@link Process} 挙動を偽装したテスト
+     * （{@code JobRunnerTest}）から直接呼べるようパッケージプライベートにしている。
+     *
+     * @param process 強制終了済みの対象プロセス
+     * @param job タイムアウトしたジョブ（メッセージ整形に使う）
+     * @param reader 出力リーダースレッド
+     * @param tail リーダー終了後にキャプチャ済み出力の末尾を取り出すサプライヤ
+     */
+    static Attempt finishTimedOutAttempt(Process process, Job job, Thread reader,
+                                         java.util.function.Supplier<String> tail) {
+        try {
+            // プロセスが終了するまで短時間だけ待機する（孤立した子孫プロセス対策）
+            // waitFor の戻り値: true=タイムアウト前に終了、false=まだ終了していない
+            boolean cleanedUp = process.waitFor(READER_JOIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            // 短時間待ちでも終了しなかった場合はログに残す（孤立プロセスの可能性）
+            if (!cleanedUp) {
+                LOGGER.warning("Process did not exit within cleanup window after kill for job: " + job.id());
+            }
+        } catch (InterruptedException e) {
+            // 後始末待ちの途中で割り込まれても、タイムアウトという確定事実は変えない。
+            // 割り込みフラグを復元して呼び出し元（リトライループ）へ中断の意思を伝える
+            Thread.currentThread().interrupt();
+            // 後始末を打ち切ったことを痕跡として残す（プロセスは kill 済みなので致命的ではない）
+            LOGGER.warning("Interrupted while awaiting cleanup of timed-out process for job: " + job.id());
+        }
+        // リーダースレッドが残りの出力を読み終えるまで待機する。
+        // プロセスは上の waitFor で終了確認済みならパイプは閉じており通常は即座に返るが、
+        // 負荷の高い環境で末尾のバッファ排出が遅れても出力が欠けないよう、
+        // 成功パスと同じ READER_JOIN_TIMEOUT を上限にする（短すぎると末尾の出力が切れる。
+        // 割り込み済みの場合は joinQuietly が即座に戻り、フラグも維持される）。
+        joinQuietly(reader, READER_JOIN_TIMEOUT);
+        // タイムアウト結果を返す
+        return Attempt.timedOut(
+                "timed out after " + job.timeoutSeconds() + "s",
+                tail.get());
     }
 
     /**
@@ -502,8 +538,12 @@ public final class JobRunner {
         return s.trim();
     }
 
-    /** 1回のプロセス試行の結果を表すイミュータブルなレコード */
-    private record Attempt(int exitCode, boolean timedOut, boolean failedToStart, String message) {
+    /**
+     * 1回のプロセス試行の結果を表すイミュータブルなレコード。
+     * {@link #finishTimedOutAttempt} の戻り値をテスト（JobRunnerTest）から
+     * 直接検証できるよう、private ではなくパッケージプライベートにしている
+     */
+    record Attempt(int exitCode, boolean timedOut, boolean failedToStart, String message) {
         // 正常完了した試行の結果を生成するファクトリメソッド
         static Attempt completed(int exitCode, String tail) {
             // 出力がある場合は OUTPUT_PREFIX を付けてメッセージにする

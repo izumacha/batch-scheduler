@@ -138,9 +138,20 @@ Within that model, the implementation still defends against accidental and
 malicious resource exhaustion and against tampering with the state directory:
 
 - **Bounded config parsing.** The YAML parser is configured with an explicit
-  document-size limit (`MAX_CONFIG_BYTES`, 4 MiB), an alias-count limit (defends
-  against "billion laughs" alias-expansion bombs), a nesting-depth limit, and
+  document-size limit (`MAX_CONFIG_BYTES`, 4 MiB), a nesting-depth limit, and
   recursive keys disabled. Oversized files are rejected before being read whole.
+  YAML anchors (`&name`), aliases (`*name`), and merge keys (`<<`) are rejected
+  outright with a config error (exit code 3) rather than merely bounded by an
+  alias count: the Jackson YAML bridge drives SnakeYAML's raw event stream
+  without running its composer (the stage that resolves anchors and aliases),
+  so an alias in value position would silently degrade into the literal string
+  of the alias name (the job would execute the wrong command) and a merge key
+  would surface as an unknown `<<` field that lenient unknown-field handling
+  silently drops (timeouts/retries silently lost while `validate` still reports
+  OK). Rejecting these features up front is the fail-closed alternative to
+  silently corrupting them. A pre-pass alias-count limit is still enforced
+  first, purely so that "billion laughs" alias-expansion bombs are cut off as a
+  resource-limit violation before the feature scan ever walks them.
 - **Bounded output capture.** Each job's combined output is drained on a
   dedicated thread (so a full pipe never blocks the child) and only a bounded
   tail is retained; an individual line is capped so a single runaway line cannot
@@ -150,9 +161,12 @@ malicious resource exhaustion and against tampering with the state directory:
   files, such as run ids) is untrusted data. Before any of it is echoed into
   the run-summary tables, `CliFormat` collapses whitespace and strips the
   remaining non-printable control characters (C0 controls such as ESC/BEL, DEL,
-  and C1 controls such as CSI), so a failed job's captured output cannot inject
-  terminal escape sequences into the operator's terminal (title spoofing,
-  hidden text, cursor manipulation). `CliFormat.shortMessage` is the single
+  C1 controls such as CSI, and Unicode format characters — category `Cf` —
+  including the bidirectional-text controls U+202A–U+202E and U+2066–U+2069),
+  so a failed job's captured output cannot inject terminal escape sequences
+  into the operator's terminal (title spoofing, hidden text, cursor
+  manipulation) or visually reorder the summary-table text via bidi override
+  characters. `CliFormat.shortMessage` is the single
   choke point for table cells, and `ListCommand` runs run ids through the same
   `stripControlChars` helper.
 - **Iterative graph algorithms.** Validation, cycle detection, and topological

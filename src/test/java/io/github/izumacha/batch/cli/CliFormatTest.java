@@ -187,6 +187,39 @@ class CliFormatTest {
     }
 
     /**
+     * セキュリティ回帰テスト: Unicode の双方向テキスト制御文字（bidi override:
+     * U+202A〜U+202E、isolate: U+2066〜U+2069。いずれもカテゴリ Cf）が除去されること。
+     * 旧パターン（\p{Cntrl} と C1 のみ）はこれらを素通ししており、ジョブ出力が
+     * run/list のサマリー表の文字列を視覚的に並べ替えて表示内容を偽装できていた。
+     */
+    @Test
+    void shortMessage_stripsBidiFormatCharacters() {
+        // RLO（右→左上書き: U+202E）と PDF（U+202C）で表示順を偽装する攻撃的な入力
+        // （不可視文字をソースへ直接埋め込まず、\ u エスケープで明示する）
+        String hostile = "ok\u202Edetroba\u202C end";
+        // サニタイズ後の表示文字列を取得する
+        String sanitized = CliFormat.shortMessage(hostile, 60);
+        // RLO（U+202E）が残っていないことを確認する
+        assertTrue(sanitized.indexOf('\u202E') < 0, sanitized);
+        // PDF（U+202C）が残っていないことを確認する
+        assertTrue(sanitized.indexOf('\u202C') < 0, sanitized);
+        // 制御文字だけが消え、可視文字はそのまま残ることを確認する
+        assertEquals("okdetroba end", sanitized);
+        // isolate 系（LRI=U+2066・RLI=U+2067・FSI=U+2068・PDI=U+2069）も同様に除去される
+        assertEquals("abcd", CliFormat.shortMessage("a\u2066b\u2067c\u2068d\u2069", 60));
+    }
+
+    /** stripControlChars 単体でも Cf（フォーマット文字）が除去されることを確認する（runId 表示経路） */
+    @Test
+    void stripControlChars_stripsBidiAndFormatCharacters() {
+        // runId 風の文字列に RLO（U+202E）と別種の Cf 文字（ソフトハイフン U+00AD）を混ぜる
+        assertEquals("run-01-abc",
+                CliFormat.stripControlChars("run\u202E-01\u00AD-abc"));
+        // isolate 制御（U+2066）も除去されることを確認する
+        assertEquals("xy", CliFormat.stripControlChars("x\u2066y"));
+    }
+
+    /**
      * ListCommand の runId 表示が使う stripControlChars 単体の挙動:
      * 制御文字だけを除去し、切り詰めは行わないこと。null は null のまま返すこと。
      */
