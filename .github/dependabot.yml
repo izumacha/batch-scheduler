@@ -1,0 +1,25 @@
+# Dependabot 設定: 依存関係の既知脆弱性・更新を毎週チェックして PR を作成する
+# (CLAUDE.md §9「依存（サプライチェーン）を管理する」に基づく)
+version: 2
+updates:
+  # pom.xml の Maven 依存 (Jackson / PicoCLI / JUnit 等)
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      # コミット規約 type(scope) に合わせる (§12)
+      prefix: "chore(deps)"
+    groups:
+      # minor / patch 更新は 1 本の PR にまとめてレビュー負荷を下げる (major は個別 PR)
+      maven-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # .github/workflows/ で使う GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      # コミット規約 type(scope) に合わせる (§12)
+      prefix: "chore(ci)"
