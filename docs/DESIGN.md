@@ -169,6 +169,20 @@ malicious resource exhaustion and against tampering with the state directory:
   characters. `CliFormat.shortMessage` is the single
   choke point for table cells, and `ListCommand` runs run ids through the same
   `stripControlChars` helper.
+- **ASCII-only CLI diagnostics.** Every message the tool itself writes to
+  stdout/stderr is plain ASCII English. `System.out`/`System.err` encode with
+  the JVM's `stdout.encoding`/`stderr.encoding`, which fall back to the
+  platform's native charset — US-ASCII whenever `LANG` is unset (the default in
+  JDK base images and CI containers). A non-ASCII diagnostic is therefore
+  flattened to `?` there, destroying exactly the information the operator needs:
+  the unsupported-YAML-feature error used to print
+  `error: YAML ????? &a ??????: bomb.yaml (???...)`, naming neither the offending
+  feature nor the remedy. Pinning the output streams to UTF-8 instead would trade
+  this for mojibake on genuinely non-UTF-8 consoles, so the tool keeps its *own*
+  wording locale-independent and leaves externally-sourced strings (captured job
+  output, batch names) to the platform's encoding.
+  `BatchConfigLoaderTest#unsupportedFeatureMessageIsAsciiOnlySoItSurvivesAnyLocale`
+  guards against a regression.
 - **Iterative graph algorithms.** Validation, cycle detection, and topological
   sort are iterative, so a deeply-nested or very long dependency chain cannot
   overflow the call stack.

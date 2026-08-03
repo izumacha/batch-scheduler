@@ -482,13 +482,13 @@ public final class BatchConfigLoader {
                 // エイリアス（*name）は mapper が黙って文字列 "name" に化けさせるため拒否する
                 if (event instanceof AliasEvent alias) {
                     throw new ConfigException(unsupportedYamlFeatureMessage(
-                            source, "エイリアス *" + alias.getAnchor()));
+                            source, "alias *" + alias.getAnchor()));
                 }
                 // アンカー（&name）はエイリアスの参照先であり、mapper はアンカー自体も
                 // 解決しないため同様に拒否する（エイリアス側だけ拒否しても片手落ちになる）
                 if (event instanceof NodeEvent node && node.getAnchor() != null) {
                     throw new ConfigException(unsupportedYamlFeatureMessage(
-                            source, "アンカー &" + node.getAnchor()));
+                            source, "anchor &" + node.getAnchor()));
                 }
                 // プレーンな（クォートされていない）スカラー `<<` はマージキーであり、
                 // mapper では未知フィールド "<<" として黙って読み捨てられるため拒否する。
@@ -497,7 +497,7 @@ public final class BatchConfigLoader {
                         && scalar.isPlain()
                         && MERGE_KEY_INDICATOR.equals(scalar.getValue())) {
                     throw new ConfigException(unsupportedYamlFeatureMessage(
-                            source, "マージキー " + MERGE_KEY_INDICATOR));
+                            source, "merge key " + MERGE_KEY_INDICATOR));
                 }
             }
         } catch (YAMLException e) {
@@ -509,14 +509,29 @@ public final class BatchConfigLoader {
     }
 
     /**
-     * {@link #rejectUnsupportedYamlFeatures} が投げる例外の日本語メッセージを
-     * 組み立てる（3 箇所で同じ説明文を繰り返さないための共通化、§6 DRY）。
+     * {@link #rejectUnsupportedYamlFeatures} が投げる例外のメッセージを組み立てる
+     * （3 箇所で同じ説明文を繰り返さないための共通化、§6 DRY）。
+     *
+     * <p><b>ASCII の英文にしている理由（設計判断）:</b> この CLI がユーザーへ出す文言は
+     * 他がすべて英語の ASCII（{@code "error: "} / {@code "invalid: "} /
+     * {@code "no runs found"} / {@code "skipped: dependency ... did not succeed"} 等）で、
+     * 本メソッドだけが日本語だった。{@code System.err} は JVM の {@code stderr.encoding}
+     * （＝プラットフォームのネイティブ文字集合）で符号化するため、{@code LANG} 未設定の
+     * C/POSIX ロケール（Docker の JDK ベースイメージや CI コンテナの既定）では
+     * ネイティブ文字集合が US-ASCII になり、日本語の文字がすべて {@code ?} に潰れて
+     * {@code "error: YAML ????? &a ??????: bomb.yaml (???...)"} という、検出した機能名も
+     * 対処方法も読み取れない診断不能なメッセージになっていた（実機で再現確認済み）。
+     * 他の英語 ASCII メッセージはこの影響を受けないため、この 1 件だけが情報を失っていた。
+     * 出力ストリームを UTF-8 に固定する方法もあるが、それは非 UTF-8 コンソール
+     * （Windows の CP932 等）で逆に化けるリスクを持ち込むため、ロケールに一切依存しない
+     * 「CLI 自身の文言は ASCII に保つ」方針を採る（ジョブ出力など外部由来の文字列は
+     * 従来どおりそのまま流す。そちらの符号化はプラットフォーム側の責務）。
      */
     private static String unsupportedYamlFeatureMessage(String source, String feature) {
         // 検出した機能名・ソース名・対処方法（値を直接書く）を 1 つの文面にまとめて返す
-        return "YAML の" + feature + " は未対応です: " + source
-                + " (このツールのパーサーはアンカー/エイリアスを黙って文字列に化けさせ、"
-                + "マージキーを黙って読み捨ててしまうため、参照させたい値は各ジョブに直接書いてください)";
+        return "unsupported YAML feature: " + feature + " in " + source
+                + " (this parser silently degrades anchors/aliases into plain strings and "
+                + "silently drops merge keys, so write the referenced values directly in each job)";
     }
 
     /**
