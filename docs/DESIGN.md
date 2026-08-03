@@ -181,8 +181,18 @@ malicious resource exhaustion and against tampering with the state directory:
   this for mojibake on genuinely non-UTF-8 consoles, so the tool keeps its *own*
   wording locale-independent and leaves externally-sourced strings (captured job
   output, batch names) to the platform's encoding.
-  `BatchConfigLoaderTest#unsupportedFeatureMessageIsAsciiOnlySoItSurvivesAnyLocale`
-  guards against a regression.
+  This covers the *markers the tool inserts into* otherwise-external text as
+  well, because a lone `?` there is indistinguishable from genuinely corrupted
+  output: the table-cell truncation marker (`CliFormat.TRUNCATION_MARK`) and the
+  over-long-line marker the output collector appends
+  (`JobRunner.OutputCollector.TRUNCATION_MARK`) are both ASCII `...` rather than
+  the ellipsis `U+2026` they used to be. Three tests guard against a regression —
+  `BatchConfigLoaderTest#unsupportedFeatureMessageIsAsciiOnlySoItSurvivesAnyLocale`,
+  `CliFormatTest#shortMessage_truncationMarkIsAsciiOnlySoItSurvivesAnyLocale`, and
+  `JobRunnerTest#longLineTruncationMarkIsAsciiOnlySoItSurvivesAnyLocale`.
+  Since the table marker is 3 characters wide rather than 1, `shortMessage`
+  reserves room for it so a truncated cell still fits the column budget, and
+  omits the marker entirely when the budget is too small to hold it.
 - **Iterative graph algorithms.** Validation, cycle detection, and topological
   sort are iterative, so a deeply-nested or very long dependency chain cannot
   overflow the call stack.

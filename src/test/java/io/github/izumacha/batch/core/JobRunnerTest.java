@@ -5,6 +5,7 @@ import io.github.izumacha.batch.model.JobResult;
 import io.github.izumacha.batch.model.JobStatus;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -399,5 +400,30 @@ class JobRunnerTest {
                 job("w", List.of("cmd"), 1, 0));
         // 説明メッセージと試行回数がそのまま表示されることを確認する
         assertEquals("failed to start: not found (2 attempts)", summary);
+    }
+
+    /**
+     * 回帰防止: 1 行の上限（OutputCollector.MAX_LINE_CHARS = 8KiB）を超える行に付く
+     * 切り詰めマーカーが ASCII だけであること（DESIGN.md の「ASCII-only CLI diagnostics」）。
+     * このマーカーはジョブ出力そのものではなく「このツールが足した注記」で、echo 時は
+     * System.out へ直接書かれ、失敗時はサマリーメッセージにも混ざる。以前は先頭が
+     * 省略記号 U+2026 だったため、LANG 未設定（stdout の符号化が US-ASCII）の環境では
+     * "?[truncated]" と表示され、注記なのか出力の文字化けなのか判別できなかった。
+     */
+    @Test
+    void longLineTruncationMarkIsAsciiOnlySoItSurvivesAnyLocale() {
+        // 8KiB 上限を確実に超える 1 行（改行なし・9000 文字の 'x'）を出力して失敗するジョブを組む。
+        // printf の桁指定で空白を並べ、tr で 'x' に置換する（POSIX sh だけで完結し移植性がある）
+        JobResult r = fastRunner().run(job(
+                "longline", List.of("sh", "-c", "printf '%9000s' '' | tr ' ' x; exit 1"), 0, 0));
+        // 失敗として扱われることを確認する（サマリーに出力の最終行が付くのは失敗時のみ）
+        assertEquals(JobStatus.FAILED, r.status());
+        // サマリーメッセージを取り出す
+        String message = r.message();
+        // 行が上限で切り詰められ、ASCII のマーカーが付いていることを確認する
+        assertTrue(message.contains("...[truncated]"), message);
+        // メッセージ全体が US_ASCII で符号化できることを確認する
+        // （1 文字でも非 ASCII が混じると US-ASCII 出力時に "?" へ潰れて注記が読めなくなる）
+        assertTrue(StandardCharsets.US_ASCII.newEncoder().canEncode(message), message);
     }
 }
