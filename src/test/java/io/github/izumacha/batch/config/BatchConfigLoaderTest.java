@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -18,6 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BatchConfigLoaderTest {
 
     private final BatchConfigLoader loader = new BatchConfigLoader();
+
+    // 未対応 YAML 機能（アンカー・エイリアス・マージキー）の拒否メッセージ冒頭。
+    // 各テストが同じリテラルを書き写さないよう 1 箇所に定数化する（§6 DRY）
+    private static final String UNSUPPORTED_FEATURE_PREFIX = "unsupported YAML feature:";
 
     private static final String VALID_YAML = """
             name: etl
@@ -355,7 +360,7 @@ class BatchConfigLoaderTest {
         // エイリアス入りの YAML は ConfigException として表面化するはず
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
         // エラーメッセージが「未対応」であることとソース名を含み、原因を特定できることを検証する
-        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("<string>"),
+        assertTrue(ex.getMessage().contains(UNSUPPORTED_FEATURE_PREFIX) && ex.getMessage().contains("<string>"),
                 "alias must be rejected with the unsupported-feature message, was: " + ex.getMessage());
     }
 
@@ -373,7 +378,7 @@ class BatchConfigLoaderTest {
         // アンカー入りの YAML は ConfigException として表面化するはず
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
         // エラーメッセージが「未対応」とアンカー名を含むことを検証する
-        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("cmd"),
+        assertTrue(ex.getMessage().contains(UNSUPPORTED_FEATURE_PREFIX) && ex.getMessage().contains("cmd"),
                 "anchor must be rejected with the unsupported-feature message, was: " + ex.getMessage());
     }
 
@@ -392,7 +397,7 @@ class BatchConfigLoaderTest {
         // 未定義エイリアス入りの YAML も ConfigException として表面化するはず
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
         // エラーメッセージが「未対応」を含むことを検証する
-        assertTrue(ex.getMessage().contains("未対応"),
+        assertTrue(ex.getMessage().contains(UNSUPPORTED_FEATURE_PREFIX),
                 "a dangling alias must be rejected, was: " + ex.getMessage());
     }
 
@@ -416,7 +421,7 @@ class BatchConfigLoaderTest {
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
         // エラーメッセージが「未対応」を含むことを検証する（アンカーが先に検出されても
         // マージキーが先に検出されても、どちらも同じ未対応機能エラーになる）
-        assertTrue(ex.getMessage().contains("未対応"),
+        assertTrue(ex.getMessage().contains(UNSUPPORTED_FEATURE_PREFIX),
                 "a merge key must be rejected, was: " + ex.getMessage());
     }
 
@@ -435,8 +440,32 @@ class BatchConfigLoaderTest {
         // 裸のマージキー入りの YAML も ConfigException として表面化するはず
         ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
         // エラーメッセージが「未対応」とマージキーの表記を含むことを検証する
-        assertTrue(ex.getMessage().contains("未対応") && ex.getMessage().contains("<<"),
+        assertTrue(ex.getMessage().contains(UNSUPPORTED_FEATURE_PREFIX) && ex.getMessage().contains("<<"),
                 "a bare merge key must be rejected, was: " + ex.getMessage());
+    }
+
+    @Test
+    void unsupportedFeatureMessageIsAsciiOnlySoItSurvivesAnyLocale() {
+        // 回帰防止: このメッセージは以前 日本語だったため、LANG 未設定の C/POSIX ロケール
+        // （Docker の JDK ベースイメージや CI コンテナの既定）では System.err の符号化が
+        // US-ASCII になり、"error: YAML ????? &a ??????: ..." のように機能名も対処方法も
+        // 読めない状態で表示されていた。CLI 自身の文言を ASCII に保つことでロケールに
+        // 依存せず読めることを保証する（BatchConfigLoader#unsupportedYamlFeatureMessage 参照）
+        String yaml = """
+                name: etl
+                jobs:
+                  - id: a
+                    command: &cmd ["sh", "-c", "echo a"]
+                """;
+        // アンカー入りの YAML を読み込ませて拒否メッセージを取り出す
+        ConfigException ex = assertThrows(ConfigException.class, () -> loader.loadFromString(yaml));
+        // メッセージ本文を取り出す
+        String message = ex.getMessage();
+        // US-ASCII で符号化できる文字だけで構成されていることを検証する
+        // （1 文字でも非 ASCII が混じると US-ASCII 出力時に "?" へ潰れて情報が失われる）
+        assertTrue(StandardCharsets.US_ASCII.newEncoder().canEncode(message),
+                "message must stay ASCII-only so it is readable under a non-UTF-8 locale, was: "
+                        + message);
     }
 
     @Test
