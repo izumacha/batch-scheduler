@@ -576,8 +576,13 @@ public final class JobRunner {
         private static final Logger COLLECTOR_LOGGER = Logger.getLogger(OutputCollector.class.getName());
         // 1行の最大文字数（これを超える行は切り詰める）
         private static final int MAX_LINE_CHARS = 8 * 1024;
-        // 行が切り詰められたことを示すマーカー文字列
-        private static final String TRUNCATION_MARK = "…[truncated]";
+        // 行が切り詰められたことを示すマーカー文字列。
+        // これはジョブの出力そのものではなく「このツールが足した注記」なので、
+        // DESIGN.md「ASCII-only CLI diagnostics」の不変条件どおり ASCII に保つ。
+        // このマーカーは echo 時に System.out へ直接書かれ、失敗時はジョブサマリの
+        // メッセージにも混ざるため、LANG 未設定（stdout の符号化が US-ASCII になる）環境で
+        // 先頭が「…」だと "?[truncated]" と表示され、注記なのか出力の壊れなのか判別できなくなる
+        private static final String TRUNCATION_MARK = "...[truncated]";
 
         // 出力を読み込む対象のプロセス
         private final Process process;

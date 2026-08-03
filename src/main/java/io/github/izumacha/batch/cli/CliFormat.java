@@ -32,6 +32,17 @@ final class CliFormat {
     // 先にスペースへ圧縮するため、ここでは「空白圧縮後に残る非表示文字」をまとめて削除する
     private static final String CONTROL_CHARS_PATTERN = "[\\p{Cntrl}\\u0080-\\u009F\\p{Cf}]";
 
+    // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
+    // ASCII の "..." にしているのは DESIGN.md「ASCII-only CLI diagnostics」の不変条件のため。
+    // System.out は JVM の stdout.encoding（＝プラットフォームのネイティブ文字集合）で符号化し、
+    // LANG 未設定の C/POSIX ロケール（Docker の JDK ベースイメージや CI コンテナの既定）では
+    // それが US-ASCII になる。以前ここで使っていた省略記号「…」(U+2026) は US-ASCII で
+    // 表現できないため "?" へ潰れ、切り詰め表示が "some messag?" のように
+    // 「壊れた出力」と区別できない見た目になっていた。
+    // ジョブ出力など外部由来の文字列の符号化はプラットフォーム側の責務とし、
+    // このツール自身が足す文言だけをロケール非依存に保つ方針（DESIGN.md 参照）
+    private static final String TRUNCATION_MARK = "...";
+
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private CliFormat() {
     }
@@ -122,6 +133,9 @@ final class CliFormat {
      * テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める。
      * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
      * {@link #stripControlChars(String)} で端末制御文字も除去する（唯一のチョークポイント）。
+     *
+     * <p>切り詰めマーカーは {@link #TRUNCATION_MARK}（ASCII）で、戻り値の長さは
+     * 必ず {@code max} 以下に収まる（表の桁ずれを防ぐため）。
      */
     static String shortMessage(String message, int max) {
         // null または空白のみの場合は空文字を返す
@@ -136,8 +150,14 @@ final class CliFormat {
         if (oneLine.length() <= max) {
             return oneLine;
         }
-        // 最大文字数を超える場合は末尾を省略記号（…）で置き換えて返す
-        return oneLine.substring(0, Math.max(0, max - 1)) + "…";
+        // マーカーを入れる余地すら無い極端に小さい max では、マーカーを付けずに単純に切る
+        // （マーカーを足すと戻り値が max を超えて表の桁が崩れてしまうため）
+        if (max <= TRUNCATION_MARK.length()) {
+            return oneLine.substring(0, Math.max(0, max));
+        }
+        // 最大文字数を超える場合は、マーカー分を差し引いた位置で切ってマーカーを付けて返す
+        // （切り詰め後の全長がちょうど max になる）
+        return oneLine.substring(0, max - TRUNCATION_MARK.length()) + TRUNCATION_MARK;
     }
 
     /**

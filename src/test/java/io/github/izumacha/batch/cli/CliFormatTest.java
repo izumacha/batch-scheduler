@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 // 正規表現マッチのアサーションに使う
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+// 切り詰めマーカーが US-ASCII で符号化できるかを検査するために使う
+import java.nio.charset.StandardCharsets;
 // 期間（Duration）を生成するために使う
 import java.time.Duration;
 // 時刻（Instant）を生成するために使う
@@ -165,7 +167,7 @@ class CliFormatTest {
         assertEquals("ab31mred", CliFormat.shortMessage("a\u007Fb\u009B31mred", 60));
     }
 
-    /** 制御文字を含む長いメッセージでも、切り詰め（最大文字数＋省略記号）が従来どおり働くこと */
+    /** 制御文字を含む長いメッセージでも、切り詰め（最大文字数＋切り詰めマーカー）が従来どおり働くこと */
     @Test
     void shortMessage_truncationStillWorksAfterSanitization() {
         // ESC を混ぜた 70 文字超の入力を用意する（サニタイズ後は "[31m"＋"x"×70 の 74 文字）
@@ -174,8 +176,39 @@ class CliFormatTest {
         String truncated = CliFormat.shortMessage(longMessage, 60);
         // 全体の長さが上限の 60 文字ちょうどになることを確認する
         assertEquals(60, truncated.length());
-        // 末尾が省略記号（…）で終わることを確認する
-        assertTrue(truncated.endsWith("…"), truncated);
+        // 末尾が ASCII の切り詰めマーカー "..." で終わることを確認する
+        assertTrue(truncated.endsWith("..."), truncated);
+    }
+
+    /**
+     * 回帰防止: 切り詰めマーカーが ASCII だけで構成されていること（DESIGN.md の
+     * 「ASCII-only CLI diagnostics」）。以前は省略記号 U+2026 を使っていたため、
+     * LANG 未設定の C/POSIX ロケール（Docker の JDK ベースイメージや CI コンテナの既定）では
+     * System.out の符号化が US-ASCII になってマーカーが "?" へ潰れ、"some messag?" のように
+     * 「切り詰めの注記」なのか「出力の文字化け」なのか利用者が区別できなかった。
+     */
+    @Test
+    void shortMessage_truncationMarkIsAsciiOnlySoItSurvivesAnyLocale() {
+        // ASCII だけの入力を上限超えの長さで与える
+        // （入力側に非 ASCII を混ぜないことで、マーカー由来の非 ASCII だけを検出できる）
+        String truncated = CliFormat.shortMessage("x".repeat(100), 60);
+        // 戻り値全体が US-ASCII で符号化できることを確認する
+        // （1 文字でも非 ASCII が混じると US-ASCII 出力時に "?" へ潰れて情報が失われる）
+        assertTrue(StandardCharsets.US_ASCII.newEncoder().canEncode(truncated), truncated);
+    }
+
+    /**
+     * 境界値: 上限がマーカー（3 文字）以下のときはマーカーを付けずに単純に切り、
+     * 戻り値が上限を超えない（表の桁が崩れない）こと。
+     */
+    @Test
+    void shortMessage_maxSmallerThanTruncationMarkStillRespectsLimit() {
+        // 上限 3（マーカーと同じ長さ）: マーカーを足すと 6 文字になってしまうため付けない
+        assertEquals("abc", CliFormat.shortMessage("abcdef", 3));
+        // 上限 1: 1 文字だけに切り詰められる
+        assertEquals("a", CliFormat.shortMessage("abcdef", 1));
+        // 上限 0: 空文字になる（負の substring で例外を投げないことも兼ねて確認する）
+        assertEquals("", CliFormat.shortMessage("abcdef", 0));
     }
 
     /** 制御文字を含まない日本語の通常メッセージは変化しないこと（偽陽性の除去がないこと） */
