@@ -31,12 +31,12 @@
 ## 必要要件
 
 - Java 21
-- Maven 3.9+
+- Maven のインストールは不要です。同梱の Maven Wrapper（`./mvnw`）が Maven 3.9 を自動取得します。
 
 ## ビルド
 
 ```sh
-mvn package
+./mvnw package
 ```
 
 これにより、実行可能な shaded jar が `target/batch-scheduler.jar` に生成されます。

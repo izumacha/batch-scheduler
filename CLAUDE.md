@@ -19,8 +19,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 2. コマンド
 
 ```bash
-# ビルド（target/batch-scheduler.jar を生成）
-mvn package
+# ビルド（target/batch-scheduler.jar を生成。Maven Wrapper が Maven を自動取得）
+./mvnw package
 
 # 実行
 java -jar target/batch-scheduler.jar run examples/etl.yaml       # バッチ実行
@@ -28,7 +28,7 @@ java -jar target/batch-scheduler.jar validate examples/etl.yaml  # DAG 検証
 java -jar target/batch-scheduler.jar list                        # 過去の実行一覧
 
 # テスト（Surefire が JUnit 5 を実行）
-mvn verify
+./mvnw verify
 ```
 
 オプション: `--state-dir <dir>`（状態保存先、既定 `.batch-state`）/ `-q`・`--quiet`（ジョブ別サマリ表を抑制）/ `run --rerun-failed <runId>`（前回実行のうち `SUCCEEDED` だったジョブは再実行せず流用し、`FAILED`/`SKIPPED` だったジョブと新規ジョブだけを実行する。詳細は README の「Rerunning only the failed jobs」）/ `list -n`・`list --limit <n>`（一覧の最大表示件数、既定 20・`0` 以下で全件）/ `--help` / `--version`。終了コード: 0=成功 / 1=バッチ失敗 / 2=検証エラー / 3=設定・IO エラー。
@@ -60,7 +60,7 @@ YAML → BatchConfigLoader.load(path) → Batch(record)
 
 ### CI
 
-GitHub Actions（`.github/workflows/ci.yml`）が push / PR で `mvn -B verify`（Java 21 / Temurin / Maven キャッシュ）を実行する。
+GitHub Actions（`.github/workflows/ci.yml`）が push / PR で `./mvnw -B verify`（Java 21 / Temurin / Maven キャッシュ）を実行する。
 
 ### 見せ方（§15 の具体化）
 
