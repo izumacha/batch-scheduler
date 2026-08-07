@@ -32,12 +32,12 @@ the jobs in topological order, and listing the persisted run history.
 ## Requirements
 
 - Java 21
-- Maven 3.9+
+- Maven is not required: the bundled Maven Wrapper (`./mvnw`) downloads Maven 3.9 automatically.
 
 ## Build
 
 ```sh
-mvn package
+./mvnw package
 ```
 
 This produces the executable shaded jar at `target/batch-scheduler.jar`.
