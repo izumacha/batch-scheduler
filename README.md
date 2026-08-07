@@ -33,6 +33,12 @@ the jobs in topological order, and listing the persisted run history.
 
 - Java 21
 - Maven is not required: the bundled Maven Wrapper (`./mvnw`) downloads Maven 3.9 automatically.
+- `unzip` (Unix-like systems only). The wrapper verifies the downloaded Maven
+  distribution against the SHA-256 pinned in `.mvn/wrapper/maven-wrapper.properties`.
+  Without `unzip` the wrapper falls back to the `.tar.gz` archive, whose checksum
+  differs from the pinned one, and the build stops with a misleading
+  "your Maven distribution might be compromised" error. Windows (`mvnw.cmd`) is
+  unaffected because it always uses the zip.
 
 ## Build
 

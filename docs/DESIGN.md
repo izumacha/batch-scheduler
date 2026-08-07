@@ -193,6 +193,21 @@ malicious resource exhaustion and against tampering with the state directory:
   Since the table marker is 3 characters wide rather than 1, `shortMessage`
   reserves room for it so a truncated cell still fits the column budget, and
   omits the marker entirely when the budget is too small to hold it.
+- **Pinned build toolchain.** The Maven Wrapper (`./mvnw`) fetches the Maven
+  distribution at build time, which makes that download part of the build's trust
+  chain: whatever it returns is executed with the developer's (or CI runner's)
+  privileges. HTTPS to `repo.maven.apache.org` protects the transport but not the
+  repository itself, so `.mvn/wrapper/maven-wrapper.properties` also pins
+  `distributionSha256Sum` and the wrapper refuses to run a distribution whose hash
+  does not match. The pinned value was derived by verifying the zip against the
+  SHA-512 that Apache publishes alongside it and hashing that same verified file.
+  The wrapper validates whichever archive it downloaded, and it silently switches
+  from the `.zip` to the `.tar.gz` when `unzip` is missing — that archive hashes
+  differently, so the pin turns a missing `unzip` into a
+  "your Maven distribution might be compromised" failure. Both READMEs therefore
+  list `unzip` as a requirement rather than leaving that failure unexplained.
+  Bumping Maven means updating `distributionUrl` and `distributionSha256Sum`
+  together.
 - **Iterative graph algorithms.** Validation, cycle detection, and topological
   sort are iterative, so a deeply-nested or very long dependency chain cannot
   overflow the call stack.
