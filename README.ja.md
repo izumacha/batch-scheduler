@@ -32,6 +32,12 @@
 
 - Java 21
 - Maven のインストールは不要です。同梱の Maven Wrapper（`./mvnw`）が Maven 3.9 を自動取得します。
+- `unzip`（Unix 系のみ）。Wrapper は取得した Maven 配布物を
+  `.mvn/wrapper/maven-wrapper.properties` にピン留めした SHA-256 で検証します。
+  `unzip` が無い環境では Wrapper が `.tar.gz` の取得に切り替わり、
+  ピン留めした zip のチェックサムとは一致しないため
+  「your Maven distribution might be compromised」という紛らわしいエラーで停止します。
+  Windows（`mvnw.cmd`）は常に zip を使うためこの影響を受けません。
 
 ## ビルド
 
