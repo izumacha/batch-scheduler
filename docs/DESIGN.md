@@ -30,10 +30,16 @@ The code is organized into five packages, each with a single responsibility:
   exception types (`ConfigException`, `ValidationException`).
 - `core` — structural validation and the dependency DAG (`DependencyGraph`) plus
   the execution engine (`BatchExecutor`).
-- `state` — persistence of run reports (`ExecutionStore` and its
-  `JsonExecutionStore` implementation).
+- `state` — persistence of run reports (`ExecutionStore`, its
+  `JsonExecutionStore` implementation, and `Durability`, which owns every
+  `fsync` on the write path — see "Record durability" below).
 - `cli` — the picocli-based command-line interface (`Main`, `BatchCli`, and the
   `run` / `validate` / `list` sub-commands).
+- `text` — `SafeText`, the single implementation of "neutralize untrusted text
+  before it reaches a terminal". It sits in its own package because both `cli`
+  (table cells and error lines) and `state` (the warnings naming files it
+  skipped, which the JDK's default `ConsoleHandler` sends to the same stderr)
+  must apply the same rule, and `state` must not depend on `cli`.
 
 ### Data flow
 
@@ -271,7 +277,150 @@ malicious resource exhaustion and against tampering with the state directory:
   (see `ensureBaseDirectory()`, above): an attacker who can rewrite the
   *already-resolved, real* target location itself — as opposed to
   redirecting a symlink the tool follows — is outside this defense's threat
-  model.
+  model. The durability flushes below add the first opens of state files that
+  happen *after* something else created them, and `open(2)` on a FIFO blocks
+  until a peer appears with no timeout or `O_NONBLOCK` reachable from Java —
+  so a pipe left at a record's name by a co-resident process would wedge the
+  CLI after the batch had already run, with no way to tell whether the run was
+  recorded. `Durability` therefore stats the path before opening and degrades
+  to a warning when it is *other* than a regular file, directory, or symlink —
+  i.e. a FIFO, socket, or device, the types whose `open(2)` can block.
+  Deliberately not "anything that is not a regular file": a path that is merely
+  missing or cannot be stat'ed must keep the open's own `NoSuchFileException` /
+  `AccessDeniedException` as its reported cause, because the warn-once budget
+  makes that sentence the only notice the operator gets and "look for a pipe"
+  would spend it on the wrong thing. `NOFOLLOW_LINKS` does not cover this: a
+  FIFO is not a symlink. The check leaves a narrow swap window between the test and the open
+  — Java offers no atomic "open only if regular" — but a pipe already in place
+  is refused deterministically.
+- **Record durability.** The temp-file-plus-rename above makes a save *atomic*
+  (a concurrent reader never sees a half-written file), which is a different
+  property from surviving a power loss. The record's contents and the rename
+  that publishes them are written back from the page cache independently, so a
+  crash before write-back can lose either one alone: a durable rename with
+  non-durable contents leaves a `<runId>.json` that reads back empty or garbled
+  (and is then skipped by `tryRead`, so the run silently disappears from
+  `list`), while durable contents with a non-durable rename lets the record
+  vanish or revert to whatever previously held that name. Either outcome costs
+  more than a missing history row, because `run --rerun-failed <runId>` reads
+  that record back to decide which jobs already succeeded — without it the
+  operator must re-run the whole batch, re-executing jobs that had already
+  succeeded, which is precisely what `--rerun-failed` exists to avoid.
+  `Durability` therefore flushes four things — one `Durability.Step` each, so
+  that adding a flush point forces a decision about its target and its failure
+  policy rather than inheriting someone else's: each directory level
+  `ensureBaseDirectory()` newly creates (syncing each level's *parent*, since
+  that is what holds the entry), the temp file's contents before the rename,
+  the published file's contents again when the rename had to fall back to a
+  non-atomic copy-and-delete (a separate step because it re-flushes bytes the
+  fallback wrote at a *new* location, and carries its own warning budget and
+  operator wording), and the base directory after the rename — the last one
+  only once
+  `verifyWroteUnderExpectedBase` has passed, so a *rename* the symlink check is
+  about to reject is never committed first. This ordering deliberately covers
+  the directory entry only: the record's own bytes are flushed before the check
+  runs, so a write misdirected by a mid-sequence symlink swap may already have
+  reached the attacker-controlled directory. Withholding the content flush
+  would not change that (the bytes are written either way, flushed or not);
+  what the check does about it is unlink the misdirected file via
+  `deleteQuietly(target)` — a small helper that returns the cleanup failure
+  instead of throwing it, so an unlink the attacker's directory refuses is
+  attached with `addSuppressed` rather than replacing the rejection itself —
+  and reject the save. Note also that the
+  non-atomic `Files.move` fallback re-syncs the *destination* rather than
+  relying on the earlier sync of the temp file: that fallback may internally
+  copy-and-delete, in which case the synced temp file is unlinked and the
+  destination holds fresh, unflushed pages — syncing only the directory there
+  would recreate the exact "durable entry, non-durable contents" failure this
+  section exists to prevent. **What a failure does depends on what failed.**
+  A directory flush is the step that legitimately cannot run at all (Windows
+  does not allow opening a directory as a channel) and its failure costs the
+  directory entry rather than the record's bytes, so it logs once and
+  continues: failing a save because the platform cannot `fsync` would report a
+  run whose record is on disk as "failed to save execution result", telling
+  the operator the opposite of what happened. A regular-file flush is
+  different — a failed `fsync` there means the record's own bytes did not
+  reach the disk, because with delayed allocation the kernel can report
+  `ENOSPC`/`EIO` at exactly that point and drop the dirty pages — so those
+  steps propagate, `save()` wraps the error as it already does for any other
+  write failure, and `RunCommand` reports it (its handler already names a full
+  disk as the expected cause). What propagates is only a failure of the
+  *flush*: a failure to *open* — including an unchecked one, which is wrapped
+  so that it lands on the same side — means the sync could not be attempted
+  rather than that a write was lost, and the bytes were written and the stream
+  closed before it ran, so it warns even on a record-content step. Failing a
+  save because an antivirus held the file open would be the same inversion in
+  the other direction. That rule covers the non-atomic fallback too, which is rare but
+  **reachable on a stock Linux filesystem** — `ATOMIC_MOVE` degrades on *any*
+  `rename(2)` failure, not only `EXDEV`. A directory occupying the record's
+  name is enough: the atomic move fails with "Is a directory", and the plain
+  `Files.move` that follows removes it and renames successfully. (An earlier
+  version of this document claimed the path was unreachable because the temp
+  file and the target share a directory. That reasoning covers `EXDEV` only,
+  and is wrong.) So the fallback is a live path whose durability matters, not
+  dead code kept for a hypothetical future:
+  when `Files.move` copies rather than renames, the destination is a freshly
+  allocated file whose bytes the earlier temp-file flush never touched, so its
+  re-sync is a record-content flush like any other and fails the save the same
+  way. Deriving the rule from *what is being flushed*, rather than from
+  "before or after publication", is what makes that case fall out correctly
+  instead of needing to be remembered. One asymmetry is accepted knowingly on
+  that path: when the temp-file flush fails the `finally` deletes the temp file,
+  so the reported failure matches the disk, but when the *fallback's*
+  destination flush fails the record has already been published and is left in
+  place. The save is still reported as failed, because an `fsync` error means
+  the kernel hit a write error — the page-cache copy can read back fine while
+  the on-disk copy is not — and a conservative "could not confirm this was
+  saved" is recoverable, whereas a false success is not. Deleting the published
+  record instead would be worse: the move already overwrote whatever held that
+  name, so removing it loses both copies. When a record-content flush is
+  *degraded* rather than propagated (it could not be opened at all), the
+  rename's directory sync is skipped too. Committing it alone would build the
+  worst of the two crash outcomes on purpose — a durable directory entry
+  pointing at contents that were never flushed, which comes back garbled, is
+  skipped by `tryRead`, and so vanishes from `list` while `--rerun-failed`
+  reports it missing. Skipping it does not *prevent* that outcome — nothing
+  stops ordinary writeback from flushing the rename's metadata before the
+  file's data pages, and without an `fsync` no ordering is enforced — but it
+  stops the tool from manufacturing it deliberately, and leaves the likelier
+  loss the whole record, which is the outcome an operator can actually
+  recognise. Claiming more than that would be wrong: the guarantee here is
+  "we do not force the bad ordering", not "the bad ordering cannot happen".
+  The split is by *which half failed*,
+  never by checked versus unchecked: an unchecked failure raised while opening
+  is wrapped and stays best-effort, but one raised by `force`/`close` reached
+  the flush and fails a record-content step like any other flush error.
+  Routing on the exception's type instead would let a provider that throws
+  unchecked from `force` publish bytes that never reached the disk and still
+  report success — the very inversion this section exists to prevent, which is
+  why `sync` handles both kinds in a single `catch` rather than two.
+  The accepted cost of the rule is
+  a state directory on a mount whose `fsync(2)` is not implemented for regular
+  files (some `vboxsf`/9p/FUSE setups return `EINVAL`/`ENOSYS` there): every
+  `run` will report a persistence failure rather than silently accept writes it
+  cannot confirm. Be clear about the blast radius — the record is not merely
+  reported as unconfirmed, it is **discarded**: the flush throws before the
+  rename, the `finally` deletes the temp file, and `run` exits 3 with no
+  `<runId>.json` at all, so `list` stays empty and `--rerun-failed` is
+  unusable on that mount, on every run rather than once. That is deliberate.
+  `IOException` carries no way to tell "fsync unsupported" from
+  "fsync reported ENOSPC", and between the two mistakes a loud, immediate
+  failure the operator sees on the very first run is preferable to records that
+  look saved and are not. Directory syncs keep their escape hatch because there
+  the platform gap is the *expected* case (Windows), not an anomaly. Successful steps are logged at
+  `FINE` — after the channel is closed, since deferred write errors on
+  networked filesystems surface from `close()` and a record logged before that
+  would claim a flush that then failed — since an `fsync` otherwise leaves no
+  evidence that it happened. A skipped step warns once per step, per store.
+  For directories that warning distinguishes a failure to *open* (a platform
+  gap) from a failure of the *flush* on a directory that opened fine (a real
+  error), because the warn-once budget means that sentence is the only notice
+  the operator will get, and wording a genuine failure as a platform
+  limitation would tell them to ignore it. Two platform gaps remain and are
+  inherent rather than accepted trade-offs: Windows does not allow opening a
+  directory as a channel, so the directory syncs are skipped there, and macOS
+  `fsync(2)` pushes only to the drive's own cache rather than issuing
+  `F_FULLFSYNC`.
 
 ## Future extensions
 

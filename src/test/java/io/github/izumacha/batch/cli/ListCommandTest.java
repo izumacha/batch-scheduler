@@ -200,4 +200,87 @@ class ListCommandTest {
         assertTrue(ListCommand.isTruncated(3, 0, 3));
         assertFalse(ListCommand.isTruncated(2, 0, 3));
     }
+
+    /**
+     * 回帰テスト: state ファイル由来の runId に改行が入っていても、単語が繋がった
+     * 実在しない ID として表示されないことを確認する。
+     *
+     * <p>制御文字の除去だけを掛けていた頃は、改行が「削除」されて "run1\nbbb" が
+     * "run1bbb" と表示されていた。運用者がそれを --rerun-failed に貼ると
+     * 「見つからない」になり、記録はあるのに引けないという行き止まりになる。
+     * state ディレクトリは改変対象として扱う前提（DESIGN.md）なので、外部由来の
+     * 値が表示経路へ入ってくること自体は想定内。
+     */
+    @Test
+    void listCollapsesWhitespaceInRunIdInsteadOfFusingIt(@TempDir Path stateDir) throws Exception {
+        // 改行を含む runId の記録を、検証を通さず直接ファイルとして置く
+        // （保存経路は runId を検証するため、改変された状態はこの形でしか作れない）
+        String json = """
+                {
+                  "runId" : "run1\\nbbb",
+                  "batchName" : "etl",
+                  "status" : "SUCCEEDED",
+                  "startedAt" : "2026-01-02T03:04:05Z",
+                  "finishedAt" : "2026-01-02T03:04:06Z",
+                  "jobResults" : [ ]
+                }
+                """;
+        java.nio.file.Files.createDirectories(stateDir);
+        java.nio.file.Files.writeString(stateDir.resolve("tampered.json"), json);
+        // 一覧を表示する
+        String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
+        // 改行はスペースへ圧縮され、繋がった別の ID には見えない
+        assertTrue(out.contains("run1 bbb"), out);
+        assertFalse(out.contains("run1bbb"), out);
+    }
+
+    /**
+     * 回帰テスト: runId を欠いた state ファイルがあっても、一覧の描画が止まらないこと。
+     *
+     * <p>表示用の整形から null 安全性が落ちると、壊れた 1 件で描画ループが NPE で
+     * 中断し、残りの正常な記録まで表示されなくなる。「読めないファイルは読み飛ばす」
+     * という本クラスの fail-safe 契約（§9）に真っ向から反する。
+     */
+    @Test
+    void listKeepsGoingWhenARecordHasNoRunId(@TempDir Path stateDir) throws Exception {
+        // runId フィールドを持たない記録を直接置く（保存経路では作れない形）
+        // runId・status・batchName をすべて欠いた記録にする。どの列も「値が無い」ことを
+        // 表す表記はこのクラスで 1 つ（"-"）に揃っている必要がある
+        String json = """
+                {
+                  "startedAt" : "2026-01-03T03:04:05Z",
+                  "finishedAt" : "2026-01-03T03:04:06Z",
+                  "jobResults" : [ ]
+                }
+                """;
+        java.nio.file.Files.createDirectories(stateDir);
+        // 壊れた記録が「先に」描画されるよう、開始時刻を新しくしておく。後ろに置くと、
+        // 正常な行が既に出力された後で落ちてしまい、中断を検出できない
+        java.nio.file.Files.writeString(stateDir.resolve("zz-broken.json"), json);
+        // 正常な記録も 1 件置き、そちらが表示され続けることを確かめる
+        seed(stateDir, "healthy-run", Instant.parse("2026-01-02T03:04:05Z"));
+        String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
+        // 壊れた 1 件で中断せず、正常な記録は表示される
+        assertTrue(out.contains("healthy-run"), out);
+        // runId の無い行が実際に描画されていることを、その行の中身で確かめる。
+        // 「読み飛ばされた」だけでも上の assert は通ってしまい、プレースホルダの
+        // 回帰を素通しするため（行の先頭が "-" で始まり、同じ行に etl が載る）
+        String brokenRow = out.lines()
+                .filter(line -> line.startsWith("-") && line.contains("2026-01-03"))
+                .findFirst()
+                .orElse(null);
+        assertTrue(brokenRow != null, out);
+        // 列ごとに、空欄ではなくプレースホルダで埋まっていることを確かめる。
+        // 行全体を見るだけだと runId 列の "-" で通ってしまい、BATCH 列が空白のまま
+        // でも気付けない（空白セルは表示バグと区別が付かない）。
+        // 桁は printf の書式 "%-36s  %-20s  %-9s  %-19s  %10s" に対応する
+        assertEquals("-", brokenRow.substring(0, 36).trim(), brokenRow);
+        assertEquals("-", brokenRow.substring(38, 58).trim(), brokenRow);
+        assertEquals("-", brokenRow.substring(60, 69).trim(), brokenRow);
+        // runId・status とも "null" ではなくプレースホルダで表示される
+        // （"null" という ID の実行と見分けが付かなくなるのを防ぐ）
+        assertFalse(out.contains("null"), out);
+        // 例外がそのまま漏れていない
+        assertFalse(out.contains("Cannot invoke"), out);
+    }
 }

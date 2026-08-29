@@ -1,7 +1,10 @@
 package io.github.izumacha.batch.cli;
 
+import io.github.izumacha.batch.text.SafeText;
+
 // アサーション（assertEquals 等）を静的インポートする
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 // 正規表現マッチのアサーションに使う
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -142,6 +145,340 @@ class CliFormatTest {
     }
 
     /**
+     * セキュリティ回帰テスト: safeMessage 自身が制御文字を除去することを確認する。
+     * 例外のメッセージには外部由来の値が入る（--rerun-failed のバッチ名不一致は
+     * state ファイルの batchName をそのまま本文にする）ため、呼び出し側の掛け忘れが
+     * そのまま端末への注入になる。名前が約束している「安全なメッセージ」を
+     * このメソッド自身が満たすようにしている。
+     */
+    @Test
+    void safeMessage_stripsTerminalControlCharacters() {
+        // 端末制御文字（ESC・BEL）を含むメッセージを持つ例外を作る
+        Exception e = new IllegalArgumentException(
+                "priorResult belongs to a different batch ('etl\u001b]0;pwned\u0007')");
+        String rendered = CliFormat.safeMessage(e);
+        // 生の ESC / BEL は出力へ漏れていない
+        assertFalse(rendered.contains("\u001b"), rendered);
+        assertFalse(rendered.contains("\u0007"), rendered);
+        // 診断に必要な文言そのものは残っている
+        assertTrue(rendered.contains("different batch"), rendered);
+    }
+
+    /**
+     * runId が無い記録では、文字列 "null" ではなく他の列と同じプレースホルダ "-" を
+     * 返すことを確認する。"null" のままだと、本当に "null" という ID の実行と
+     * 見分けが付かず、運用者が --rerun-failed null に貼って行き止まりになる。
+     */
+    @Test
+    void runId_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.runId(null));
+        assertEquals("-", CliFormat.runId("   "));
+        // 空白ではないが整形すると消える文字だけの ID もプレースホルダになる。
+        // 空文字のまま返すと 36 桁の空白として描画され、運用者には表示バグと
+        // 区別が付かず、--rerun-failed へ貼るものも得られない
+        assertEquals("-", CliFormat.runId("\u202E"));
+        assertEquals("-", CliFormat.runId("\u0007"));
+        // 値があるときは 1 行へ整形して返す（切り詰めはしない）
+        assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
+    }
+
+    /**
+     * 整形すると空になるメッセージでも、クラス名へ落ちて「error: 」だけの行に
+     * ならないことを確認する。判定を整形の前に置くと、非 null だが表示すると
+     * 消えるメッセージがフォールバックを素通りし、診断価値の無い表示を防ぐという
+     * このメソッドの存在理由そのものが消える。
+     */
+    @Test
+    void safeMessage_messageThatSanitizesToEmpty_fallsBackToClassName() {
+        // 空白ではないが整形すると消える文字だけのメッセージ（bidi 制御）
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("\u202E")));
+        // 空白のみのメッセージも同じ
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("   ")));
+    }
+
+    /**
+     * 必ず値があるはずの列では、値が無いときに空白ではなくプレースホルダを返すことを
+     * 確認する。空白だけのセルは「表示バグ」と区別が付かず、runId の Javadoc が
+     * 挙げているのと同じ行き止まりになる。
+     */
+    @Test
+    void requiredCell_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.requiredCell(null, 20));
+        assertEquals("-", CliFormat.requiredCell("   ", 20));
+        // 空白ではないが整形すると消える値もプレースホルダになる
+        assertEquals("-", CliFormat.requiredCell("\u202E", 20));
+        // 値があるときは通常どおり切り詰めて返す
+        assertEquals("etl", CliFormat.requiredCell("etl", 20));
+    }
+
+    /** ステータスが無い記録では "null" ではなくプレースホルダ "-" を返すことを確認する */
+    @Test
+    void status_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.status(null));
+        assertEquals("SUCCEEDED",
+                CliFormat.status(io.github.izumacha.batch.model.JobStatus.SUCCEEDED));
+    }
+
+    /**
+     * 原因を持つ例外では、外側のメッセージに「 (原因)」が併記されることを確認する。
+     * JsonExecutionStore.save は「記録は公開済みだが耐久性を確認できなかった」という
+     * 区別を原因側にしか持たせていないため、ここが落ちると運用者には
+     * 「保存できなかった」としか伝わらず、実際には残っている記録に対して
+     * バッチ全体の再実行へ誘導してしまう。
+     */
+    @Test
+    void safeMessageWithCause_appendsTheCause() {
+        // 原因付きの例外を組み立てる（save が投げる形と同じ入れ子）
+        Exception cause = new java.io.IOException("record published but unconfirmed");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        // 外側のメッセージと原因の両方が 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("failed to save execution result"), rendered);
+        assertTrue(rendered.contains("record published but unconfirmed"), rendered);
+    }
+
+    /**
+     * 外側にメッセージを渡さずに包んだ例外（Throwable が原因の toString() を
+     * そのまま detailMessage に採用する形）では、同じ文が 2 回並ばないことを確認する。
+     * JsonExecutionStore のシンボリックリンク拒否がこの形をしており、無条件に
+     * 原因を足すと「... /x (java.io.IOException: ... /x)」になっていた。
+     */
+    @Test
+    void safeMessageWithCause_doesNotRepeatACauseAlreadyInTheMessage() {
+        // メッセージを渡さずに包む（detailMessage は原因の toString() になる）
+        Exception cause = new java.io.IOException("refusing to use a symlinked state directory: /x");
+        Exception outer = new java.io.UncheckedIOException((java.io.IOException) cause);
+        // 併記されるのは 1 回だけで、丸括弧での繰り返しは付かない
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertEquals(cause.toString(), rendered);
+    }
+
+    /**
+     * 原因のメッセージに前後の空白が含まれていても、同じ文が 2 回並ばないことを確認する。
+     * 冒頭は safeMessage が整形済みで返すため、比較の片側だけを整形していると
+     * 空白の有無だけで一致しなくなり、この抑止が存在する理由そのものが消える。
+     */
+    @Test
+    void safeMessageWithCause_dedupesEvenWhenTheCauseHasSurroundingWhitespace() {
+        // 末尾に空白を含むメッセージで包む（--state-dir "foo " のような正当な入力で起きる）
+        Exception cause = new java.io.IOException("refusing to use a symlinked state directory: /x ");
+        Exception outer = new java.io.UncheckedIOException((java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 併記は 1 回だけ（丸括弧での繰り返しが付かない）
+        assertFalse(rendered.contains("("), rendered);
+    }
+
+    /**
+     * 原因が 2 段以上ある場合に、根元まで併記されることを確認する。
+     * 非アトミック移動の経路は save が「記録は公開済みだが耐久性を確認できなかった」を
+     * 挟んで包み直すため 3 段になり、1 段だけ辿る実装では ENOSPC 等の実際の理由が
+     * 落ちていた（説明を足した経路ほど理由が消える、という逆転になっていた）。
+     */
+    @Test
+    void safeMessageWithCause_walksTheWholeCauseChain() {
+        // 3 段の入れ子を作る（save がこの経路で作る形と同じ）
+        java.io.IOException root = new java.io.IOException("No space left on device");
+        java.io.IOException middle =
+                new java.io.IOException("the record was published but could not be confirmed durable", root);
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", middle);
+        // 3 段すべての情報が 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("failed to save execution result"), rendered);
+        assertTrue(rendered.contains("could not be confirmed durable"), rendered);
+        assertTrue(rendered.contains("No space left on device"), rendered);
+    }
+
+    /**
+     * 原因の連鎖が上限より深い場合に、打ち切ったことが出力に残ることを確認する。
+     * 黙って落とすと、このメソッドが直したはずの「根本原因が消えているのに、
+     * 消えたことも分からない」状態に戻る。
+     */
+    @Test
+    void safeMessageWithCause_marksThatItTruncatedALongChain() {
+        // 上限（5 段）を超える深さの連鎖を作る
+        Throwable deepest = new IllegalStateException("root");
+        Throwable current = deepest;
+        for (int i = 0; i < 8; i++) {
+            current = new IllegalStateException("layer" + i, current);
+        }
+        // 打ち切った事実が出力に含まれる
+        String rendered = CliFormat.safeMessageWithCause(current);
+        assertTrue(rendered.contains("further causes omitted"), rendered);
+        // 中間の包みは省かれている（＝実際に打ち切られている）
+        assertFalse(rendered.contains("layer1,"), rendered);
+        assertFalse(rendered.contains("layer0)"), rendered);
+        // それでも根元だけは印つきで載る。印だけ付けて終えると「打ち切ったことは
+        // 分かるが理由は分からない」になり、このメソッドの存在意義が消える
+        assertTrue(rendered.contains("root cause: java.lang.IllegalStateException: root"),
+                rendered);
+    }
+
+    /**
+     * Java の {@code \s} が拾わない改行文字（U+0085 NEL）も区切りとして圧縮され、
+     * 単語が繋がらないことを確認する。これらは制御文字パターン側では「削除」対象
+     * なので、圧縮側に足しておかないと 3 文字だけが除去へ回って
+     * "line onefile not found" のような化けを起こす。
+     */
+    @Test
+    void safeMessageWithCause_collapsesUnicodeLineSeparatorsToo() {
+        // \s に含まれない改行（NEL・行区切り・段落区切り）を挟んだメッセージを作る
+        Exception cause = new java.io.IOException("line oneline two line three end");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // どれもスペースへ圧縮され、単語が繋がっていない
+        assertTrue(rendered.contains("line one line two line three end"), rendered);
+    }
+
+    /** 循環した原因の連鎖でも、根元の探索が止まって戻ってくることを確認する */
+    @Test
+    void safeMessageWithCause_terminatesOnACyclicCauseChain() {
+        // getCause() が自分自身へ戻る連鎖を用意する（壊れた例外実装の模擬）
+        Throwable[] holder = new Throwable[1];
+        Throwable cyclic = new IllegalStateException("cyclic") {
+            @Override
+            public synchronized Throwable getCause() {
+                // 常に次の要素を返し続けることで無限の連鎖に見せる
+                return holder[0];
+            }
+        };
+        holder[0] = cyclic;
+        // 上限で必ず止まるので、呼び出しは有限時間で戻る
+        String rendered = CliFormat.safeMessageWithCause(cyclic);
+        assertTrue(rendered.contains("further causes omitted"), rendered);
+        // 根元まで下りられていないので「根本原因」とは名乗らない。途中の包みを
+        // 根本原因と言い切ると、運用者を間違った失敗の調査へ送り出してしまう
+        assertFalse(rendered.contains("root cause:"), rendered);
+        assertTrue(rendered.contains("deepest cause reached:"), rendered);
+    }
+
+    /**
+     * セキュリティ回帰テスト: 原因のメッセージに含まれる端末制御文字が除去されることを
+     * 確認する。NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージに
+     * するため、外部から与えられたパスが端末へ生で出る経路になりうる。
+     * 本クラスは stripControlChars を「唯一のチョークポイント」と位置づけている。
+     */
+    @Test
+    void safeMessageWithCause_stripsTerminalControlCharactersFromCauses() {
+        // 端末制御文字（ESC・BEL）を含むパスを持つ原因を組み立てる
+        Exception cause = new java.nio.file.NoSuchFileException("/srv/\u001b]0;pwned\u0007state");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        // 生の ESC / BEL が出力へ漏れていない
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertFalse(rendered.contains("\u001b"), rendered);
+        assertFalse(rendered.contains("\u0007"), rendered);
+        // 診断に必要なパスそのものは残っている
+        assertTrue(rendered.contains("state"), rendered);
+    }
+
+    /**
+     * 添えられた診断（addSuppressed）が併記されることを確認する。
+     * 保存側は「アトミック移動が使えなかった理由」「誤配置ファイルを削除できなかった
+     * こと」などを主因ではない情報として addSuppressed で運んでいる。ここで描画
+     * しなければ、集めているだけで誰にも届かない情報になる。
+     */
+    @Test
+    void safeMessageWithCause_rendersSuppressedDiagnostics() {
+        // 主因に、判断材料となる別の失敗を添える（保存側と同じ形）
+        java.io.IOException primary = new java.io.IOException("fallback move failed");
+        primary.addSuppressed(new java.io.IOException("atomic move unsupported"));
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", primary);
+        // 主因も添えられた側も 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("fallback move failed"), rendered);
+        assertTrue(rendered.contains("atomic move unsupported"), rendered);
+        // 主因と区別できる印が付いている
+        assertTrue(rendered.contains("also:"), rendered);
+    }
+
+    /**
+     * 改行やタブが「削除」されて前後の単語が繋がらないことを確認する。
+     * 改行・タブは stripControlChars の \p{Cntrl} に含まれるため、空白の圧縮を
+     * 先に済ませておかないと "line one" と "line two" が "line oneline two" のように
+     * 別語へ化ける。原因のメッセージは外部由来（ジョブ出力・OS のエラー文）で
+     * 改行を含みうるので、診断が読めなくなる実害がある。
+     */
+    @Test
+    void safeMessageWithCause_collapsesWhitespaceInsteadOfFusingWords() {
+        // 改行とタブを含むメッセージを持つ原因を組み立てる
+        Exception cause = new java.io.IOException("line one\nline two\tline three");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 単語の境界がスペースとして残っている（＝繋がっていない）
+        assertTrue(rendered.contains("line one line two line three"), rendered);
+        // 生の改行・タブは出力へ漏れていない（1 行であることの担保）
+        assertFalse(rendered.contains("\n"), rendered);
+        assertFalse(rendered.contains("\t"), rendered);
+    }
+
+    /**
+     * 重複の判定が「完全一致」で行われ、部分一致では行われないことを確認する。
+     * 外側が内側の文言を引用したうえで説明を足す包み方をすると、内側の原因は
+     * 外側の部分文字列になる。含有で判定していると別物である内側が黙って消え、
+     * しかも打ち切りの印も付かないため「根本原因が消えたことも分からない」状態に戻る。
+     */
+    @Test
+    void safeMessageWithCause_dedupesByExactMatchNotContainment() {
+        // 内側の文言をそのまま含み、さらに説明を足したメッセージで包む
+        Exception inner = new java.io.IOException("could not sync the file");
+        Exception outer = new java.io.UncheckedIOException(
+                new java.io.IOException("could not sync the file at /srv/state", inner));
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 内側の原因が「部分文字列だから」という理由で落とされていない
+        assertTrue(rendered.contains("(java.io.IOException: could not sync the file)"), rendered);
+    }
+
+    /**
+     * 連鎖がちょうど上限 +1 段のとき、実際には何も落ちていないので打ち切りの印を
+     * 付けないことを確認する。無条件に付けると「落ちていないのに落ちたと告げる」
+     * ことになり、運用者は存在しない情報を探しに行く。
+     */
+    @Test
+    void safeMessageWithCause_doesNotClaimTruncationWhenNothingWasDropped() {
+        // 原因が上限（5 段）+ 1 段ちょうどの連鎖を作る（打ち切った先が根元そのものになる）
+        Throwable root = new IllegalStateException("REALROOT");
+        Throwable current = root;
+        for (int i = 0; i < 6; i++) {
+            current = new IllegalStateException("layer" + i, current);
+        }
+        String rendered = CliFormat.safeMessageWithCause(current);
+        // 根元は根元として載る
+        assertTrue(rendered.contains("root cause: java.lang.IllegalStateException: REALROOT"),
+                rendered);
+        // 落ちた段は無いので印は付かない
+        assertFalse(rendered.contains("further causes omitted"), rendered);
+    }
+
+    /**
+     * 別々の失敗がたまたま同じ文字列に描画されても、2 件目が黙って消えないことを
+     * 確認する。全体との完全一致で抑止すると、印も付かずに診断が 1 件消える。
+     */
+    @Test
+    void safeMessageWithCause_keepsDistinctSuppressedThatRenderIdentically() {
+        // 同じ文面になる別々の失敗を 2 件添える（別々のステップの AccessDenied 等の模擬）
+        java.io.IOException primary = new java.io.IOException("primary");
+        primary.addSuppressed(new java.io.IOException("same"));
+        primary.addSuppressed(new java.io.IOException("same"));
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", primary);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // "also:" が 2 回出る（＝ 2 件目が黙って消えていない）
+        int first = rendered.indexOf("also:");
+        assertTrue(first >= 0, rendered);
+        assertTrue(rendered.indexOf("also:", first + 1) > first, rendered);
+    }
+
+    /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
+    @Test
+    void safeMessageWithCause_withoutCause_returnsMessageOnly() {
+        assertEquals("boom", CliFormat.safeMessageWithCause(new IllegalStateException("boom")));
+    }
+
+    /**
      * セキュリティ回帰テスト: ジョブ出力由来のメッセージに含まれる端末制御文字
      * （ESC・BEL・CSI 等）が除去され、生の 0x1B / 0x07 が表示文字列へ漏れないこと
      * （旧実装は空白しか圧縮せず、タイトル偽装・文字消去などの端末注入を許していた）。
@@ -247,9 +584,9 @@ class CliFormatTest {
     void stripControlChars_stripsBidiAndFormatCharacters() {
         // runId 風の文字列に RLO（U+202E）と別種の Cf 文字（ソフトハイフン U+00AD）を混ぜる
         assertEquals("run-01-abc",
-                CliFormat.stripControlChars("run\u202E-01\u00AD-abc"));
+                SafeText.stripControlChars("run\u202E-01\u00AD-abc"));
         // isolate 制御（U+2066）も除去されることを確認する
-        assertEquals("xy", CliFormat.stripControlChars("x\u2066y"));
+        assertEquals("xy", SafeText.stripControlChars("x\u2066y"));
     }
 
     /**
@@ -260,10 +597,10 @@ class CliFormatTest {
     void stripControlChars_removesControlsWithoutTruncating() {
         // UUID 風の runId に ESC シーケンスを混ぜても制御文字だけが消える
         assertEquals("0123456789abcdef-0123-0123[31m-esc",
-                CliFormat.stripControlChars("0123456789abcdef-0123-0123\u001B[31m-esc"));
+                SafeText.stripControlChars("0123456789abcdef-0123-0123\u001B[31m-esc"));
         // 長い文字列でも切り詰めは発生しない（65 文字がそのまま返る）
-        assertEquals(65, CliFormat.stripControlChars("y".repeat(65)).length());
+        assertEquals(65, SafeText.stripControlChars("y".repeat(65)).length());
         // null は null のまま返す
-        assertEquals(null, CliFormat.stripControlChars(null));
+        assertEquals(null, SafeText.stripControlChars(null));
     }
 }

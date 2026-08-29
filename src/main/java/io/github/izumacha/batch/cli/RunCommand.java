@@ -101,13 +101,19 @@ public final class RunCommand implements Callable<Integer> {
                 priorResult = store.findById(rerunFailedRunId).orElse(null);
             } catch (IllegalArgumentException e) {
                 // runId の形式が不正な場合は設定・IO エラーとして終了する
-                System.err.println("error: invalid --rerun-failed run id '" + rerunFailedRunId
+                // runId は state ファイル由来の値が `list` 経由で渡ってくる想定
+                // （DESIGN.md は state ディレクトリを改変対象として扱う）。同じ式の
+                // safeMessage 側だけが整形されていると、同じ値が「1 回は無害化され、
+                // 1 回は生のまま」端末へ出て、制御文字の注入が素通りする
+                System.err.println("error: invalid --rerun-failed run id '"
+                        + CliFormat.sanitizeOneLine(rerunFailedRunId)
                         + "': " + CliFormat.safeMessage(e));
                 return BatchCli.EXIT_CONFIG;
             }
             if (priorResult == null) {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
-                System.err.println("error: no prior run found with id '" + rerunFailedRunId
+                System.err.println("error: no prior run found with id '"
+                        + CliFormat.sanitizeOneLine(rerunFailedRunId)
                         + "' under " + stateDir.toAbsolutePath());
                 // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
                 // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では
@@ -135,12 +141,10 @@ public final class RunCommand implements Callable<Integer> {
             //  場合にディレクトリだけが副作用として残るのを防ぐため）
             store.ensureBaseDirectory();
         } catch (RuntimeException e) {
-            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
-            Throwable cause = e.getCause();
-            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
-            String detail = cause != null ? " (" + cause + ")" : "";
             // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to prepare state directory: " + CliFormat.safeMessage(e) + detail);
+            // （原因の併記は CliFormat に集約している。§6 DRY）
+            System.err.println("error: failed to prepare state directory: "
+                    + CliFormat.safeMessageWithCause(e));
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -161,8 +165,11 @@ public final class RunCommand implements Callable<Integer> {
             // ここで捕捉しないと picocli の既定ハンドラがスタックトレースをそのまま
             // 標準エラーに出してしまい、他のすべての失敗経路が守っている
             // 「スタックトレースを外部に出さない」という規約（§9 fail-closed）から
-            // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する
-            System.err.println("error: " + CliFormat.safeMessage(e));
+            // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する。
+            // 原因まで併記するのは、BatchExecutionException の外側メッセージが
+            // 「unexpected error while executing batch '...' (runId=...)」で診断情報を
+            // 一切持たず、原因を落とすと何が起きたのか手がかりがゼロになるため
+            System.err.println("error: " + CliFormat.safeMessageWithCause(e));
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -173,8 +180,11 @@ public final class RunCommand implements Callable<Integer> {
             // 実行結果を状態ディレクトリに JSON ファイルとして保存する
             store.save(result);
         } catch (RuntimeException e) {
-            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する
-            System.err.println("error: failed to persist run state: " + CliFormat.safeMessage(e));
+            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する。原因まで出すのは、
+            // 「記録は公開済みだが耐久性を確認できなかった」という区別が原因側にしか無く、
+            // 外側だけだと残っている記録に対して全ジョブの再実行へ誘導してしまうため
+            System.err.println("error: failed to persist run state: "
+                    + CliFormat.safeMessageWithCause(e));
             // 保存先は事前検証済みなのでここに来るのは稀（実行中のディスク満杯など）。
             // バッチ自体が失敗している場合は、記録漏れ（3）よりもバッチ失敗（1）の方が
             // ラッパースクリプトの分岐にとって重要な情報なので EXIT_FAILED を優先して返す。

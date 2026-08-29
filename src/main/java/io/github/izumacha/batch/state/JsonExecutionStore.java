@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.izumacha.batch.model.ExecutionResult;
+import io.github.izumacha.batch.text.SafeText;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,6 +27,16 @@ import java.util.stream.Stream;
  *
  * <p>Instants are written as ISO-8601 strings (timestamps disabled) and reads
  * tolerate missing, oversized, or unparseable files by skipping them.
+ *
+ * <p>Writes are both atomic (temp file plus rename, so a reader never sees a
+ * half-written file) and, on a best-effort basis, durable: the contents, the
+ * rename, and any newly created directory level are flushed to disk, so a
+ * power loss right after {@link #save} returns does not silently drop the
+ * record. Atomicity alone would not give that, because the contents and the
+ * rename are written back from the page cache independently and a crash can
+ * lose either one alone. The package-private {@code Durability} class holds
+ * the mechanism, the reasoning, and the platform limits (directory syncing is
+ * POSIX-only; macOS {@code fsync(2)} does not issue {@code F_FULLFSYNC}).
  */
 public final class JsonExecutionStore implements ExecutionStore {
 
@@ -96,6 +107,9 @@ public final class JsonExecutionStore implements ExecutionStore {
     private final Path baseDir;
     // JSON のシリアライズ・デシリアライズに使う Jackson の ObjectMapper インスタンス
     private final ObjectMapper mapper;
+    // ディスクへの書き戻しを担当する。ストアごとに持つことで、警告の「1 回だけ」の
+    // 予算もストア単位になり、JVM 全体で共有される可変状態を持たずに済む
+    private final Durability durability = new Durability();
 
     public JsonExecutionStore(Path baseDir) {
         // baseDir が null の場合は例外を投げる（保存先ディレクトリは必須）
@@ -118,6 +132,41 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 読み取り専用の list コマンドまで副作用でディレクトリを作ってしまい、
         // findAll / findRecent の「ディレクトリ未存在なら空を返す」分岐にも
         // 到達できなくなるため、作成は save() / ensureBaseDirectory() に限定する。
+    }
+
+
+    /**
+     * Deletes {@code path} if it exists, returning the failure instead of
+     * throwing it.
+     *
+     * <p>Both cleanup sites in this class ({@code save}'s {@code finally} and
+     * {@code verifyWroteUnderExpectedBase}'s rejection path) must obey the same
+     * rule: a cleanup failure must never replace the diagnostic already in
+     * flight -- an {@code ENOSPC} from the content flush, or the "the state
+     * directory was swapped" rejection. Returning the throwable puts that rule
+     * in one place while leaving each caller free to react differently (warn
+     * versus {@code addSuppressed}), so a third cleanup site cannot
+     * reintroduce the swallow-the-real-error bug (§6 DRY).
+     *
+     * <p>Unchecked failures are caught too: {@code deleteIfExists} can raise a
+     * {@code SecurityException} under a security manager, or an
+     * {@code UnsupportedOperationException} from a non-default filesystem
+     * provider, and letting those escape would break the rule through the gap
+     * in the type system.
+     *
+     * @return the failure, or {@code null} if the delete succeeded or the file
+     *     was already gone
+     */
+    private static Throwable deleteQuietly(Path path) {
+        try {
+            // 存在すれば消す（既に無ければ何もせず false が返るだけ）
+            Files.deleteIfExists(path);
+            // 消せたので報告すべき失敗は無い
+            return null;
+        } catch (IOException | RuntimeException failed) {
+            // 失敗は投げずに返し、どう扱うかは呼び出し元に任せる
+            return failed;
+        }
     }
 
     /**
@@ -164,8 +213,10 @@ public final class JsonExecutionStore implements ExecutionStore {
                     new IOException("refusing to use a symlinked state directory: " + baseDir));
         }
         try {
-            // ベースディレクトリが存在しない場合は再帰的に作成する
-            Files.createDirectories(baseDir);
+            // ベースディレクトリが存在しない場合は再帰的に作成し、新しく作られた各階層の
+            // 存在をディスクへ確定させる。作成直後の電源断でディレクトリごと消えると、
+            // その中へ書き込んだ実行記録も一緒に失われるため（Durability 参照）
+            durability.createDirectoriesDurably(baseDir);
         } catch (IOException e) {
             // ディレクトリ作成に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -214,6 +265,12 @@ public final class JsonExecutionStore implements ExecutionStore {
         try {
             // runId から書き込み先のファイルパスを計算する
             Path target = fileFor(result.runId());
+            // アトミック移動が使えず、コピー→削除で公開された可能性があるかどうか
+            boolean publishedWithoutAtomicity = false;
+            // 記録の中身をディスクへ確定できたか（改名を確定させてよいかの判断に使う）。
+            // 初期値 false は fail-safe 側 — 例外で同期まで届かなかった場合に
+            // 「確定した」と誤って扱わないため
+            boolean contentConfirmed = false;
             // Write to a temp file in the same directory, then move atomically
             // so readers never observe a half-written file.
             // Prefix is independent of runId: createTempFile requires >= 3 chars,
@@ -223,32 +280,43 @@ public final class JsonExecutionStore implements ExecutionStore {
             try {
                 // 一時ファイルに JSON として実行結果を書き込む
                 mapper.writeValue(tmp.toFile(), result);
-                try {
-                    // 一時ファイルを最終ファイルへアトミックに移動する（読者が半端なファイルを読まないようにする）
-                    Files.move(tmp, target,
-                            StandardCopyOption.REPLACE_EXISTING,
-                            StandardCopyOption.ATOMIC_MOVE);
-                } catch (IOException atomicFailed) {
-                    // Some filesystems don't support atomic moves; fall back.
-                    // Note: on such filesystems this fallback may not be atomic (could
-                    // internally copy+delete), so the "readers never observe a half-written
-                    // file" guarantee above is weaker here; tryRead() already tolerates a
-                    // partially-written/corrupt file by skipping it, so the only user-visible
-                    // effect is that one row is transiently missing from list/find results.
-                    // アトミック移動に対応していないファイルシステムの場合は通常の移動にフォールバックする
-                    // （/code-review ultra 指摘対応: この分岐は内部的にコピー→削除になりうるため、
-                    // 上記の「読者が半端なファイルを読まない」保証はこの経路には及ばない。ただし
-                    // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
-                    // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-                }
+                // 改名する前に中身をディスクへ確定させる。改名と中身は別々に書き戻されるため、
+                // ここを飛ばすと「改名だけ残って中身が空・破損」という状態で電源断を迎えうる
+                // （その記録は tryRead に読み飛ばされ、実行そのものが無かったことになる）。
+                // この段階は「書き戻しに失敗したら」握り潰さない。まだ公開していないので、
+                // 下の finally が一時ファイルを消して保存は失敗として報告される。遅延割り当ての
+                // もとでは fsync が ENOSPC / EIO を返してダーティページが捨てられうるため、
+                // ここで握り潰して改名まで進むと「空の記録を公開して成功と報告する」
+                // という、この仕組みが防ごうとしている失敗そのものを作ってしまう。
+                // 一方、開けなかっただけ（他プロセスが掴んでいる等）なら警告に留めて先へ進む。
+                // バイト列は既に書かれて閉じられており、開き直せないことは中身の良し悪しを
+                // 何も語らないため。この 2 分岐の判断は Durability.sync が持つ（同クラスの
+                // Javadoc と docs/DESIGN.md の「Record durability」が正本）
+                contentConfirmed = durability.sync(tmp, Durability.Step.RECORD_CONTENT);
+                // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
+                publishedWithoutAtomicity = publishRecord(tmp, target);
             } finally {
-                // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
-                Files.deleteIfExists(tmp);
+                // 何があっても一時ファイルを削除してゴミファイルが残らないようにする。
+                // finally なのは、検査例外だけでなく非検査例外（Jackson のシリアライズ
+                // 失敗など）で抜けたときにも消えてほしいため。一方で、この削除自体が
+                // 失敗したときに進行中の失敗を差し替えてはいけない（ディスク満杯で
+                // 同期が投げた ENOSPC が、直後の削除失敗に置き換わると、このクラスが
+                // 伝えるべきただ一つの診断が捨てられる）ので、削除の失敗はここで
+                // 受け止めて警告に留める
+                Throwable cleanupFailed = deleteQuietly(tmp);
+                // 消せなかったときは警告に留める（進行中の失敗を差し替えないため）
+                if (cleanupFailed != null) {
+                    LOGGER.warning("failed to remove the temporary file '"
+                            + SafeText.oneLine(tmp.toString()) + "': "
+                            + SafeText.oneLine(String.valueOf(cleanupFailed))
+                            + "; it will be left behind in the state directory");
+                }
             }
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
+            // 検証を通ったので、公開後に残っている確定作業をまとめて行う
+            commitPublishedRecord(target, expectedRealBase, publishedWithoutAtomicity, contentConfirmed);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -310,7 +378,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 候補が安全上限を超えている場合は、ファイル名（=時系列）の新しい順に絞り込んでから
         // パースする（全件の内容パースによる資源枯渇を避ける。MAX_UNBOUNDED_RESULTS 参照）
         if (candidates.size() > MAX_UNBOUNDED_RESULTS) {
-            LOGGER.warning("State directory " + baseDir + " has " + candidates.size()
+            LOGGER.warning("State directory " + SafeText.oneLine(baseDir.toString()) + " has " + candidates.size()
                     + " execution results, exceeding the unbounded-list safety ceiling ("
                     + MAX_UNBOUNDED_RESULTS + "); returning only the " + MAX_UNBOUNDED_RESULTS
                     + " most recent by filename. Use 'list --limit N' for a bounded view.");
@@ -456,6 +524,173 @@ public final class JsonExecutionStore implements ExecutionStore {
     }
 
     /**
+     * Moves {@code tmp} onto {@code target}, preferring an atomic rename and
+     * falling back to a plain move where the filesystem has no atomic one.
+     *
+     * <p>The atomic move is what gives the "a reader never sees a half-written
+     * file" guarantee. The fallback may internally copy-and-delete, so that
+     * guarantee does not reach this path; {@code tryRead} already skips a
+     * partially-written file, so the visible effect is one row transiently
+     * missing from {@code list} rather than a crash.
+     *
+     * <p>Package-private and returning which path it took, so a test can
+     * drive the fallback for real: {@code ATOMIC_MOVE} across two filesystems
+     * throws {@link java.nio.file.AtomicMoveNotSupportedException}, which is
+     * reachable from a test in a way that {@code save}'s own single-directory
+     * move is not. Without this seam the fallback branch -- and the re-sync it
+     * turns on -- would be reachable only on the deployments it exists for.
+     *
+     * @return {@code true} if the record had to be published by a non-atomic
+     *     move, so its destination still needs flushing
+     * @throws IOException if neither move succeeded, carrying the atomic
+     *     move's own failure as a suppressed exception
+     */
+    static boolean publishRecord(Path tmp, Path target) throws IOException {
+        try {
+            // まずアトミック移動を試す（読者が半端なファイルを読まないようにするため）
+            Files.move(tmp, target,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+            // 成功したので、移動先は一時ファイルと同じ実体＝同期済み
+            return false;
+        } catch (IOException | RuntimeException atomicFailed) {
+            // 非検査例外も受ける。Files.move は対応していないオプションに対して
+            // AtomicMoveNotSupportedException（検査）だけでなく
+            // UnsupportedOperationException（非検査）を投げると規定されており、
+            // どちらを選ぶかはプロバイダ次第。検査例外だけを受けると、そのプロバイダでは
+            // フォールバックが丸ごと飛ばされ、save() の catch も素通りして記録が
+            // 破棄される — フォールバックが存在する理由そのものの環境で、である。
+            // Durability.sync が 2 種類を 1 つの catch にまとめているのと同じ判断
+            try {
+                // アトミック移動に対応していないファイルシステムでは通常の移動にフォールバックする
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException | RuntimeException fallbackFailed) {
+                // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
+                // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
+                // 通るのが普通なのか」を判断する材料になるため、握り潰さず添える
+                fallbackFailed.addSuppressed(atomicFailed);
+                // 外側と同じ理由で非検査例外も受ける。ここで素通しすると
+                // (1) アトミック移動の失敗が addSuppressed されず、この経路を通った
+                //     ことが診断から消え、(2) save() の catch (IOException) を抜けて
+                //     runId も baseDir も付かない裸の例外だけが運用者に届く。
+                // 検査例外はそのまま、非検査例外は包んで save() の文脈付けに乗せる
+                throw fallbackFailed instanceof IOException io
+                        ? io : new IOException(fallbackFailed);
+            }
+            // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
+            return true;
+        }
+    }
+
+    /**
+     * Finishes the durability work that can only run once
+     * {@link #verifyWroteUnderExpectedBase} has accepted the write: re-flushing
+     * the record when the non-atomic fallback published it, and committing the
+     * rename.
+     *
+     * <p>The rename sync is deliberately last, and deliberately conditional.
+     * Committing it before the symlink check would persist a directory entry
+     * the check is about to reject. Committing it when the record's contents
+     * were never confirmed durable would build the worse of the two crash
+     * outcomes on purpose -- a durable entry pointing at unflushed bytes,
+     * which comes back garbled, is skipped by {@code tryRead}, and so vanishes
+     * from {@code list} while {@code --rerun-failed} reports it missing.
+     * Skipping the sync does not make that outcome impossible (writeback can
+     * still order the rename ahead of the data); it only stops this code from
+     * forcing it. So it
+     * runs only when the contents are known durable, and on the non-atomic
+     * fallback that knowledge comes from the re-flush of the published file
+     * alone: the temp file is a different inode that has already been
+     * unlinked, so its flush says nothing about the bytes now on disk.
+     *
+     * <p>Skipping the rename does not skip the report. A failed re-flush is
+     * still thrown, because the operator needs to know the kernel reported a
+     * write error for a record that is nonetheless visible.
+     *
+     * <p>{@code expectedRealBase} rather than {@code baseDir} is synced because
+     * the check just established that {@code target} really is inside it;
+     * re-resolving {@code baseDir} could follow a directory swapped in since.
+     *
+     * <p>The rename sync runs as a plain statement guarded by its own
+     * {@code try}/{@code catch}, deliberately not inside a {@code finally}
+     * wrapped around the re-flush: a {@code finally} that throws silently
+     * replaces the exception in flight, discarding the "published but not
+     * confirmed durable" wording that is the only thing telling the operator
+     * the record may still be readable. That cannot happen today --
+     * {@link Durability.Step#RECORD_RENAME} is a directory step and directory
+     * steps never rethrow -- but that fact lives in another class, invisible
+     * from here, so the safety is made local. The {@code catch} merges rather
+     * than replaces for the same reason.
+     *
+     * <p>Package-private so a test can drive the fallback directly. That path
+     * is reachable in production -- {@code ATOMIC_MOVE} degrades on any
+     * {@code rename(2)} failure, not just {@code EXDEV}, so a directory
+     * occupying the record's name is enough -- but it is rare enough that
+     * relying on {@code save} to produce it would leave "the flag actually
+     * turns the re-flush on" effectively unverified.
+     */
+    void commitPublishedRecord(Path target, Path expectedRealBase,
+            boolean publishedWithoutAtomicity, boolean contentConfirmed) throws IOException {
+        // 公開側の同期が失敗したときの例外を覚えておく入れ物（成功なら null のまま）
+        IOException publishFailed = null;
+        // 「公開された記録の中身がディスクへ確定しているか」。改名を確定させてよいかは
+        // これで決める。既定は呼び出し元が確かめた一時ファイル側の結果
+        boolean contentsDurable = contentConfirmed;
+        // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
+        if (publishedWithoutAtomicity) {
+            // target ではなく検証済みの実体ディレクトリから組み立て直した経路を使う。
+            // target は baseDir を途中に含んでおり、開き直す時点でもう一度たどることに
+            // なるため（改名の同期が expectedRealBase を使うのと同じ理由）
+            Path published = expectedRealBase.resolve(target.getFileName());
+            // この経路では公開先は別の inode で、一時ファイル側の同期は「別のファイルを
+            // 確定させた」だけ。公開された中身が確定したかを語れるのはこの同期しかないので、
+            // 一時ファイル側の結果は引き継がず、ここで測り直す（fail-safe に false から）
+            contentsDurable = false;
+            try {
+                contentsDurable = durability.sync(published, Durability.Step.PUBLISHED_RECORD_CONTENT);
+            } catch (IOException syncFailed) {
+                // この経路では移動が既に成功しており、記録はもう見えている。保存を失敗として
+                // 報告するのは変えない（fsync のエラーはカーネルが書き込みエラーに当たった
+                // ことを意味し、ページキャッシュ側が読めても disk 上は壊れていることがある）が、
+                // 「書けなかった」と読める報告のままだと、実際には list に出て
+                // --rerun-failed も引ける記録に対して全ジョブの再実行へ誘導してしまう
+                publishFailed = new IOException(
+                        "the record was published but could not be confirmed durable; '"
+                        + published.getFileName() + "' may still be readable, so check "
+                        + "'list' before re-running the batch", syncFailed);
+            }
+        }
+        // 中身を確定できているときだけ改名も確定させる。中身が未確定なのに改名だけを
+        // 確定させると「ディレクトリエントリは耐久、中身は非耐久」という、このクラスの
+        // 説明が 1 つ目に挙げている最悪の組み合わせを自分で作ってしまう（記録は存在するのに
+        // 読むと壊れていて tryRead に飛ばされ、list からは消え --rerun-failed も引けない）。
+        // ただし「そうすれば壊れた記録が残らない」とまでは言えない。fsync を出さない
+        // 以上、通常の書き戻しが中身より先に改名のメタデータを流す順序は止められない。
+        // ここで言えるのは「その最悪の順序を自分から確定させない」ことまでで、
+        // 起こりやすい失われ方は記録まるごと（運用者が気付ける形）になる
+        if (contentsDurable) {
+            try {
+                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            } catch (IOException renameFailed) {
+                // 運用者に伝えるべき主因は公開側なので、そちらがあれば添えるに留める
+                if (publishFailed != null) {
+                    publishFailed.addSuppressed(renameFailed);
+                } else {
+                    publishFailed = renameFailed;
+                }
+            }
+        } else {
+            // 抑止したこと自体は追えるようにしておく（同期の完了ログと同じ FINE）
+            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
+                    + "' because its contents were never confirmed durable");
+        }
+        // どちらかが失敗していれば、案内の文面を持つ方をそのまま伝える
+        if (publishFailed != null) {
+            throw publishFailed;
+        }
+    }
+
+    /**
      * Verifies that {@code target} -- the file {@link #save} just finished
      * writing -- actually landed under {@code expectedRealBase}, the base
      * directory's resolved real path captured before the write sequence
@@ -492,9 +727,16 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 一致しない場合、シーケンスの途中で baseDir がシンボリックリンクへ差し替えられ、
             // 意図しない場所へ書き込まれたことを意味するため、誤って書き込まれたファイルを
             // 削除したうえで拒否する（fail-closed）
-            Files.deleteIfExists(target);
-            throw new UncheckedIOException(new IOException(
+            UncheckedIOException rejection = new UncheckedIOException(new IOException(
                     "refusing to use a symlinked state directory: " + baseDir));
+            Throwable cleanupFailed = deleteQuietly(target);
+            // 差し替え先は攻撃者の持ち物になりうるので、削除に失敗することは十分あり得る。
+            // その場合でも拒否そのものは必ず伝え、削除の失敗は添えるに留める。置き換えて
+            // しまうと「state ディレクトリが差し替えられた」という唯一の合図が消える
+            if (cleanupFailed != null) {
+                rejection.addSuppressed(cleanupFailed);
+            }
+            throw rejection;
         }
     }
 
@@ -618,8 +860,14 @@ public final class JsonExecutionStore implements ExecutionStore {
         try {
             realFile = file.toRealPath();
         } catch (IOException e) {
-            LOGGER.warning("Skipping execution result file '" + file
-                    + "': failed to resolve its real path (" + e.getMessage() + ")");
+            // パスも例外本文も SafeText を通す。NoSuchFile / AccessDenied はオフェンディング
+            // パスをそのまま本文にするため、片方だけ無害化しても素通りする経路が残る。
+            // 注: この分岐はテストで踏めない（列挙から読み取りまでの間にファイルが
+            // 消えるなどの競合が要る）。同じファイル内の他のログと同じ形に揃えることで
+            // 見落としを防いでいる
+            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
+                    + "': failed to resolve its real path ("
+                    + SafeText.oneLine(e.getMessage()) + ")");
             return Optional.empty();
         }
         // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ
@@ -627,7 +875,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 読み込みは baseDir の差し替えに一切影響されない実体パスを直接使うことになる
         // （このメソッドの Javadoc 参照）
         if (!expectedRealBase.equals(realFile.getParent())) {
-            LOGGER.warning("Skipping execution result file '" + file
+            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
                     + "': resolved outside the expected state directory "
                     + "(baseDir may have been swapped to a symlink)");
             return Optional.empty();
@@ -665,7 +913,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 byte[] bytes = in.readNBytes((int) MAX_RECORD_BYTES + 1);
                 // 読み込めたバイト数が上限を超えていれば、壊れたファイルと同様に読み飛ばす
                 if (bytes.length > MAX_RECORD_BYTES) {
-                    LOGGER.warning("Skipping oversized execution result file '" + file + "' (>"
+                    LOGGER.warning("Skipping oversized execution result file '" + SafeText.oneLine(file.toString()) + "' (>"
                             + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
                     return Optional.empty();
                 }
@@ -676,7 +924,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
             // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
             // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
-            LOGGER.warning("Skipping unreadable execution result file '" + file + "': " + e.getMessage());
+            LOGGER.warning("Skipping unreadable execution result file '" + SafeText.oneLine(file.toString())
+                    + "': " + SafeText.oneLine(e.getMessage()));
             return Optional.empty();
         }
     }
