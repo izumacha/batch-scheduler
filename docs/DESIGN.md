@@ -314,13 +314,27 @@ malicious resource exhaustion and against tampering with the state directory:
   `ENOSPC`/`EIO` at exactly that point and drop the dirty pages — so those
   steps propagate, `save()` wraps the error as it already does for any other
   write failure, and `RunCommand` reports it (its handler already names a full
-  disk as the expected cause). That rule covers the non-atomic fallback too:
+  disk as the expected cause). What propagates is only a failure of the
+  *flush*: a failure to *open* — like any unchecked failure — means the sync
+  could not be attempted rather than that a write was lost, and the bytes were
+  written and the stream closed before it ran, so it warns even on a
+  record-content step. Failing a save because an antivirus held the file open
+  would be the same inversion in the other direction. That rule covers the non-atomic fallback too:
   when `Files.move` copies rather than renames, the destination is a freshly
   allocated file whose bytes the earlier temp-file flush never touched, so its
   re-sync is a record-content flush like any other and fails the save the same
   way. Deriving the rule from *what is being flushed*, rather than from
   "before or after publication", is what makes that case fall out correctly
-  instead of needing to be remembered. Only an *unchecked* failure stays
+  instead of needing to be remembered. One asymmetry is accepted knowingly on
+  that path: when the temp-file flush fails the `finally` deletes the temp file,
+  so the reported failure matches the disk, but when the *fallback's*
+  destination flush fails the record has already been published and is left in
+  place. The save is still reported as failed, because an `fsync` error means
+  the kernel hit a write error — the page-cache copy can read back fine while
+  the on-disk copy is not — and a conservative "could not confirm this was
+  saved" is recoverable, whereas a false success is not. Deleting the published
+  record instead would be worse: the move already overwrote whatever held that
+  name, so removing it loses both copies. Only an *unchecked* failure stays
   best-effort everywhere, because that means the sync could not be attempted
   at all rather than that a write was lost. Successful steps are logged at
   `FINE` — after the channel is closed, since deferred write errors on

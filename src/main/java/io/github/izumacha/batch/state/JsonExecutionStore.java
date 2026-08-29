@@ -265,7 +265,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
                     // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
                     try {
-                        moveWithoutAtomicity(tmp, target, durability);
+                        moveWithoutAtomicity(tmp, target);
                     } catch (IOException fallbackFailed) {
                         // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
                         // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
@@ -515,9 +515,13 @@ public final class JsonExecutionStore implements ExecutionStore {
      * <p>Package-private so a test can exercise this branch directly: no
      * filesystem in the test environment refuses {@code ATOMIC_MOVE}, so the
      * only other way to reach it would be a fake {@code FileSystemProvider}.
-     * Same rationale as {@link #verifyWroteUnderExpectedBase} below.
+     * An instance method rather than a static one taking the collaborator as
+     * an argument, so the store's own {@link Durability} -- and with it the
+     * per-store warn-once budget -- is the only one that can be used here.
+     * ({@link #verifyWroteUnderExpectedBase} stays static for a different
+     * reason: it touches no instance state at all.)
      */
-    static void moveWithoutAtomicity(Path tmp, Path target, Durability durability) throws IOException {
+    void moveWithoutAtomicity(Path tmp, Path target) throws IOException {
         // アトミック性を要求せずに移動する（コピー→削除で実現される可能性がある）
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。

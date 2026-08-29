@@ -25,8 +25,8 @@ import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -339,8 +339,8 @@ class DurabilityTest {
         Path tmp = dir.resolve("run-1.tmp");
         Path target = dir.resolve("run1.json");
         Files.writeString(tmp, "{}");
-        // アトミック移動が使えない環境で通る経路を直接呼ぶ
-        JsonExecutionStore.moveWithoutAtomicity(tmp, target, durability);
+        // アトミック移動が使えない環境で通る経路を、ストア自身のインスタンスから呼ぶ
+        new JsonExecutionStore(dir).moveWithoutAtomicity(tmp, target);
         // 中身は移動先へ移っている
         assertEquals("{}", Files.readString(target));
         assertTrue(Files.notExists(tmp));
@@ -413,16 +413,35 @@ class DurabilityTest {
     }
 
     @Test
-    void bothRecordContentStepsPropagateTheirFailure(@TempDir Path dir) {
-        // 一時ファイルの同期。ここを握り潰すと、fsync が ENOSPC を返して
-        // ダーティページが捨てられた後でも改名まで進み、空の記録を公開してしまう
-        assertThrows(IOException.class,
-                () -> durability.sync(dir.resolve("gone.tmp"), Durability.Step.RECORD_CONTENT));
-        // 非アトミック移動の移動先の同期も同じ。こちらはコピー→削除で移動先が
-        // 新しく確保されるため、一時ファイル側の同期はこの経路の役に立っていない
-        assertThrows(IOException.class,
-                () -> durability.sync(dir.resolve("gone.json"),
-                        Durability.Step.PUBLISHED_RECORD_CONTENT));
+    void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
+        // 開けなかった失敗と、開けたうえで書き戻しに失敗した場合を用意する
+        IOException openFailed = new Durability.OpenFailure(new IOException("boom"));
+        IOException flushFailed = new IOException("boom");
+        // 記録のバイト列を対象にする 2 段階は、書き戻しの失敗なら保存を失敗させる。
+        // ここを握り潰すと、fsync が ENOSPC を返してダーティページが捨てられた後でも
+        // 改名まで進み、空の記録を公開して「保存できました」と報告してしまう
+        assertTrue(Durability.shouldFailTheSave(Durability.Step.RECORD_CONTENT, flushFailed));
+        assertTrue(Durability.shouldFailTheSave(
+                Durability.Step.PUBLISHED_RECORD_CONTENT, flushFailed));
+        // 同じ段階でも「開けなかった」だけなら保存は失敗させない。バイト列は既に
+        // 書かれて閉じられており、開き直せないことは中身の良し悪しを何も語らない
+        assertFalse(Durability.shouldFailTheSave(Durability.Step.RECORD_CONTENT, openFailed));
+        assertFalse(Durability.shouldFailTheSave(
+                Durability.Step.PUBLISHED_RECORD_CONTENT, openFailed));
+        // ディレクトリを対象にする段階は、どちらの失敗でも保存を失敗させない
+        assertFalse(Durability.shouldFailTheSave(Durability.Step.RECORD_RENAME, flushFailed));
+        assertFalse(Durability.shouldFailTheSave(Durability.Step.BASE_DIRECTORY, openFailed));
+    }
+
+    @Test
+    void aRecordContentStepThatCannotBeOpenedWarnsInsteadOfFailingTheSave(@TempDir Path dir) {
+        // 存在しないファイルを渡すと開けずに失敗する（＝「試せなかった」側の失敗）
+        assertDoesNotThrow(() ->
+                durability.sync(dir.resolve("gone.tmp"), Durability.Step.RECORD_CONTENT));
+        // 例外にはならないが、握り潰しでもなく警告として残る
+        assertEquals(1, warnings().size());
+        // 通常ファイルには環境差の言い訳をしない文面が使われる
+        assertTrue(warnings().get(0).contains("could not sync the file"), warnings().get(0));
     }
 
     @Test

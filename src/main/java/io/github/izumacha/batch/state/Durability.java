@@ -63,7 +63,8 @@ import java.util.logging.Logger;
  * answer "how far did this save actually get committed?" after the fact, and
  * the seam the tests use to prove {@link JsonExecutionStore#save} really
  * performs every step. Failures are logged at {@code WARNING} instead, at
- * most once per step.
+ * most once per step per {@link JsonExecutionStore} (the budget is held by
+ * this instance, and each command builds its own store).
  *
  * <p><b>Platform limits.</b> Directory syncing needs to open a directory as a
  * channel, which POSIX allows and Windows does not; there the sync is skipped
@@ -103,10 +104,11 @@ final class Durability {
         RECORD_CONTENT(Target.FILE,
                 "the record may come back empty or garbled after a power loss, "
                 + "and will then be skipped as unreadable"),
-        // 非アトミック移動の移動先を確定させ直す用途。RECORD_CONTENT と分けているのは
-        // 予算を共有すると、これから捨てられる一時ファイル側の失敗が唯一の枠を使い切り、
-        // 「公開済みの記録が未確定」という本当に危険な失敗を黙らせてしまうため
-        // （段階ごとに予算を分ける理由そのものが、この 2 つの間にも当てはまる）
+        // 非アトミック移動の移動先を確定させ直す用途。RECORD_CONTENT と分ける理由は 2 つ。
+        // (1) 完了ログが別物になるので、どちらの同期が走ったのかをテストと運用で区別できる
+        //     （この経路では一時ファイル側の同期が役に立っていないことが、ログ上も分かる）。
+        // (2) 開けなかったときの警告予算が独立する。共有すると、これから捨てられる
+        //     一時ファイル側が唯一の枠を使い切り、公開済みの記録の側を黙らせてしまう
         PUBLISHED_RECORD_CONTENT(Target.FILE,
                 "the record was published by a non-atomic move and "
                 + "its bytes may never have reached the disk, so it can come back empty or garbled "
@@ -211,25 +213,31 @@ final class Durability {
      * descriptor can no longer be synced. Reopening costs one
      * {@code open}/{@code close} pair and syncs exactly the same file.
      *
-     * <p>An <em>unchecked</em> failure never propagates, whatever the step's
-     * policy. It means the sync could not be <em>attempted</em> (an option the
-     * provider rejects, a security manager) rather than that a write was lost,
-     * and failing a save because the platform cannot {@code fsync} would be
-     * the same inversion as swallowing a real write error, in the other
-     * direction. Catching {@link RuntimeException} rather than naming the
-     * types is deliberate: this class promises not to be the thing that fails
-     * a completed write, and guessing the list is how such promises break.
+     * <p>What propagates is only a failure of the <em>flush</em>. A failure to
+     * <em>open</em> -- and any unchecked failure -- means the sync could not be
+     * attempted rather than that a write was lost, so it warns even for a step
+     * whose flush failure would fail the save. The record's bytes were written
+     * and the stream closed before this ran; being unable to reopen the file
+     * (an antivirus or indexer holding it with a restrictive share mode on
+     * Windows, a provider that rejects the option, a security manager) says
+     * nothing about whether those bytes are good. Failing the save there would
+     * report "failed to persist run state" for a batch whose record is on
+     * disk -- the same inversion as swallowing a real write error, in the
+     * other direction. Catching {@link RuntimeException} rather than naming
+     * the types is deliberate: this class promises not to be the thing that
+     * fails a completed write, and guessing the list is how such promises
+     * break.
      *
-     * @throws IOException if the sync failed and the step's failure should
-     *     fail the save (see {@link Step#failureFailsTheSave()})
+     * @throws IOException if the <em>flush</em> failed and the step's failure
+     *     should fail the save (see {@link Step#failureFailsTheSave()})
      */
     void sync(Path path, Step step) throws IOException {
         // 開いて force(true) するところまでを試す
         try {
             flush(path, step);
         } catch (IOException e) {
-            // 記録のバイト列を対象にする段階なら、呼び出し元へそのまま投げて保存を失敗させる
-            if (step.failureFailsTheSave()) {
+            // 保存そのものを失敗させるべき失敗かどうかを判定する（下の表を参照）
+            if (shouldFailTheSave(step, e)) {
                 throw e;
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
@@ -238,6 +246,33 @@ final class Durability {
             // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）
             warnOnce(path, step, e, "could not attempt the sync on this platform");
         }
+    }
+
+    /**
+     * Decides whether a failure should fail the save, from the step and which
+     * half of {@link #flush} failed.
+     *
+     * <p>Two independent conditions, both of which must hold:
+     *
+     * <ul>
+     *   <li>The step flushes the record's own bytes ({@link Target#FILE}). A
+     *       directory flush costs the entry rather than the bytes, and is the
+     *       one that legitimately cannot run on some platforms.</li>
+     *   <li>The failure came from the flush, not from the open. Being unable
+     *       to reopen a file whose bytes were already written and closed says
+     *       nothing about whether those bytes are good -- an antivirus holding
+     *       the file on Windows, say -- so failing the save there would report
+     *       "failed to persist run state" for a record that is on disk.</li>
+     * </ul>
+     *
+     * <p>Package-private and pure, because the second condition cannot be
+     * reached from a test any other way: no test environment can make
+     * {@code fsync} itself report an error on demand, so without this seam
+     * the difference between the two halves would go unverified.
+     */
+    static boolean shouldFailTheSave(Step step, IOException e) {
+        // 記録のバイト列を対象にする段階で、かつ「開けなかった」以外の失敗のときだけ
+        return step.failureFailsTheSave() && !(e instanceof OpenFailure);
     }
 
     /**
@@ -276,17 +311,27 @@ final class Durability {
             // この階層はまだ無いので「これから作られる階層」として記録する
             missing.add(p);
         }
-        // 実際にディレクトリ階層を作成する（既に存在する場合は何もしない）
-        Files.createDirectories(dir);
         // 収集順は深い→浅いなので、浅い→深いの順（親が先に確定する順）へ反転する
         Collections.reverse(missing);
-        // 新しく作られた各階層について、その階層を含むディレクトリを同期し存在を確定させる
-        for (Path level : missing) {
-            // ファイルシステムのルートには含まれる側のディレクトリが無いので飛ばす
-            Path container = directoryHolding(level);
-            if (container != null) {
-                // 含む側を同期して、その中の level というエントリを確定させる
-                sync(container, Step.BASE_DIRECTORY);
+        try {
+            // 実際にディレクトリ階層を作成する（既に存在する場合は何もしない）
+            Files.createDirectories(dir);
+        } finally {
+            // 途中まで作って失敗した場合でも、作られた分は確定させる。ここを try の後ろに
+            // 置くと、作成できた浅い階層が同期されないまま例外が抜けていき、電源断で
+            // その階層ごと失われる（呼び出し元は次回作り直すので影響は小さいが、
+            // 「作った階層は確定させる」という約束は破らない）
+            for (Path level : missing) {
+                // createDirectories は浅い方から作るので、無い階層に当たったらそこから先も無い
+                if (!Files.exists(level)) {
+                    break;
+                }
+                // ファイルシステムのルートには含まれる側のディレクトリが無いので飛ばす
+                Path container = directoryHolding(level);
+                if (container != null) {
+                    // 含む側を同期して、その中の level というエントリを確定させる
+                    sync(container, Step.BASE_DIRECTORY);
+                }
             }
         }
     }
@@ -401,8 +446,8 @@ final class Durability {
     }
 
     /**
-     * Reports a skipped step at most once per step, explaining what could not
-     * be committed and what that risks.
+     * Reports a skipped step at most once per step per store, explaining what
+     * could not be committed and what that risks.
      */
     private void warnOnce(Path path, Step step, Exception cause, String reason) {
         // 予算を使えたときだけ記録する（同じ段階で何度も鳴らさない）
@@ -412,6 +457,6 @@ final class Durability {
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
         LOGGER.warning("Durability step " + step.name() + " skipped for '" + path + "': "
                 + reason + " (" + cause + "); " + step.consequence
-                + ". This warning is reported once per step.");
+                + ". This warning is reported once per step, per store.");
     }
 }
