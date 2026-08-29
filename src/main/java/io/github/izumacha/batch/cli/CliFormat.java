@@ -5,8 +5,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.HashSet;
-import java.util.Set;
 
 /**
  * CLI コマンドが共通して使う null 安全な整形ユーティリティメソッド群。
@@ -163,13 +161,8 @@ final class CliFormat {
         // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める
         String head = safeMessage(t);
         StringBuilder rendered = new StringBuilder(head);
-        // 既に出した詳細を覚えておき、同じものを繰り返さないための集合。
-        // 冒頭のメッセージも「出したもの」として最初から入れておく（メッセージを渡さずに
-        // 包んだ例外はここが原因の toString() と完全一致するため）
-        Set<String> emitted = new HashSet<>();
-        emitted.add(head);
         // 外側に添えられた診断（addSuppressed）も併記する
-        appendSuppressed(rendered, emitted, t);
+        appendSuppressed(rendered, head, t);
         // 原因を根元までたどって併記する。1 段だけだと、途中で説明を足して包み直した
         // 経路（保存の「記録は公開済みだが耐久性を確認できなかった」がこれ）で
         // 肝心の理由（ENOSPC 等）が落ちる。説明を足した経路ほど理由が消える逆転になる
@@ -177,9 +170,9 @@ final class CliFormat {
         // 万一 getCause() が循環していても止まるよう、たどる深さに上限を設ける
         for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
             // この段の表現（クラス名とメッセージ）を併記する
-            appendDetail(rendered, emitted, cause.toString());
+            appendDetail(rendered, head, cause.toString());
             // その段に添えられた診断も併記する
-            appendSuppressed(rendered, emitted, cause);
+            appendSuppressed(rendered, head, cause);
             // 次の段（さらに内側の原因）へ進む
             cause = cause.getCause();
         }
@@ -190,7 +183,13 @@ final class CliFormat {
         // 対処に必要な情報を持たないことが多く、operator が読みたいのは根元の
         // IOException なので、間を省いてでもそこは見せる
         if (cause != null) {
-            rendered.append(" (...further causes omitted)");
+            // 印を付けるのは「根本原因の行にも載らない段が実際にある」ときだけ。
+            // 連鎖がちょうど上限 +1 段だと、打ち切った先は根元そのもので下に併記される
+            // ため、無条件に付けると「何も落ちていないのに落ちたと告げる」ことになり、
+            // 運用者は存在しない情報を探しに行く
+            if (cause.getCause() != null) {
+                rendered.append(" (...further causes omitted)");
+            }
             // 根元まで下りる。循環していても止まるよう、こちらにも歩数の上限を置く
             Throwable root = cause;
             for (int steps = 0; root.getCause() != null && steps < MAX_ROOT_SEARCH_DEPTH; steps++) {
@@ -200,7 +199,7 @@ final class CliFormat {
             // （循環している・異常に深い）場合に着いた先はただの途中の包みで、それを
             // 根本原因と言い切ると運用者を間違った失敗の調査へ送り出してしまう
             String label = root.getCause() == null ? "root cause: " : "deepest cause reached: ";
-            appendDetail(rendered, emitted, label + root);
+            appendDetail(rendered, head, label + root);
         }
         // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が
@@ -218,11 +217,11 @@ final class CliFormat {
      * 判断する材料はそちらにしかない。ここで描画しなければ、集めているだけで
      * 誰にも届かない情報になる。
      */
-    private static void appendSuppressed(StringBuilder rendered, Set<String> emitted, Throwable throwable) {
+    private static void appendSuppressed(StringBuilder rendered, String head, Throwable throwable) {
         // 添えられた失敗を順に併記する（無ければ何もしない）
         for (Throwable suppressed : throwable.getSuppressed()) {
             // 主因と区別できるよう "also:" を付ける
-            appendDetail(rendered, emitted, "also: " + suppressed);
+            appendDetail(rendered, head, "also: " + suppressed);
         }
     }
 
@@ -233,16 +232,22 @@ final class CliFormat {
      * {@code Throwable} が原因の {@code toString()} をそのまま detailMessage に
      * 採用するため、無条件に足すとまったく同じ文が 2 回並ぶ。
      *
-     * <p>判定は「これまでに出した詳細と完全一致するか」で行い、組み立て済みの文字列に
-     * 部分文字列として含まれるかでは判定しない。含有で判定すると、原因の文言を引用した
-     * うえで説明を足す包み方（{@code "... could not sync the file at /x"} が
-     * {@code "... could not sync the file"} を含む）をしたときに、別物である内側の
-     * 原因が黙って消える。しかも打ち切りの印も付かないので、このメソッドが直したはずの
-     * 「根本原因が消えているのに、消えたことも分からない」状態がそのまま戻る。
+     * <p>抑止するのは<em>冒頭のメッセージとの完全一致</em>だけで、それ以外は
+     * 重複して見えても必ず出す。理由は 2 つ。組み立て済みの文字列への<em>含有</em>で
+     * 判定すると、原因の文言を引用したうえで説明を足す包み方
+     * （{@code "... could not sync the file at /x"} が
+     * {@code "... could not sync the file"} を含む）で別物の原因が黙って消える。
+     * 「これまでに出した全部との一致」で判定しても同じ穴が残る — 別々の失敗が
+     * たまたま同じ文字列に描画されること（同じパスに対する 2 つの
+     * {@code AccessDeniedException} など）は珍しくなく、その 2 件目は印も付かずに
+     * 消える。どちらも、このメソッドが直したはずの「診断が消えているのに、消えたことも
+     * 分からない」状態そのもの。冒頭との一致だけは、包み方の都合で必ず同じ文になる
+     * （{@code new UncheckedIOException(cause)} は原因の {@code toString()} を
+     * そのまま detailMessage にする）と分かっている 1 ケースなので抑止してよい。
      */
-    private static void appendDetail(StringBuilder rendered, Set<String> emitted, String detail) {
-        // まだ出していない詳細のときだけ追記する（add は初出なら true を返す）
-        if (emitted.add(detail)) {
+    private static void appendDetail(StringBuilder rendered, String head, String detail) {
+        // 冒頭のメッセージと同じ文でなければ追記する
+        if (!detail.equals(head)) {
             rendered.append(" (").append(detail).append(')');
         }
     }
@@ -258,7 +263,7 @@ final class CliFormat {
      * （§6 DRY）。両方の呼び出し元に書き写すと、片方だけ順序を入れ替えても
      * もう片方のテストが緑のまま通ってしまう。
      */
-    private static String sanitizeOneLine(String text) {
+    static String sanitizeOneLine(String text) {
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
         String oneLine = text.replaceAll(WHITESPACE_PATTERN, " ").trim();
         // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ

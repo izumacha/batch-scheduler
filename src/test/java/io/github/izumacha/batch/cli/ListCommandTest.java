@@ -200,4 +200,37 @@ class ListCommandTest {
         assertTrue(ListCommand.isTruncated(3, 0, 3));
         assertFalse(ListCommand.isTruncated(2, 0, 3));
     }
+
+    /**
+     * 回帰テスト: state ファイル由来の runId に改行が入っていても、単語が繋がった
+     * 実在しない ID として表示されないことを確認する。
+     *
+     * <p>制御文字の除去だけを掛けていた頃は、改行が「削除」されて "run1\nbbb" が
+     * "run1bbb" と表示されていた。運用者がそれを --rerun-failed に貼ると
+     * 「見つからない」になり、記録はあるのに引けないという行き止まりになる。
+     * state ディレクトリは改変対象として扱う前提（DESIGN.md）なので、外部由来の
+     * 値が表示経路へ入ってくること自体は想定内。
+     */
+    @Test
+    void listCollapsesWhitespaceInRunIdInsteadOfFusingIt(@TempDir Path stateDir) throws Exception {
+        // 改行を含む runId の記録を、検証を通さず直接ファイルとして置く
+        // （保存経路は runId を検証するため、改変された状態はこの形でしか作れない）
+        String json = """
+                {
+                  "runId" : "run1\\nbbb",
+                  "batchName" : "etl",
+                  "status" : "SUCCEEDED",
+                  "startedAt" : "2026-01-02T03:04:05Z",
+                  "finishedAt" : "2026-01-02T03:04:06Z",
+                  "jobResults" : [ ]
+                }
+                """;
+        java.nio.file.Files.createDirectories(stateDir);
+        java.nio.file.Files.writeString(stateDir.resolve("tampered.json"), json);
+        // 一覧を表示する
+        String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
+        // 改行はスペースへ圧縮され、繋がった別の ID には見えない
+        assertTrue(out.contains("run1 bbb"), out);
+        assertFalse(out.contains("run1bbb"), out);
+    }
 }

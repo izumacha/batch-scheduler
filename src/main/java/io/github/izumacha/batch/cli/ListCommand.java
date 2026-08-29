@@ -87,10 +87,13 @@ public final class ListCommand implements Callable<Integer> {
         // 各実行記録を 1 行ずつ表示する
         for (ExecutionResult run : runs) {
             // 実行 ID・バッチ名・ステータス・開始時刻・実行時間を整形して出力する。
-            // runId は state ファイル由来の信頼できない値のため、端末制御文字を
-            // 除去してから表示する（切り詰めはせず、注入だけを防ぐ）
+            // runId は state ファイル由来の信頼できない値のため、他の列と同じ
+            // sanitizeOneLine（空白を圧縮してから制御文字を除去）を通す。
+            // stripControlChars だけを掛けていた頃は、改行が「削除」されて
+            // "run1\nbbb" が "run1bbb" という実在しない ID に見え、それを
+            // --rerun-failed に貼ると「見つからない」になっていた（切り詰めはしない）
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
-                    CliFormat.stripControlChars(run.runId()),
+                    CliFormat.sanitizeOneLine(run.runId()),
                     CliFormat.shortMessage(run.batchName(), 20),
                     run.status(),
                     CliFormat.instant(run.startedAt()),

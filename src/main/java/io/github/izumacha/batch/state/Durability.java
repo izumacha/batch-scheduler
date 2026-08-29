@@ -71,9 +71,14 @@ import java.util.logging.Logger;
  * A failure that <em>propagates</em> is not logged at all: it becomes the
  * exception the caller reports, so logging it here would state the same
  * problem twice and spend the step's single warning slot on it. Reading the
- * logs alone, therefore, a record-content step that is neither {@code FINE}
- * nor {@code WARNING} is one whose flush failed and failed the save -- the
- * absence is the signal, not evidence that the flush was fine.
+ * logs alone, therefore, a {@link Step#RECORD_CONTENT} record that is neither
+ * {@code FINE} nor {@code WARNING} is one whose flush failed and failed the
+ * save -- the absence is the signal, not evidence that the flush was fine.
+ * That inference holds for {@code RECORD_CONTENT} only, because it is the one
+ * step that runs on every save. {@link Step#PUBLISHED_RECORD_CONTENT} runs
+ * only when the publish had to fall back to a non-atomic move, which
+ * {@code save} cannot even reach on the default provider, so its absence is
+ * the <em>normal</em> case and says nothing at all.
  *
  * <p>One step has a third outcome that this class cannot report, because the
  * decision is not made here: {@link Step#RECORD_RENAME} is <em>withheld</em>

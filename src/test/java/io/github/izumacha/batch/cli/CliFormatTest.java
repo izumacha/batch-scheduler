@@ -339,6 +339,45 @@ class CliFormatTest {
         assertTrue(rendered.contains("(java.io.IOException: could not sync the file)"), rendered);
     }
 
+    /**
+     * 連鎖がちょうど上限 +1 段のとき、実際には何も落ちていないので打ち切りの印を
+     * 付けないことを確認する。無条件に付けると「落ちていないのに落ちたと告げる」
+     * ことになり、運用者は存在しない情報を探しに行く。
+     */
+    @Test
+    void safeMessageWithCause_doesNotClaimTruncationWhenNothingWasDropped() {
+        // 原因が上限（5 段）+ 1 段ちょうどの連鎖を作る（打ち切った先が根元そのものになる）
+        Throwable root = new IllegalStateException("REALROOT");
+        Throwable current = root;
+        for (int i = 0; i < 6; i++) {
+            current = new IllegalStateException("layer" + i, current);
+        }
+        String rendered = CliFormat.safeMessageWithCause(current);
+        // 根元は根元として載る
+        assertTrue(rendered.contains("root cause: java.lang.IllegalStateException: REALROOT"),
+                rendered);
+        // 落ちた段は無いので印は付かない
+        assertFalse(rendered.contains("further causes omitted"), rendered);
+    }
+
+    /**
+     * 別々の失敗がたまたま同じ文字列に描画されても、2 件目が黙って消えないことを
+     * 確認する。全体との完全一致で抑止すると、印も付かずに診断が 1 件消える。
+     */
+    @Test
+    void safeMessageWithCause_keepsDistinctSuppressedThatRenderIdentically() {
+        // 同じ文面になる別々の失敗を 2 件添える（別々のステップの AccessDenied 等の模擬）
+        java.io.IOException primary = new java.io.IOException("primary");
+        primary.addSuppressed(new java.io.IOException("same"));
+        primary.addSuppressed(new java.io.IOException("same"));
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", primary);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // "also:" が 2 回出る（＝ 2 件目が黙って消えていない）
+        int first = rendered.indexOf("also:");
+        assertTrue(first >= 0, rendered);
+        assertTrue(rendered.indexOf("also:", first + 1) > first, rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {
