@@ -60,9 +60,17 @@ class DurabilityTest {
     // 「単一要素の相対パス」を実際に作って確かめる検査で使うディレクトリ名。
     // getParent() が null になるのは要素が 1 つのときだけで、そういうパスは
     // 必ず作業ディレクトリの直下にできる（Java から作業ディレクトリは変えられない）。
-    // @TempDir で代替できないのはそのためで、名前を固定してあるのは、異常終了で
-    // 残っても git の邪魔にならないよう .gitignore へ載せられるようにするため
-    private static final String BARE_RELATIVE_STATE_DIR = ".batch-state-durability-test";
+    // @TempDir で代替できないのはそのため。
+    //
+    // 作業ディレクトリは @TempDir と違ってこのプロセスの専有物ではない（同じ
+    // チェックアウトを IDE のテスト実行や別の ./mvnw verify が同時に触りうるし、
+    // 将来 forkCount を上げれば同一ビルド内でも競合する）。名前を固定すると、
+    // 隣の JVM が検査の最中にこのディレクトリを作る／消すだけで「同期対象が空」
+    // という無関係な失敗になるため、プロセス ID を混ぜて JVM ごとに分ける。
+    // 前置きを共通にしてあるのは、異常終了で残ったものを .gitignore で
+    // まとめて無視できるようにするため
+    private static final String BARE_RELATIVE_STATE_DIR =
+            ".batch-state-durability-test-" + ProcessHandle.current().pid();
 
     // このテストが取り付けたハンドラ（後片付けで取り外すために保持する）
     private Handler handler;
