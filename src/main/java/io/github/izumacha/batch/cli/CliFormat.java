@@ -123,6 +123,19 @@ final class CliFormat {
      * 診断価値の無い「error: null」表示を防ぐ。BatchCli の最終防波堤ハンドラでのみ適用されて
      * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
+     *
+     * <p>整形は行の構造を残す {@link SafeText#multiLine(String)} で行い、1 行へは潰さない。
+     * 潰すと SnakeYAML の構文エラーが壊れる — あの診断は該当行を引用して桁位置を
+     * {@code ^} で指す形をしており、1 行にすると {@code ^} が何も指さなくなる。
+     * バッチ定義ファイルの構文エラーはこのツールでもっとも普通に踏むエラーで、
+     * {@code ValidateCommand} と {@code RunCommand} の設定読み込みはどちらもこの
+     * メソッドの返り値をそのまま印字する。制御文字の除去は
+     * {@link SafeText#oneLine(String)} と同等なので、注入に対する強度は変わらない
+     * （残すのは改行とタブだけ）。
+     *
+     * <p>1 行に揃えたい呼び出し元（表のセル・原因を併記する
+     * {@link #safeMessageWithCause(Throwable)}）は、返り値をさらに
+     * {@link #sanitizeOneLine(String)} へ通す。
      */
     static String safeMessage(Throwable t) {
         // メッセージを整形する。例外のメッセージには外部由来の値が入りうる
@@ -130,7 +143,7 @@ final class CliFormat {
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        String message = sanitizeOneLine(t.getMessage());
+        String message = SafeText.multiLine(t.getMessage());
         // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
         // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
         // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
@@ -151,8 +164,13 @@ final class CliFormat {
      * バッチ全体の再実行へ誘導してしまう。スタックトレースは出さない（§9）。
      */
     static String safeMessageWithCause(Throwable t) {
-        // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める
-        String head = safeMessage(t);
+        // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める。
+        // safeMessage は行の構造を残して返すので、ここで 1 行へ揃え直す。
+        // このメソッドは「原因を ( ) で連ねた 1 行」を約束しており、複数行のまま
+        // 先頭に置くと、続く「 (原因)」が最終行の末尾へぶら下がって読めなくなる。
+        // 下の appendDetail が head と突き合わせて重複を抑えるのも、両方が同じ
+        // 1 行の形になっていて初めて成立する
+        String head = sanitizeOneLine(safeMessage(t));
         StringBuilder rendered = new StringBuilder(head);
         // 外側に添えられた診断（addSuppressed）も併記する
         appendSuppressed(rendered, head, t);
@@ -330,13 +348,12 @@ final class CliFormat {
     /**
      * 端末へ出す文字列を 1 行へ整形し、制御文字を取り除く。
      *
-     * <p>順序が肝で、必ず「空白の圧縮 → 制御文字の除去」で行う。逆にすると改行・タブは
-     * {@code \p{Cntrl}} に含まれるため「削除」され、前後の単語が
-     * {@code "line onefile not found"} のように繋がって別語へ化ける。
+     * <p>整形の規則と、その順序が肝である理由は {@link SafeText#oneLine(String)} が持つ。
+     * ここに書き写さないのは、説明が 2 か所に分かれると実装と食い違ったまま片方だけが
+     * 残りうるため（§6 DRY）。この薄いラッパーは、{@code cli} 側の呼び出し元が
+     * {@code CliFormat} の名前空間だけを見ていれば済むようにするためだけに置いている。
      *
-     * <p>この 2 手をメソッドに切り出しているのは、順序の不変条件を 1 か所へ集めるため
-     * （§6 DRY）。両方の呼び出し元に書き写すと、片方だけ順序を入れ替えても
-     * もう片方のテストが緑のまま通ってしまう。
+     * @see SafeText#oneLine(String)
      */
     static String sanitizeOneLine(String text) {
         // 実装は text パッケージの共有ユーティリティへ委譲する。state パッケージの

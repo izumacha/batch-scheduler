@@ -92,7 +92,9 @@ public final class BatchCli implements Callable<Integer> {
             // 表示されて診断価値が無いため、その場合は例外クラス名を代わりに表示する
             // （このフォールバックは CliFormat.safeMessage に共通化されている。§6 DRY）
             String message = CliFormat.safeMessage(ex);
-            // 1 行のサニタイズ済みメッセージだけを標準エラーへ出力する
+            // サニタイズ済みのメッセージだけを標準エラーへ出力する（スタックトレースは出さない）。
+            // safeMessage は行の構造を残すので、複数行の診断（YAML の構文エラーなど）は
+            // 複数行のまま出る。取り除かれるのは端末をあやつる制御文字だけ
             System.err.println("error: " + message);
             // 個々のコマンドが自前で catch していた場合と同じ EXIT_CONFIG を返す
             return EXIT_CONFIG;

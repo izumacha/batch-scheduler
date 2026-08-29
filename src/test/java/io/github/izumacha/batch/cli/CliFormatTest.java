@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 // 切り詰めマーカーが US-ASCII で符号化できるかを検査するために使う
 import java.nio.charset.StandardCharsets;
+
+import java.util.List;
 // 期間（Duration）を生成するために使う
 import java.time.Duration;
 // 時刻（Instant）を生成するために使う
@@ -162,6 +164,69 @@ class CliFormatTest {
         assertFalse(rendered.contains("\u0007"), rendered);
         // 診断に必要な文言そのものは残っている
         assertTrue(rendered.contains("different batch"), rendered);
+    }
+
+    /**
+     * safeMessage が行と桁の配置を保つことを確認する。
+     *
+     * <p>SnakeYAML の構文エラーは該当行を引用して桁位置を {@code ^} で指す形をしており、
+     * 1 行へ潰すと {@code ^} は何も指さなくなり引用行の字下げも消える。バッチ定義の
+     * 構文エラーはこのツールでもっとも普通に踏むエラーで、{@code ValidateCommand} と
+     * {@code RunCommand} の設定読み込みはどちらも safeMessage の返り値をそのまま印字する。
+     *
+     * <p>1 行へ潰す整形（{@code sanitizeOneLine}）へ戻す退行は、この検査だけが捕まえる。
+     * 他の safeMessage の検査は 1 行のメッセージしか渡しておらず、どちらの整形でも
+     * 同じ結果になるため緑のまま通る。
+     */
+    @Test
+    void safeMessage_keepsLineAndColumnLayoutOfMultiLineDiagnostics() {
+        // SnakeYAML の構文エラーと同じ形（引用行＋桁位置を指すキャレット）を組み立てる。
+        // 桁を数えやすいよう、キャレットは引用行の '[' の真下に置いてある
+        List<String> diagnostic = List.of(
+                "while parsing a flow sequence",
+                " in 'reader', line 4, column 14:",
+                "        command: [\"x\"",
+                "                 ^");
+        Exception e = new IllegalStateException(String.join("\n", diagnostic));
+        String rendered = CliFormat.safeMessage(e);
+        // 行も字下げも 1 文字たりとも変わっていない（1 行へ潰されていない）。
+        // 行数だけを数える検査では、字下げを落とす退行を見逃してしまう —
+        // キャレットが指す桁は字下げがあって初めて意味を持つ
+        assertEquals(diagnostic, rendered.lines().toList(), rendered);
+        // キャレットが引用行の '[' と同じ桁に立っていることまで確認する
+        List<String> lines = rendered.lines().toList();
+        assertEquals(lines.get(2).indexOf('['), lines.get(3).indexOf('^'), rendered);
+    }
+
+    /**
+     * 行を残す整形でも、端末をあやつる制御文字は取り除かれることを確認する。
+     * 残してよいのは改行とタブだけで、この 2 つは行を進める・タブ位置へ動かすしか
+     * できない。CR を残すと行頭へ戻って直前の行を上書きできてしまうため、改行の
+     * 綴りを LF へ揃える段で潰しておく必要がある。
+     */
+    @Test
+    void safeMessage_multiLineStillStripsInjectionAndNormalizesCarriageReturns() {
+        // 複数行の中に ESC・BEL・CR・bidi 制御を混ぜたメッセージを作る
+        Exception e = new IllegalStateException(
+                "line one\r\nline \u001b]0;pwned\u0007two\rOVERWRITE\n\u202Eline three");
+        String rendered = CliFormat.safeMessage(e);
+        // 端末をあやつる文字は残っていない（CR は LF へ揃えられ、単独では残らない）
+        assertFalse(rendered.contains("\u001b"), rendered);
+        assertFalse(rendered.contains("\u0007"), rendered);
+        assertFalse(rendered.contains("\r"), rendered);
+        assertFalse(rendered.contains("\u202E"), rendered);
+        // CRLF・CR・LF がどれも 1 つの行区切りとして扱われ、4 行になる。
+        // とくに単独の CR は「行頭へ戻って直前の行を上書きする」乗っ取りに使えるので、
+        // 素通しせず行区切りへ揃えることが要点
+        List<String> lines = rendered.lines().toList();
+        assertEquals(4, lines.size(), rendered);
+        assertEquals("line one", lines.get(0), rendered);
+        assertEquals("OVERWRITE", lines.get(2), rendered);
+        assertEquals("line three", lines.get(3), rendered);
+        // ESC を抜いた後に残る OSC のペイロード文字は、ただの文字列として残る。
+        // 端末を操作する力はもう無いので消さない（消すと正当な本文まで削りかねない）。
+        // ここを「消える」と書くと、実装が変わっていないのに検査だけが嘘をつく
+        assertEquals("line ]0;pwnedtwo", lines.get(1), rendered);
     }
 
     /**
@@ -325,7 +390,7 @@ class CliFormatTest {
     @Test
     void safeMessageWithCause_collapsesUnicodeLineSeparatorsToo() {
         // \s に含まれない改行（NEL・行区切り・段落区切り）を挟んだメッセージを作る
-        Exception cause = new java.io.IOException("line oneline two line three end");
+        Exception cause = new java.io.IOException("line one\u0085line two\u2028line three\u2029end");
         Exception outer = new java.io.UncheckedIOException(
                 "failed to save execution result", (java.io.IOException) cause);
         String rendered = CliFormat.safeMessageWithCause(outer);
