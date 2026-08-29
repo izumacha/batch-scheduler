@@ -243,11 +243,15 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 改名する前に中身をディスクへ確定させる。改名と中身は別々に書き戻されるため、
                 // ここを飛ばすと「改名だけ残って中身が空・破損」という状態で電源断を迎えうる
                 // （その記録は tryRead に読み飛ばされ、実行そのものが無かったことになる）。
-                // この 1 段階だけは失敗を握り潰さない。まだ公開していないので、下の finally が
-                // 一時ファイルを消して保存は失敗として報告される。遅延割り当てのもとでは
-                // fsync が ENOSPC / EIO を返してダーティページが捨てられうるため、
+                // この段階は「書き戻しに失敗したら」握り潰さない。まだ公開していないので、
+                // 下の finally が一時ファイルを消して保存は失敗として報告される。遅延割り当ての
+                // もとでは fsync が ENOSPC / EIO を返してダーティページが捨てられうるため、
                 // ここで握り潰して改名まで進むと「空の記録を公開して成功と報告する」
-                // という、この仕組みが防ごうとしている失敗そのものを作ってしまう
+                // という、この仕組みが防ごうとしている失敗そのものを作ってしまう。
+                // 一方、開けなかっただけ（他プロセスが掴んでいる等）なら警告に留めて先へ進む。
+                // バイト列は既に書かれて閉じられており、開き直せないことは中身の良し悪しを
+                // 何も語らないため。この 2 分岐の判断は Durability.sync が持つ（同クラスの
+                // Javadoc と docs/DESIGN.md の「Record durability」が正本）
                 durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
                 publishedWithoutAtomicity = publishRecord(tmp, target);
@@ -266,7 +270,11 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // SecurityException や、既定以外のファイルシステムプロバイダが投げる
                     // UnsupportedOperationException のように IOException でない失敗を
                     // 出しうる。それが finally から抜けると、この try/finally が守るはずの
-                    // 「進行中の例外を差し替えない」という約束を型の隙間から破ってしまう
+                    // 「進行中の例外を差し替えない」という約束を型の隙間から破ってしまう。
+                    // なおこの分岐は外側からのテストで踏めない。削除を失敗させるには
+                    // 含む側のディレクトリを書けなくする必要があるが、そうすると同じ
+                    // ディレクトリへの一時ファイルの作成が先に失敗してここまで来ない
+                    // （seam を足すために本番へ注入点を作るのは割に合わないと判断した）
                     LOGGER.warning("failed to remove the temporary file '" + tmp + "': "
                             + cleanupFailed + "; it will be left behind in the state directory");
                 }

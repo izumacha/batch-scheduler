@@ -30,8 +30,9 @@ The code is organized into five packages, each with a single responsibility:
   exception types (`ConfigException`, `ValidationException`).
 - `core` — structural validation and the dependency DAG (`DependencyGraph`) plus
   the execution engine (`BatchExecutor`).
-- `state` — persistence of run reports (`ExecutionStore` and its
-  `JsonExecutionStore` implementation).
+- `state` — persistence of run reports (`ExecutionStore`, its
+  `JsonExecutionStore` implementation, and `Durability`, which owns every
+  `fsync` on the write path — see "Record durability" below).
 - `cli` — the picocli-based command-line interface (`Main`, `BatchCli`, and the
   `run` / `validate` / `list` sub-commands).
 
