@@ -643,10 +643,14 @@ public final class JsonExecutionStore implements ExecutionStore {
                     "refusing to use a symlinked state directory: " + baseDir));
             try {
                 Files.deleteIfExists(target);
-            } catch (IOException cleanupFailed) {
+            } catch (IOException | RuntimeException cleanupFailed) {
                 // 差し替え先は攻撃者の持ち物になりうるので、削除に失敗することは十分あり得る。
                 // その場合でも拒否そのものは必ず伝える。削除の失敗で置き換わってしまうと、
-                // 「state ディレクトリが差し替えられた」という唯一の合図が消える
+                // 「state ディレクトリが差し替えられた」という唯一の合図が消える。
+                // 非検査例外まで受けるのは save() の一時ファイル削除と同じ理由で、
+                // deleteIfExists は SecurityManager 下の SecurityException や既定以外の
+                // プロバイダの UnsupportedOperationException など IOException でない
+                // 失敗を出しうるため（型の隙間から合図が消えるのを塞ぐ）
                 rejection.addSuppressed(cleanupFailed);
             }
             throw rejection;

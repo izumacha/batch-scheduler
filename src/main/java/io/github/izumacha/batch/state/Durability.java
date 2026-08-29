@@ -221,9 +221,16 @@ final class Durability {
      * {@code open}/{@code close} pair and syncs exactly the same file.
      *
      * <p>What propagates is only a failure of the <em>flush</em>. A failure to
-     * <em>open</em> -- and any unchecked failure -- means the sync could not be
-     * attempted rather than that a write was lost, so it warns even for a step
-     * whose flush failure would fail the save. The record's bytes were written
+     * <em>open</em> -- including an unchecked one, which {@link #flush} wraps as
+     * {@link OpenFailure} so it lands on the same side -- means the sync could
+     * not be attempted rather than that a write was lost, so it warns even for
+     * a step whose flush failure would fail the save. The mirror image also
+     * holds: an unchecked failure raised by {@code force}/{@code close} did
+     * reach the flush, so it follows the flush rule and fails a record-content
+     * step. The distinction is which half failed, never checked versus
+     * unchecked -- routing on the exception's type instead would let a provider
+     * that throws unchecked from {@code force} publish bytes that never reached
+     * the disk and still report success. The record's bytes were written
      * and the stream closed before this ran; being unable to reopen the file
      * (an antivirus or indexer holding it with a restrictive share mode on
      * Windows, a provider that rejects the option, a security manager) says

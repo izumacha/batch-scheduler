@@ -321,11 +321,12 @@ malicious resource exhaustion and against tampering with the state directory:
   steps propagate, `save()` wraps the error as it already does for any other
   write failure, and `RunCommand` reports it (its handler already names a full
   disk as the expected cause). What propagates is only a failure of the
-  *flush*: a failure to *open* — like any unchecked failure — means the sync
-  could not be attempted rather than that a write was lost, and the bytes were
-  written and the stream closed before it ran, so it warns even on a
-  record-content step. Failing a save because an antivirus held the file open
-  would be the same inversion in the other direction. That rule covers the non-atomic fallback too (which, on the default
+  *flush*: a failure to *open* — including an unchecked one, which is wrapped
+  so that it lands on the same side — means the sync could not be attempted
+  rather than that a write was lost, and the bytes were written and the stream
+  closed before it ran, so it warns even on a record-content step. Failing a
+  save because an antivirus held the file open would be the same inversion in
+  the other direction. That rule covers the non-atomic fallback too (which, on the default
   filesystem provider, `save()` cannot currently reach: the temp file and the
   target sit in the same directory, so `rename()` never fails with `EXDEV` and
   `ATOMIC_MOVE` therefore never degrades. The fallback branch predates this
@@ -346,9 +347,15 @@ malicious resource exhaustion and against tampering with the state directory:
   the on-disk copy is not — and a conservative "could not confirm this was
   saved" is recoverable, whereas a false success is not. Deleting the published
   record instead would be worse: the move already overwrote whatever held that
-  name, so removing it loses both copies. Only an *unchecked* failure stays
-  best-effort everywhere, because that means the sync could not be attempted
-  at all rather than that a write was lost. The accepted cost of that rule is
+  name, so removing it loses both copies. The split is by *which half failed*,
+  never by checked versus unchecked: an unchecked failure raised while opening
+  is wrapped and stays best-effort, but one raised by `force`/`close` reached
+  the flush and fails a record-content step like any other flush error.
+  Routing on the exception's type instead would let a provider that throws
+  unchecked from `force` publish bytes that never reached the disk and still
+  report success — the very inversion this section exists to prevent, which is
+  why `sync` handles both kinds in a single `catch` rather than two.
+  The accepted cost of the rule is
   a state directory on a mount whose `fsync(2)` is not implemented for regular
   files (some `vboxsf`/9p/FUSE setups return `EINVAL`/`ENOSYS` there): every
   `run` will report a persistence failure rather than silently accept writes it
