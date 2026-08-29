@@ -213,8 +213,31 @@ class CliFormatTest {
         // 打ち切った事実が出力に含まれる
         String rendered = CliFormat.safeMessageWithCause(current);
         assertTrue(rendered.contains("further causes omitted"), rendered);
-        // 一番深い原因は出ていない（＝実際に打ち切られている）
-        assertFalse(rendered.contains("root"), rendered);
+        // 中間の包みは省かれている（＝実際に打ち切られている）
+        assertFalse(rendered.contains("layer1,"), rendered);
+        assertFalse(rendered.contains("layer0)"), rendered);
+        // それでも根元だけは印つきで載る。印だけ付けて終えると「打ち切ったことは
+        // 分かるが理由は分からない」になり、このメソッドの存在意義が消える
+        assertTrue(rendered.contains("root cause: java.lang.IllegalStateException: root"),
+                rendered);
+    }
+
+    /** 循環した原因の連鎖でも、根元の探索が止まって戻ってくることを確認する */
+    @Test
+    void safeMessageWithCause_terminatesOnACyclicCauseChain() {
+        // getCause() が自分自身へ戻る連鎖を用意する（壊れた例外実装の模擬）
+        Throwable[] holder = new Throwable[1];
+        Throwable cyclic = new IllegalStateException("cyclic") {
+            @Override
+            public synchronized Throwable getCause() {
+                // 常に次の要素を返し続けることで無限の連鎖に見せる
+                return holder[0];
+            }
+        };
+        holder[0] = cyclic;
+        // 上限で必ず止まるので、呼び出しは有限時間で戻る
+        String rendered = CliFormat.safeMessageWithCause(cyclic);
+        assertTrue(rendered.contains("further causes omitted"), rendered);
     }
 
     /**

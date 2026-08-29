@@ -16,6 +16,12 @@ final class CliFormat {
     /** 原因の連鎖をたどる上限段数（循環していても止まるようにするための歯止め）。 */
     private static final int MAX_CAUSE_DEPTH = 5;
 
+    /**
+     * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
+     * 出力量は増えず、循環した連鎖でも必ず止まる。
+     */
+    private static final int MAX_ROOT_SEARCH_DEPTH = 100;
+
     // タイムスタンプのフォーマッタ（システムのデフォルトタイムゾーンで「yyyy-MM-dd HH:mm:ss」形式）
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
@@ -167,10 +173,21 @@ final class CliFormat {
             // 次の段（さらに内側の原因）へ進む
             cause = cause.getCause();
         }
-        // 上限で打ち切った場合は、その事実を残す。黙って落とすと、このメソッドが直した
-        // はずの「根本原因が消えているのに、消えたことも分からない」状態に戻ってしまう
+        // 上限で打ち切った場合は、その事実を残したうえで根元だけは必ず載せる。
+        // 印だけ付けて終えると「打ち切ったことは分かるが理由は分からない」になり、
+        // このメソッドが直したはずの状態と実質同じところへ戻ってしまう。中間の
+        // 包み（BatchExecutionException → RuntimeException → …）は文脈を足すだけで
+        // 対処に必要な情報を持たないことが多く、operator が読みたいのは根元の
+        // IOException なので、間を省いてでもそこは見せる
         if (cause != null) {
             rendered.append(" (...further causes omitted)");
+            // 根元まで下りる。循環していても止まるよう、こちらにも歩数の上限を置く
+            Throwable root = cause;
+            for (int steps = 0; root.getCause() != null && steps < MAX_ROOT_SEARCH_DEPTH; steps++) {
+                root = root.getCause();
+            }
+            // 見つけた根元を「根本原因」と分かる印つきで併記する
+            appendDetail(rendered, emitted, "root cause: " + root);
         }
         // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が

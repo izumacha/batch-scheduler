@@ -313,7 +313,10 @@ malicious resource exhaustion and against tampering with the state directory:
   reached the attacker-controlled directory. Withholding the content flush
   would not change that (the bytes are written either way, flushed or not);
   what the check does about it is unlink the misdirected file via
-  `Files.deleteIfExists(target)` and reject the save. Note also that the
+  `deleteQuietly(target)` — a small helper that returns the cleanup failure
+  instead of throwing it, so an unlink the attacker's directory refuses is
+  attached with `addSuppressed` rather than replacing the rejection itself —
+  and reject the save. Note also that the
   non-atomic `Files.move` fallback re-syncs the *destination* rather than
   relying on the earlier sync of the temp file: that fallback may internally
   copy-and-delete, in which case the synced temp file is unlinked and the

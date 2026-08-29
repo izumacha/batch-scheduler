@@ -416,6 +416,8 @@ final class Durability {
      * that were never made.
      */
     private void syncCreatedLevels(List<Path> created) throws IOException {
+        // 確定できなかった階層の数を数える（警告予算との噛み合わせを説明するため）
+        int unconfirmed = 0;
         // 浅い方から順に、その階層を含むディレクトリを同期して存在を確定させる
         for (Path level : created) {
             // createDirectories は浅い方から作るので、無い階層に当たったらそこから先も無い
@@ -426,8 +428,22 @@ final class Durability {
             Path container = directoryHolding(level);
             if (container != null) {
                 // 含む側を同期して、その中の level というエントリを確定させる
-                sync(container, Step.BASE_DIRECTORY);
+                if (!sync(container, Step.BASE_DIRECTORY)) {
+                    // 確定できなかった階層を数えておく
+                    unconfirmed++;
+                }
             }
+        }
+        // 予算は段階につき 1 回なので、複数の階層が同じ理由で失敗しても警告は 1 本しか
+        // 出ず、しかもその 1 本は 1 つのパスしか名指ししない。読んだ運用者が
+        // 「危ないのはその階層だけ」と受け取らないよう、件数だけは必ず残す。
+        // 予算そのものを階層ごとにしないのは、深い --state-dir を一度作るだけで
+        // 何本も同じ警告が出て、段階ごとに 1 回という設計の意図が崩れるため
+        if (unconfirmed > 1) {
+            // 実効値をラムダの外へ写す（ラムダは実質 final な変数しか捕まえられない）
+            int total = unconfirmed;
+            LOGGER.warning(() -> total + " directory levels created for the state directory "
+                    + "could not be confirmed durable; the warning above names only the first");
         }
     }
 

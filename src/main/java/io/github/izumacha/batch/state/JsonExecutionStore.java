@@ -550,7 +550,14 @@ public final class JsonExecutionStore implements ExecutionStore {
                     StandardCopyOption.ATOMIC_MOVE);
             // 成功したので、移動先は一時ファイルと同じ実体＝同期済み
             return false;
-        } catch (IOException atomicFailed) {
+        } catch (IOException | RuntimeException atomicFailed) {
+            // 非検査例外も受ける。Files.move は対応していないオプションに対して
+            // AtomicMoveNotSupportedException（検査）だけでなく
+            // UnsupportedOperationException（非検査）を投げると規定されており、
+            // どちらを選ぶかはプロバイダ次第。検査例外だけを受けると、そのプロバイダでは
+            // フォールバックが丸ごと飛ばされ、save() の catch も素通りして記録が
+            // 破棄される — フォールバックが存在する理由そのものの環境で、である。
+            // Durability.sync が 2 種類を 1 つの catch にまとめているのと同じ判断
             try {
                 // アトミック移動に対応していないファイルシステムでは通常の移動にフォールバックする
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
