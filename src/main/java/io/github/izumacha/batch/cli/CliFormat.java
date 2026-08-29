@@ -45,11 +45,15 @@ final class CliFormat {
 
     // 1 行へ圧縮するときに「区切り」として扱う空白の集合（§6: 意図のある値は名前付き定数に置く）。
     // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
-    // 含まない。一方 CONTROL_CHARS_PATTERN は U+0080〜U+009F と \p{Cf} でそれらを拾って
-    // 「削除」するため、この 3 文字だけが圧縮ではなく除去に回り、前後の単語が
-    // "line onefile not found" のように繋がってしまう。外部由来の文字列（OS のエラー文や
-    // 非 UTF-8 ロケールのデコード結果）は実際にこれらを含みうるので、区切りとして
-    // 扱う側へ明示的に足しておく
+    // 含まない。3 文字とも、圧縮側に足す前は別々の壊れ方をしていた:
+    //   - U+0085 (NEL) は CONTROL_CHARS_PATTERN の \u0080〜\u009F に当たるため「削除」され、
+    //     前後の単語が "line onefile not found" のように繋がって別語へ化けていた。
+    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも \u0080〜\u009F にも
+    //     \p{Cf} にも当たらない。つまり圧縮も除去もされず、生の行区切りとして端末へ届き、
+    //     1 記録 1 行という表の前提を壊していた。
+    // 外部由来の文字列（OS のエラー文・非 UTF-8 ロケールのデコード結果・改変された
+    // state ファイル）は実際にこれらを含みうるので、区切りとして扱う側へ明示的に足す。
+    // ここから外すと、CONTROL_CHARS_PATTERN は Zl/Zp を拾わないので後者は素通りに戻る
     private static final Pattern WHITESPACE_PATTERN =
             Pattern.compile("[\\s\\u0085\\u2028\\u2029]+");
 
@@ -274,6 +278,15 @@ final class CliFormat {
      * 実行と見分けが付かなくなる。運用者はそれを {@code --rerun-failed null} に
      * 貼って「見つからない」に行き当たる。「値が無い」ことを表す表記は
      * このクラスで 1 つに揃える（§6 一元管理）。
+     *
+     * <p>ただし曖昧さが完全に消えるわけではない: {@code "-"} 自体も
+     * {@code fileFor} を通る正当な runId なので、{@code -.json} という記録が
+     * あれば同じ見た目になる。それでもこの置き換えに意味があるのは、
+     * (1) 「値が無い」を表す表記が {@link #instant(Instant)} /
+     * {@link #duration(Duration)} と揃い、列をまたいで一貫した読み方ができること、
+     * (2) 実際に起こりうるのは「runId を欠いた壊れた記録」の方であり、
+     * {@code -.json} という記録が作られることは（生成される runId の形式が
+     * {@code yyyyMMdd-HHmmss-XXXXXX} である以上）まず無いこと、の 2 点による。
      *
      * <p>値がある場合は他の列と同じ {@link #sanitizeOneLine(String)} を通す。
      * runId は state ファイル由来の信頼できない値で、切り詰めはしない。

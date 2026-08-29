@@ -287,6 +287,38 @@ class RunCommandTest {
         assertFalse(outcome.stderr().contains("IllegalArgumentException"), outcome.stderr());
     }
 
+    /**
+     * セキュリティ回帰テスト: --rerun-failed の runId に含まれる端末制御文字が、
+     * エラー行に生のまま出ないことを確認する。
+     *
+     * <p>runId は `list` 経由で state ファイルの値がそのまま渡ってくる想定
+     * （DESIGN.md は state ディレクトリを改変対象として扱う）。同じ行の
+     * safeMessage 側だけを整形しても、直接連結している側が生のままなら
+     * 「1 回は無害化され、1 回は素通り」で注入が成立してしまう。
+     */
+    @Test
+    void rerunFailedSanitizesTheRunIdItEchoesBack(@TempDir Path dir) throws IOException {
+        Path config = dir.resolve("batch.yaml");
+        Files.writeString(config, """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        Path stateDir = dir.resolve("state");
+        // 端末制御文字（ESC・BEL）を含む runId を渡す（記録は存在しない）
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(),
+                "--rerun-failed", "missing\u001b]0;pwned\u0007id", "-q");
+
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        // 「見つからない」のエラーは出る
+        assertTrue(outcome.stderr().contains("no prior run found"), outcome.stderr());
+        // ただし生の ESC / BEL は端末へ届かない
+        assertFalse(outcome.stderr().contains("\u001b"), outcome.stderr());
+        assertFalse(outcome.stderr().contains("\u0007"), outcome.stderr());
+    }
+
     @Test
     void rerunFailedRejectsRunIdFromADifferentBatchName(@TempDir Path dir) throws IOException {
         // 「other」という名前のバッチを一度実行して記録を作る。

@@ -74,7 +74,12 @@ import java.util.logging.Logger;
  * logs alone, therefore, a {@link Step#RECORD_CONTENT} record that is neither
  * {@code FINE} nor {@code WARNING} is one whose flush failed and failed the
  * save -- the absence is the signal, not evidence that the flush was fine.
- * That inference needs one precondition: the store performed a single save.
+ * That inference needs two preconditions. First, the save actually reached the
+ * flush: {@code save} serializes the record with Jackson <em>before</em> calling
+ * {@code sync}, so an {@code ENOSPC} or a serialization failure there throws
+ * without this class ever running, and the same silence then means "never
+ * written" rather than "written but not flushed" -- opposite conclusions about
+ * where to look. Second, the store performed a single save.
  * The warning budget is per store, so if a caller reuses one
  * {@link JsonExecutionStore} across saves, the second and later degraded
  * flushes emit neither record -- the warning was already spent -- and their
