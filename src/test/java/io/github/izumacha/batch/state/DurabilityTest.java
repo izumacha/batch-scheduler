@@ -625,6 +625,30 @@ class DurabilityTest {
     }
 
     @Test
+    void aSymlinkPointingAtAFifoIsRefusedOnADirectoryStep(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        // FIFO と、それを指すシンボリックリンクを用意する
+        Path fifo = dir.resolve("real.fifo");
+        Process mkfifo = new ProcessBuilder("mkfifo", fifo.toString())
+                .redirectErrorStream(true).start();
+        assumeTrue(mkfifo.waitFor() == 0, "mkfifo が使えないので FIFO を用意できない");
+        Path link = dir.resolve("link");
+        try {
+            Files.createSymbolicLink(link, fifo);
+        } catch (UnsupportedOperationException | IOException e) {
+            assumeTrue(false, "この環境ではシンボリックリンクを作成できない");
+            return;
+        }
+        // ディレクトリの段階は追従して開くため、種別の判定も追従して行わないと
+        // リンク自体は「その他」に見えず素通しし、open で無期限にぶら下がる。
+        // 固まればテストはタイムアウトで落ちる（＝回帰を検出できる）
+        assertDoesNotThrow(() -> durability.sync(link, Durability.Step.RECORD_RENAME));
+        // 握り潰しではなく警告として残る
+        assertEquals(1, warnings().size(), warnings().toString());
+        assertTrue(warnings().get(0).contains("pipe, socket, or device"), warnings().get(0));
+    }
+
+    @Test
     void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
         // 「書き戻しまで到達したか」の 2 通りを用意する（false=開けなかった / true=書き戻しで失敗）
         boolean openFailed = false;

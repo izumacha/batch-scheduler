@@ -264,6 +264,14 @@ final class CliFormat {
      * もう片方のテストが緑のまま通ってしまう。
      */
     static String sanitizeOneLine(String text) {
+        // null はそのまま返す（stripControlChars と同じ null 扱いに揃える）。
+        // ここを落とすと、runId を欠いた state ファイル 1 件で list の描画ループが
+        // NPE で止まり、残りの正常な記録まで表示されなくなる — このクラスが
+        // instant / duration で守っている「壊れた 1 件で一覧を巻き込まない」
+        // fail-safe（§9）と正反対になる
+        if (text == null) {
+            return null;
+        }
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
         String oneLine = text.replaceAll(WHITESPACE_PATTERN, " ").trim();
         // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ

@@ -233,4 +233,36 @@ class ListCommandTest {
         assertTrue(out.contains("run1 bbb"), out);
         assertFalse(out.contains("run1bbb"), out);
     }
+
+    /**
+     * 回帰テスト: runId を欠いた state ファイルがあっても、一覧の描画が止まらないこと。
+     *
+     * <p>表示用の整形から null 安全性が落ちると、壊れた 1 件で描画ループが NPE で
+     * 中断し、残りの正常な記録まで表示されなくなる。「読めないファイルは読み飛ばす」
+     * という本クラスの fail-safe 契約（§9）に真っ向から反する。
+     */
+    @Test
+    void listKeepsGoingWhenARecordHasNoRunId(@TempDir Path stateDir) throws Exception {
+        // runId フィールドを持たない記録を直接置く（保存経路では作れない形）
+        String json = """
+                {
+                  "batchName" : "etl",
+                  "status" : "SUCCEEDED",
+                  "startedAt" : "2026-01-03T03:04:05Z",
+                  "finishedAt" : "2026-01-03T03:04:06Z",
+                  "jobResults" : [ ]
+                }
+                """;
+        java.nio.file.Files.createDirectories(stateDir);
+        // 壊れた記録が「先に」描画されるよう、開始時刻を新しくしておく。後ろに置くと、
+        // 正常な行が既に出力された後で落ちてしまい、中断を検出できない
+        java.nio.file.Files.writeString(stateDir.resolve("zz-broken.json"), json);
+        // 正常な記録も 1 件置き、そちらが表示され続けることを確かめる
+        seed(stateDir, "healthy-run", Instant.parse("2026-01-02T03:04:05Z"));
+        String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
+        // 壊れた 1 件で中断せず、正常な記録は表示される
+        assertTrue(out.contains("healthy-run"), out);
+        // 例外がそのまま漏れていない
+        assertFalse(out.contains("Cannot invoke"), out);
+    }
 }

@@ -309,9 +309,15 @@ final class Durability {
             return false;
         }
         // ここまで来たら open も force も close も通っている。完了ログを try の外へ
-        // 出しているのは、ログの失敗を同期の失敗として扱わないため。中に置くと、
-        // ログハンドラが投げただけで「バイト列がディスクに届いていないかもしれない」と
-        // いう警告が出て、実際には確定している保存が失敗として報告されうる。
+        // 出しているのは、ログの失敗を「同期の失敗」として分類しないため。中に置くと、
+        // ログハンドラが投げただけで describeFailure が選ばれ、「バイト列がディスクに
+        // 届いていないかもしれない」という誤った警告が出たうえ、その段階の
+        // 「1 回だけ」の警告枠まで消費してしまう。
+        // ただし外へ出しても、投げるハンドラが刺さっていれば例外はここから抜け、
+        // 確定済みの保存が失敗として報告される点は変わらない（java.util.logging は
+        // publish() の例外を遮らない）。握り潰す catch を置けば防げるが、
+        // それは §6 の「エラーを握り潰さない」に反するうえ、投げる Handler は
+        // 組み込み側の設定ミスであって、この層が隠すべきものではないと判断した。
         // close() の後なのは、NFS などで書き込みエラーが遅れて close() で報告されるため。
         // fsync は成功しても痕跡を残さないので、このログが「どこまで確定したか」を
         // 後から追える唯一の手がかりになる。Supplier 版なので FINE が無効なときは
@@ -558,8 +564,16 @@ final class Durability {
             // 読めなければ判定はあきらめ、open が本当の理由を出すのに任せる
             BasicFileAttributes attributes = null;
             try {
-                attributes = Files.readAttributes(
-                        path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                // リンクの扱いは、その段階の open と必ず同じにする。ディレクトリ側は
+                // 追従して開く（/var/run→/run のような正当なリンクを経路に含みうる）ので
+                // 追従して stat する。NOFOLLOW で見ると、リンク自体は isOther() が偽に
+                // なるため、FIFO を指すリンクを素通しして open で固まってしまう。
+                // 通常ファイル側は NOFOLLOW で開くので NOFOLLOW で見る
+                // （リンクなら open が ELOOP で落ちる＝本当の理由が報告される）
+                LinkOption[] linkOptions = directory
+                        ? new LinkOption[0]
+                        : new LinkOption[] {LinkOption.NOFOLLOW_LINKS};
+                attributes = Files.readAttributes(path, BasicFileAttributes.class, linkOptions);
             } catch (IOException | RuntimeException statFailed) {
                 // 種別が分からないだけ。attributes は代入が完了していないので null のまま。
                 // ここで拒否せず、下の open に本当の失敗（NoSuchFile / AccessDenied 等）を
