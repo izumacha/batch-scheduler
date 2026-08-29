@@ -251,21 +251,21 @@ public final class JsonExecutionStore implements ExecutionStore {
                 durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
                 publishedWithoutAtomicity = publishRecord(tmp, target);
-            } catch (IOException failed) {
-                // 後始末が失敗しても、進行中の失敗を差し替えない。ここを finally に
-                // すると、たとえばディスク満杯（同期が投げた ENOSPC）が、直後の削除失敗
-                // （親ディレクトリの消失など）に置き換わり、このクラスが伝えるべき
-                // ただ一つの診断が捨てられる。commitPublishedRecord と同じ形に揃える
+            } finally {
+                // 何があっても一時ファイルを削除してゴミファイルが残らないようにする。
+                // finally なのは、検査例外だけでなく非検査例外（Jackson のシリアライズ
+                // 失敗など）で抜けたときにも消えてほしいため。一方で、この削除自体が
+                // 失敗したときに進行中の失敗を差し替えてはいけない（ディスク満杯で
+                // 同期が投げた ENOSPC が、直後の削除失敗に置き換わると、このクラスが
+                // 伝えるべきただ一つの診断が捨てられる）ので、削除の失敗はここで
+                // 受け止めて警告に留める
                 try {
                     Files.deleteIfExists(tmp);
                 } catch (IOException cleanupFailed) {
-                    failed.addSuppressed(cleanupFailed);
+                    LOGGER.warning("failed to remove the temporary file '" + tmp + "': "
+                            + cleanupFailed + "; it will be left behind in the state directory");
                 }
-                throw failed;
             }
-            // 正常に公開できたので、残っていれば一時ファイルを片付ける
-            // （移動が成功していれば既に存在しないため、通常は何もしない）
-            Files.deleteIfExists(tmp);
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
@@ -553,9 +553,12 @@ public final class JsonExecutionStore implements ExecutionStore {
     void commitPublishedRecord(Path target, Path expectedRealBase, boolean publishedWithoutAtomicity)
             throws IOException {
         try {
-            // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
+            // コピー→削除で公開された場合だけ、移動先そのものを同期し直す。
+            // target ではなく検証済みの実体ディレクトリから組み立て直した経路を渡すのは、
+            // target が baseDir を途中に含んでおり、開き直す時点でもう一度たどることに
+            // なるため（改名の同期が expectedRealBase を使うのと同じ理由）
             if (publishedWithoutAtomicity) {
-                syncPublishedRecord(target);
+                syncPublishedRecord(expectedRealBase.resolve(target.getFileName()));
             }
         } catch (IOException publishFailed) {
             // 失敗しても改名だけは確定させる（上記 Javadoc 参照）

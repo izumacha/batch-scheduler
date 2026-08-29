@@ -254,11 +254,11 @@ final class Durability {
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
         } catch (RuntimeException e) {
-            // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）。
-            // 開く前に落ちているので、開けなかった場合と同じ文面を使う。文面の決定を
-            // ここで独自に持つと、通常ファイルの失敗まで「この環境の制約」と読める
-            // 文言になり、describeFailure が塞いでいるはずの取り違えが復活する
-            warnOnce(path, step, e, describeFailure(step, false));
+            // ここへ来るのは書き戻し（force / close）が非検査例外で落ちた場合だけ。
+            // 開く段階の失敗は種別によらず OpenFailure として上の分岐へ回っている。
+            // したがって「書き戻しまで到達した」として文面を選ぶ — false を渡すと、
+            // 本物の同期エラーを「この環境では開けない」と説明してしまう
+            warnOnce(path, step, e, describeFailure(step, true));
         }
     }
 
@@ -406,8 +406,13 @@ final class Durability {
         // 直列化 ID（例外クラスに付けるのが慣例。この例外を直列化する用途は無い）
         private static final long serialVersionUID = 1L;
 
-        OpenFailure(IOException cause) {
-            // 元の例外を原因として保持する（文面の組み立てで参照する）
+        OpenFailure(Throwable cause) {
+            // 元の例外を原因として保持する（文面の組み立てで参照する）。
+            // Throwable を受けるのは、開く段階の失敗が検査例外とは限らないため
+            // （プロバイダが未対応のオプションを拒む UnsupportedOperationException など）。
+            // ここで種別を揃えておかないと、呼び出し元は「開けなかった」のか
+            // 「開けたが書き戻しに失敗した」のかを見分けられず、本物のエラーを
+            // 環境の制約として説明してしまう
             super(cause);
         }
     }
@@ -448,8 +453,8 @@ final class Durability {
         FileChannel opened;
         try {
             opened = FileChannel.open(path, options);
-        } catch (IOException e) {
-            // 開けなかったことが呼び出し元に分かるよう包んで投げ直す
+        } catch (IOException | RuntimeException e) {
+            // 検査例外か否かによらず、開けなかったことが呼び出し元に分かるよう包んで投げ直す
             throw new OpenFailure(e);
         }
         // 開けたので、閉じる責任を持ちつつ書き戻しを要求する

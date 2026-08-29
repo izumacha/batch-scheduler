@@ -29,6 +29,7 @@ import java.util.logging.Logger;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -422,6 +423,50 @@ class DurabilityTest {
         // 「エントリは確定・中身は未確定」の記録が公開される
         store.commitPublishedRecord(target, dir, true);
         assertEquals(afterFallback, completedSteps());
+    }
+
+    @Test
+    void saveLeavesNoTemporaryFileBehindWhenPublishingFails(@TempDir Path dir) throws IOException {
+        // 記録の名前でディレクトリを作り、そこへの移動が必ず失敗する状況を用意する
+        // （移動は一時ファイルの作成と書き込みの後に来るので、後始末の経路を確実に通る）
+        Path blocked = dir.resolve("run1.json");
+        Files.createDirectories(blocked);
+        Files.writeString(blocked.resolve("occupant"), "x");
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+
+        // 保存は失敗する
+        assertThrows(RuntimeException.class, () -> store.save(sampleRun("run1")));
+
+        // 一時ファイルが残っていないことを確かめる。ここが崩れると、失敗のたびに
+        // run-*.tmp が状態ディレクトリへ積み上がり、誰も掃除も報告もしない
+        try (var entries = Files.list(dir)) {
+            assertEquals(List.of(), entries
+                    .map(p -> p.getFileName().toString())
+                    .filter(name -> name.endsWith(".tmp"))
+                    .toList());
+        }
+    }
+
+    @Test
+    void commitPublishedRecordReFlushesThroughTheVerifiedBaseNotTheOriginalPath(@TempDir Path dir)
+            throws IOException {
+        // ディレクトリを同期できない環境では完了ログが出ないので飛ばす
+        assumeTrue(directorySyncSupported(dir), "この環境ではディレクトリを同期できない");
+        // 検証済みの実体ディレクトリと、そこに実在する記録を用意する
+        Path verifiedBase = Files.createDirectories(dir.resolve("real"));
+        Path published = verifiedBase.resolve("run1.json");
+        Files.writeString(published, "{}");
+        // 呼び出し元が持っている target は baseDir 経由の経路（＝もう一度たどると
+        // 差し替え後のディレクトリを掴みうる）を模して、別の場所を指させる
+        Path viaBaseDir = dir.resolve("other").resolve("run1.json");
+
+        // 再同期は検証済みの実体パスから組み立て直した先に対して行われる
+        new JsonExecutionStore(dir).commitPublishedRecord(viaBaseDir, verifiedBase, true);
+
+        // 実在する published が同期されている（存在しない viaBaseDir を開こうとしていない）
+        assertEquals(List.of(published, verifiedBase), syncedPaths());
+        // 開けない経路を掴んでいれば警告が出るはずなので、出ていないことも確かめる
+        assertEquals(List.of(), warnings());
     }
 
     @Test
