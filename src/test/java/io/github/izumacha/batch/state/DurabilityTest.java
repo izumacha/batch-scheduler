@@ -399,6 +399,32 @@ class DurabilityTest {
     }
 
     @Test
+    void commitPublishedRecordReSyncsOnlyWhenTheMoveWasNotAtomic(@TempDir Path dir) throws IOException {
+        // 期待値は観測の前に組み立てる（判定そのものが本番の仕組みを呼んでログを出すため）
+        List<Durability.Step> afterAtomic = expectedSteps(dir, Durability.Step.RECORD_RENAME);
+        List<Durability.Step> afterFallback = expectedSteps(dir,
+                Durability.Step.PUBLISHED_RECORD_CONTENT,
+                Durability.Step.RECORD_RENAME);
+        // 公開済みの記録に見立てたファイルを用意する
+        Path target = dir.resolve("run1.json");
+        Files.writeString(target, "{}");
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+
+        // アトミック移動できた場合は、移動先は一時ファイルと同じ実体なので再同期しない。
+        // 確定するのは改名だけ
+        store.commitPublishedRecord(target, dir, false);
+        assertEquals(afterAtomic, completedSteps());
+
+        // 記録を消して次の観測に備える
+        records.clear();
+        // コピー→削除で公開された場合は、移動先を同期し直してから改名を確定させる。
+        // ここが繋がっていないと、アトミック移動を持たない配備でだけ
+        // 「エントリは確定・中身は未確定」の記録が公開される
+        store.commitPublishedRecord(target, dir, true);
+        assertEquals(afterFallback, completedSteps());
+    }
+
+    @Test
     void nonAtomicMoveFallbackSyncsTheDestinationNotJustTheTempFile(@TempDir Path dir) throws IOException {
         // 公開済みの記録に見立てたファイルを用意する
         Path target = dir.resolve("run1.json");

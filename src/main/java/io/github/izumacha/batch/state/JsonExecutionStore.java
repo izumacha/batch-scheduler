@@ -258,38 +258,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
-            // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる。
-            // 検証より前に確定させると、差し替えを検知して削除するはずの誤配置ファイルを
-            // 先に永続化してしまう。同期先に baseDir ではなく expectedRealBase を使うのは、
-            // 「target が確かにこの中にある」ことを直前の検証が示した実体パスだからで、
-            // ここで baseDir をもう一度たどると差し替え後のディレクトリを同期しかねない。
-            // なお、ここに到達する経路では移動が成功しているため直前の finally の
-            // deleteIfExists は何もしておらず、確定するのは改名 1 件だけである
-            // （一時ファイルが実際に残るのは移動が失敗した場合だが、そのときは
-            // IOException が伝播してこの行には来ない）
-            try {
-                // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
-                if (publishedWithoutAtomicity) {
-                    syncPublishedRecord(target);
-                }
-            } catch (IOException publishFailed) {
-                // 失敗しても改名だけは確定させる。その場合の報告は「記録は公開済みだが
-                // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく。
-                // finally ではなく catch で書いているのは、finally が例外を投げると
-                // 元の失敗が黙って差し替わるため。今はディレクトリ対象の同期が投げない
-                // ことで成り立っているが、その保証は別クラスの分類に依存していて
-                // ここからは見えない。取りこぼしても分かるよう addSuppressed に寄せる
-                try {
-                    durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
-                } catch (IOException renameFailed) {
-                    // 改名の確定にも失敗したら、運用者に伝えるべき主因は公開側なので添える
-                    publishFailed.addSuppressed(renameFailed);
-                }
-                // 公開側の失敗をそのまま伝える（案内の文面はこちらが持っている）
-                throw publishFailed;
-            }
-            // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる
-            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            // 検証を通ったので、公開後に残っている確定作業をまとめて行う
+            commitPublishedRecord(target, expectedRealBase, publishedWithoutAtomicity);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -540,6 +510,55 @@ public final class JsonExecutionStore implements ExecutionStore {
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
         }
+    }
+
+    /**
+     * Finishes the durability work that can only run once
+     * {@link #verifyWroteUnderExpectedBase} has accepted the write: re-flushing
+     * the record when the non-atomic fallback published it, and committing the
+     * rename.
+     *
+     * <p>The rename sync is deliberately last and deliberately reached on both
+     * paths. Committing it before the symlink check would persist a directory
+     * entry the check is about to reject; skipping it when the re-flush fails
+     * would leave the entry uncommitted for a record whose failure message
+     * tells the operator it may still be readable.
+     *
+     * <p>{@code expectedRealBase} rather than {@code baseDir} is synced because
+     * the check just established that {@code target} really is inside it;
+     * re-resolving {@code baseDir} could follow a directory swapped in since.
+     *
+     * <p>The rename sync sits in a {@code catch} rather than a {@code finally}
+     * because a {@code finally} that throws silently replaces the exception in
+     * flight. That cannot happen today -- {@link Durability.Step#RECORD_RENAME}
+     * is a directory step and directory steps never rethrow -- but that fact
+     * lives in another class, invisible from here, so the safety is made local.
+     *
+     * <p>Package-private so a test can pin the wiring: {@code save} cannot
+     * reach the fallback on the default provider (temp file and target share a
+     * directory, so {@code rename()} never reports {@code EXDEV}), which would
+     * otherwise leave "the flag actually turns the re-flush on" unverified.
+     */
+    void commitPublishedRecord(Path target, Path expectedRealBase, boolean publishedWithoutAtomicity)
+            throws IOException {
+        try {
+            // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
+            if (publishedWithoutAtomicity) {
+                syncPublishedRecord(target);
+            }
+        } catch (IOException publishFailed) {
+            // 失敗しても改名だけは確定させる（上記 Javadoc 参照）
+            try {
+                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            } catch (IOException renameFailed) {
+                // 改名の確定にも失敗したら、運用者に伝えるべき主因は公開側なので添える
+                publishFailed.addSuppressed(renameFailed);
+            }
+            // 公開側の失敗をそのまま伝える（案内の文面はこちらが持っている）
+            throw publishFailed;
+        }
+        // 改名（ディレクトリエントリ）をディスクへ確定させる
+        durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
     }
 
     /**

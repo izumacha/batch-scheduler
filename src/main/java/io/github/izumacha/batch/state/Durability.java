@@ -266,7 +266,7 @@ final class Durability {
      * <p>Two independent conditions, both of which must hold:
      *
      * <ul>
-     *   <li>The step flushes the record's own bytes ({@link Target#FILE}). A
+     *   <li>The step flushes the record's own bytes ({@link Step.Target#FILE}). A
      *       directory flush costs the entry rather than the bytes, and is the
      *       one that legitimately cannot run on some platforms.</li>
      *   <li>The failure came from the flush, not from the open. Being unable
@@ -327,22 +327,43 @@ final class Durability {
         try {
             // 実際にディレクトリ階層を作成する（既に存在する場合は何もしない）
             Files.createDirectories(dir);
-        } finally {
-            // 途中まで作って失敗した場合でも、作られた分は確定させる。ここを try の後ろに
-            // 置くと、作成できた浅い階層が同期されないまま例外が抜けていき、電源断で
-            // その階層ごと失われる（呼び出し元は次回作り直すので影響は小さいが、
-            // 「作った階層は確定させる」という約束は破らない）
-            for (Path level : missing) {
-                // createDirectories は浅い方から作るので、無い階層に当たったらそこから先も無い
-                if (!Files.exists(level)) {
-                    break;
-                }
-                // ファイルシステムのルートには含まれる側のディレクトリが無いので飛ばす
-                Path container = directoryHolding(level);
-                if (container != null) {
-                    // 含む側を同期して、その中の level というエントリを確定させる
-                    sync(container, Step.BASE_DIRECTORY);
-                }
+        } catch (IOException createFailed) {
+            // 途中まで作れていた分は確定させたうえで、作成の失敗をそのまま伝える。
+            // finally に置くと、同期が投げるようになった将来に作成の失敗が黙って
+            // 差し替わる（save 側と同じ理由で、安全性をこの場で読み取れる形にする）
+            try {
+                syncCreatedLevels(missing);
+            } catch (IOException syncFailed) {
+                // 同期側の失敗は主因ではないので添えるに留める
+                createFailed.addSuppressed(syncFailed);
+            }
+            throw createFailed;
+        }
+        // 作成に成功したので、作られた各階層の存在を確定させる
+        syncCreatedLevels(missing);
+    }
+
+    /**
+     * Syncs the directory that contains each level in {@code created},
+     * shallowest first, stopping at the first level that does not exist.
+     *
+     * <p>{@link Files#createDirectories} creates shallowest-first, so a level
+     * that is missing means everything below it is missing too -- which is how
+     * a partially-successful creation is handled without syncing directories
+     * that were never made.
+     */
+    private void syncCreatedLevels(List<Path> created) throws IOException {
+        // 浅い方から順に、その階層を含むディレクトリを同期して存在を確定させる
+        for (Path level : created) {
+            // createDirectories は浅い方から作るので、無い階層に当たったらそこから先も無い
+            if (!Files.exists(level)) {
+                break;
+            }
+            // ファイルシステムのルートには含まれる側のディレクトリが無いので飛ばす
+            Path container = directoryHolding(level);
+            if (container != null) {
+                // 含む側を同期して、その中の level というエントリを確定させる
+                sync(container, Step.BASE_DIRECTORY);
             }
         }
     }

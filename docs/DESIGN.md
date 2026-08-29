@@ -342,7 +342,15 @@ malicious resource exhaustion and against tampering with the state directory:
   record instead would be worse: the move already overwrote whatever held that
   name, so removing it loses both copies. Only an *unchecked* failure stays
   best-effort everywhere, because that means the sync could not be attempted
-  at all rather than that a write was lost. Successful steps are logged at
+  at all rather than that a write was lost. The accepted cost of that rule is
+  a state directory on a mount whose `fsync(2)` is not implemented for regular
+  files (some `vboxsf`/9p/FUSE setups return `EINVAL`/`ENOSYS` there): every
+  `run` will report a persistence failure rather than silently accept writes it
+  cannot confirm. `IOException` carries no way to tell "fsync unsupported" from
+  "fsync reported ENOSPC", and between the two mistakes a loud, immediate
+  failure the operator sees on the very first run is preferable to records that
+  look saved and are not. Directory syncs keep their escape hatch because there
+  the platform gap is the *expected* case (Windows), not an anomaly. Successful steps are logged at
   `FINE` — after the channel is closed, since deferred write errors on
   networked filesystems surface from `close()` and a record logged before that
   would claim a flush that then failed — since an `fsync` otherwise leaves no
