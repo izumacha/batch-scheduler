@@ -57,6 +57,13 @@ class DurabilityTest {
     private static final List<Path> OTHER_FILE_STORE_CANDIDATES =
             List.of(Path.of("/dev/shm"), Path.of("/run/shm"));
 
+    // 「単一要素の相対パス」を実際に作って確かめる検査で使うディレクトリ名。
+    // getParent() が null になるのは要素が 1 つのときだけで、そういうパスは
+    // 必ず作業ディレクトリの直下にできる（Java から作業ディレクトリは変えられない）。
+    // @TempDir で代替できないのはそのためで、名前を固定してあるのは、異常終了で
+    // 残っても git の邪魔にならないよう .gitignore へ載せられるようにするため
+    private static final String BARE_RELATIVE_STATE_DIR = ".batch-state-durability-test";
+
     // このテストが取り付けたハンドラ（後片付けで取り外すために保持する）
     private Handler handler;
     // 取り付けたハンドラが記録したログの一覧
@@ -340,6 +347,35 @@ class DurabilityTest {
         assertNull(bare.getParent());
         // このヘルパーはカレントディレクトリを踏まえて、含む側のディレクトリを返す
         assertEquals(Path.of("").toAbsolutePath(), Durability.directoryHolding(bare));
+    }
+
+    @Test
+    void createDirectoriesDurablySyncsTheWorkingDirectoryForABareRelativeStateDir()
+            throws IOException {
+        // この検査が作る階層を「含む側」＝作業ディレクトリを控える（期待値になる）
+        Path workingDirectory = Path.of("").toAbsolutePath();
+        // ディレクトリを同期できない環境では確定のログ自体が出ないので飛ばす
+        assumeTrue(directorySyncSupported(workingDirectory), "この環境ではディレクトリを同期できない");
+        // 既定の --state-dir（.batch-state）と同じ「単一要素の相対パス」を用意する
+        Path bareRelative = Path.of(BARE_RELATIVE_STATE_DIR);
+        // 前回の異常終了で残っていると「作られる階層」にならず検査が成り立たないので先に消す
+        Files.deleteIfExists(bareRelative);
+        try {
+            // 本番と同じ入口を、絶対化せず相対パスのまま呼ぶ
+            durability.createDirectoriesDurably(bareRelative);
+            // 隣の directoryHolding の検査はヘルパー単体の振る舞いしか固定できず、
+            // syncCreatedLevels が実際にそれを使っているかまでは言えない。呼び出し側を
+            // 素の getParent() へ差し替える退行は、絶対パス（@TempDir）を使う他の検査
+            // すべてを緑のまま通り抜ける — container が null になって同期が丸ごと
+            // 飛ばされるのは要素が 1 つの相対パスのときだけで、それが既定設定だから。
+            // ここまで見て初めて、既定の --state-dir でこの段階が生きていることを固定できる
+            assertEquals(List.of(workingDirectory), syncedPaths());
+            // ディレクトリ自体もできていることを確認する（同期だけして作り忘れていないか）
+            assertTrue(Files.isDirectory(bareRelative));
+        } finally {
+            // 検査が失敗しても作業ディレクトリを汚したままにしない
+            Files.deleteIfExists(bareRelative);
+        }
     }
 
     @Test
