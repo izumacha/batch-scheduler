@@ -253,13 +253,26 @@ final class Durability {
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
+            // 失敗したので完了は記録しない
+            return;
         } catch (RuntimeException e) {
             // ここへ来るのは書き戻し（force / close）が非検査例外で落ちた場合だけ。
             // 開く段階の失敗は種別によらず OpenFailure として上の分岐へ回っている。
             // したがって「書き戻しまで到達した」として文面を選ぶ — false を渡すと、
             // 本物の同期エラーを「この環境では開けない」と説明してしまう
             warnOnce(path, step, e, describeFailure(step, true));
+            // 失敗したので完了は記録しない
+            return;
         }
+        // ここまで来たら open も force も close も通っている。完了ログを try の外へ
+        // 出しているのは、ログの失敗を同期の失敗として扱わないため。中に置くと、
+        // ログハンドラが投げただけで「バイト列がディスクに届いていないかもしれない」と
+        // いう警告が出て、実際には確定している保存が失敗として報告されうる。
+        // close() の後なのは、NFS などで書き込みエラーが遅れて close() で報告されるため。
+        // fsync は成功しても痕跡を残さないので、このログが「どこまで確定したか」を
+        // 後から追える唯一の手がかりになる。Supplier 版なので FINE が無効なときは
+        // 文字列の組み立て自体が起きない
+        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
     }
 
     /**
@@ -462,12 +475,6 @@ final class Durability {
             // true を渡すことで中身だけでなくメタデータの書き戻しも要求する
             channel.force(true);
         }
-        // 完了ログは close() まで通ってから出す。NFS などでは書き込みエラーが遅れて
-        // close() で報告されるため、try の中で記録すると「完了した」と書き残した直後に
-        // 失敗が投げられ、ログと結果が食い違う。fsync は成功しても痕跡を残さないので、
-        // このログが「どこまで確定したか」を後から追える唯一の手がかりになる。
-        // Supplier 版を使うので FINE が無効なときは文字列組み立て自体が起きない
-        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
     }
 
     /**

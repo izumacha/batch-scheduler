@@ -172,10 +172,12 @@ class RunCommandTest {
         // 保存に失敗した旨のエラーメッセージは標準エラーに出力されているはず
         assertTrue(outcome.stderr().contains("failed to persist"), outcome.stderr());
         // 原因まで併記されているはず。外側のメッセージは保存失敗の経路すべてで共通で、
-        // 何が起きたのか（保存先の消失・権限不足・「記録は公開済みだが耐久性を
-        // 確認できなかった」）は原因側にしか無い。ここが素の safeMessage に戻ると、
-        // 運用者は残っている記録に対してもバッチ全体の再実行へ誘導される
-        assertTrue(outcome.stderr().contains("Exception"), outcome.stderr());
+        // 何が起きたのか（ここでは保存先が通常ファイルになっていること）は原因側にしか無い。
+        // ここが素の safeMessage に戻ると、運用者には切り分けの手がかりが何も残らない。
+        // この検査が固定するのは「RunCommand が原因を描画する経路を使っていること」で、
+        // 連鎖を根元までたどることは CliFormatTest 側で固定している（この筋書きの
+        // 連鎖は 1 段なので、ここでは深さを検証できない）
+        assertTrue(outcome.stderr().contains("FileAlreadyExistsException"), outcome.stderr());
     }
 
     @Test
