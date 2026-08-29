@@ -262,6 +262,9 @@ class ListCommandTest {
         String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
         // 壊れた 1 件で中断せず、正常な記録は表示される
         assertTrue(out.contains("healthy-run"), out);
+        // runId の無い行は "null" ではなくプレースホルダで表示される（"null" という
+        // ID の実行と見分けが付かなくなるのを防ぐ）
+        assertFalse(out.contains("null "), out);
         // 例外がそのまま漏れていない
         assertFalse(out.contains("Cannot invoke"), out);
     }

@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.regex.Pattern;
 
 /**
  * CLI コマンドが共通して使う null 安全な整形ユーティリティメソッド群。
@@ -39,7 +40,8 @@ final class CliFormat {
     // しまい、bidi（双方向）制御文字は run/list のサマリー表の文字列を視覚的に
     // 並べ替えて表示内容を偽装できてしまう。改行・タブ等の空白系は shortMessage が
     // 先にスペースへ圧縮するため、ここでは「空白圧縮後に残る非表示文字」をまとめて削除する
-    private static final String CONTROL_CHARS_PATTERN = "[\\p{Cntrl}\\u0080-\\u009F\\p{Cf}]";
+    private static final Pattern CONTROL_CHARS_PATTERN =
+            Pattern.compile("[\\p{Cntrl}\\u0080-\\u009F\\p{Cf}]");
 
     // 1 行へ圧縮するときに「区切り」として扱う空白の集合（§6: 意図のある値は名前付き定数に置く）。
     // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
@@ -48,7 +50,8 @@ final class CliFormat {
     // "line onefile not found" のように繋がってしまう。外部由来の文字列（OS のエラー文や
     // 非 UTF-8 ロケールのデコード結果）は実際にこれらを含みうるので、区切りとして
     // 扱う側へ明示的に足しておく
-    private static final String WHITESPACE_PATTERN = "[\\s\\u0085\\u2028\\u2029]+";
+    private static final Pattern WHITESPACE_PATTERN =
+            Pattern.compile("[\\s\\u0085\\u2028\\u2029]+");
 
 
     // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
@@ -144,8 +147,14 @@ final class CliFormat {
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      */
     static String safeMessage(Throwable t) {
-        // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を返す
-        return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+        // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を選ぶ
+        String message = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+        // 選んだ文字列は必ず整形して返す。例外のメッセージには外部由来の値が入りうる
+        // （--rerun-failed のバッチ名不一致は state ファイルの batchName を、
+        // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
+        // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
+        // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
+        return sanitizeOneLine(message);
     }
 
     /**
@@ -253,6 +262,29 @@ final class CliFormat {
     }
 
     /**
+     * 表示用に run ID を整形する。値が無い（{@code null}・空白のみ）場合は
+     * {@link #instant(Instant)} / {@link #duration(Duration)} と同じ
+     * プレースホルダ {@code "-"} を返す。
+     *
+     * <p>整形せずに {@code printf} へ渡すと、runId を欠いた state ファイルの行が
+     * 文字列 {@code "null"} として表示され、本当に {@code "null"} という ID を持つ
+     * 実行と見分けが付かなくなる。運用者はそれを {@code --rerun-failed null} に
+     * 貼って「見つからない」に行き当たる。「値が無い」ことを表す表記は
+     * このクラスで 1 つに揃える（§6 一元管理）。
+     *
+     * <p>値がある場合は他の列と同じ {@link #sanitizeOneLine(String)} を通す。
+     * runId は state ファイル由来の信頼できない値で、切り詰めはしない。
+     */
+    static String runId(String runId) {
+        // 値が無い、または空白しかない場合はプレースホルダを返す
+        if (runId == null || runId.isBlank()) {
+            return PLACEHOLDER;
+        }
+        // 値があるときは 1 行へ整形して返す
+        return sanitizeOneLine(runId);
+    }
+
+    /**
      * 端末へ出す文字列を 1 行へ整形し、制御文字を取り除く。
      *
      * <p>順序が肝で、必ず「空白の圧縮 → 制御文字の除去」で行う。逆にすると改行・タブは
@@ -273,7 +305,7 @@ final class CliFormat {
             return null;
         }
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
-        String oneLine = text.replaceAll(WHITESPACE_PATTERN, " ").trim();
+        String oneLine = WHITESPACE_PATTERN.matcher(text).replaceAll(" ").trim();
         // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
         return stripControlChars(oneLine);
     }
@@ -318,6 +350,6 @@ final class CliFormat {
             return null;
         }
         // 定数パターンに一致する制御文字をすべて削除した文字列を返す
-        return value.replaceAll(CONTROL_CHARS_PATTERN, "");
+        return CONTROL_CHARS_PATTERN.matcher(value).replaceAll("");
     }
 }

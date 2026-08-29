@@ -345,13 +345,15 @@ malicious resource exhaustion and against tampering with the state directory:
   rather than that a write was lost, and the bytes were written and the stream
   closed before it ran, so it warns even on a record-content step. Failing a
   save because an antivirus held the file open would be the same inversion in
-  the other direction. That rule covers the non-atomic fallback too (which, on the default
-  filesystem provider, `save()` cannot currently reach: the temp file and the
-  target sit in the same directory, so `rename()` never fails with `EXDEV` and
-  `ATOMIC_MOVE` therefore never degrades. The fallback branch predates this
-  change and is kept consistent rather than left as the one publish path
-  without durability, so that it does not become a hole the moment it becomes
-  reachable):
+  the other direction. That rule covers the non-atomic fallback too, which is rare but
+  **reachable on a stock Linux filesystem** — `ATOMIC_MOVE` degrades on *any*
+  `rename(2)` failure, not only `EXDEV`. A directory occupying the record's
+  name is enough: the atomic move fails with "Is a directory", and the plain
+  `Files.move` that follows removes it and renames successfully. (An earlier
+  version of this document claimed the path was unreachable because the temp
+  file and the target share a directory. That reasoning covers `EXDEV` only,
+  and is wrong.) So the fallback is a live path whose durability matters, not
+  dead code kept for a hypothetical future:
   when `Files.move` copies rather than renames, the destination is a freshly
   allocated file whose bytes the earlier temp-file flush never touched, so its
   re-sync is a record-content flush like any other and fails the save the same

@@ -143,6 +143,39 @@ class CliFormatTest {
     }
 
     /**
+     * セキュリティ回帰テスト: safeMessage 自身が制御文字を除去することを確認する。
+     * 例外のメッセージには外部由来の値が入る（--rerun-failed のバッチ名不一致は
+     * state ファイルの batchName をそのまま本文にする）ため、呼び出し側の掛け忘れが
+     * そのまま端末への注入になる。名前が約束している「安全なメッセージ」を
+     * このメソッド自身が満たすようにしている。
+     */
+    @Test
+    void safeMessage_stripsTerminalControlCharacters() {
+        // 端末制御文字（ESC・BEL）を含むメッセージを持つ例外を作る
+        Exception e = new IllegalArgumentException(
+                "priorResult belongs to a different batch ('etl\u001b]0;pwned\u0007')");
+        String rendered = CliFormat.safeMessage(e);
+        // 生の ESC / BEL は出力へ漏れていない
+        assertFalse(rendered.contains("\u001b"), rendered);
+        assertFalse(rendered.contains("\u0007"), rendered);
+        // 診断に必要な文言そのものは残っている
+        assertTrue(rendered.contains("different batch"), rendered);
+    }
+
+    /**
+     * runId が無い記録では、文字列 "null" ではなく他の列と同じプレースホルダ "-" を
+     * 返すことを確認する。"null" のままだと、本当に "null" という ID の実行と
+     * 見分けが付かず、運用者が --rerun-failed null に貼って行き止まりになる。
+     */
+    @Test
+    void runId_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.runId(null));
+        assertEquals("-", CliFormat.runId("   "));
+        // 値があるときは 1 行へ整形して返す（切り詰めはしない）
+        assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
+    }
+
+    /**
      * 原因を持つ例外では、外側のメッセージに「 (原因)」が併記されることを確認する。
      * JsonExecutionStore.save は「記録は公開済みだが耐久性を確認できなかった」という
      * 区別を原因側にしか持たせていないため、ここが落ちると運用者には

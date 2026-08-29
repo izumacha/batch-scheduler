@@ -616,10 +616,12 @@ public final class JsonExecutionStore implements ExecutionStore {
      * from here, so the safety is made local. The {@code catch} merges rather
      * than replaces for the same reason.
      *
-     * <p>Package-private so a test can pin the wiring: {@code save} cannot
-     * reach the fallback on the default provider (temp file and target share a
-     * directory, so {@code rename()} never reports {@code EXDEV}), which would
-     * otherwise leave "the flag actually turns the re-flush on" unverified.
+     * <p>Package-private so a test can drive the fallback directly. That path
+     * is reachable in production -- {@code ATOMIC_MOVE} degrades on any
+     * {@code rename(2)} failure, not just {@code EXDEV}, so a directory
+     * occupying the record's name is enough -- but it is rare enough that
+     * relying on {@code save} to produce it would leave "the flag actually
+     * turns the re-flush on" effectively unverified.
      */
     void commitPublishedRecord(Path target, Path expectedRealBase,
             boolean publishedWithoutAtomicity, boolean contentConfirmed) throws IOException {

@@ -93,7 +93,7 @@ public final class ListCommand implements Callable<Integer> {
             // "run1\nbbb" が "run1bbb" という実在しない ID に見え、それを
             // --rerun-failed に貼ると「見つからない」になっていた（切り詰めはしない）
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
-                    CliFormat.sanitizeOneLine(run.runId()),
+                    CliFormat.runId(run.runId()),
                     CliFormat.shortMessage(run.batchName(), 20),
                     run.status(),
                     CliFormat.instant(run.startedAt()),

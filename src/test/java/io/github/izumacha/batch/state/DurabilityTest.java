@@ -649,6 +649,25 @@ class DurabilityTest {
     }
 
     @Test
+    void saveReachesTheNonAtomicFallbackWhenADirectoryOccupiesTheRecordName(@TempDir Path dir)
+            throws IOException {
+        // 記録の名前を空ディレクトリが占有していると、アトミック移動は
+        // 「Is a directory」で失敗する。ATOMIC_MOVE が落ちるのは EXDEV のときだけ、
+        // という以前の説明が誤りであることを実物で固定する（この経路は実際に踏める）
+        Files.createDirectories(dir);
+        Path occupied = dir.resolve("run1.json");
+        Files.createDirectory(occupied);
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        // フォールバックが空ディレクトリを消して改名し直すので、保存自体は成功する
+        assertDoesNotThrow(() -> store.save(sampleRun("run1")));
+        // 記録は読み戻せる
+        assertTrue(store.findById("run1").isPresent());
+        // 一時ファイル側ではなく公開先の同期が走ったことがログから分かる
+        assertTrue(completedSteps().contains(Durability.Step.PUBLISHED_RECORD_CONTENT),
+                completedSteps().toString());
+    }
+
+    @Test
     void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
         // 「書き戻しまで到達したか」の 2 通りを用意する（false=開けなかった / true=書き戻しで失敗）
         boolean openFailed = false;
