@@ -28,7 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -394,8 +393,10 @@ class DurabilityTest {
                 "この環境では POSIX 権限を操作できない");
         Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("-wx------"));
         try {
-            // root は権限検査を素通りするため、狙いどおり失敗する環境でだけ検証する
-            assumeFalse(directorySyncSupported(dir), "この環境ではディレクトリの同期を失敗させられない");
+            // 権限を落としても root は素通りするため、狙いどおり同期が失敗するかを先に確かめる。
+            // 失敗させられない環境でも検査自体は飛ばさない（保存が通ることの確認は
+            // どの環境でも意味があり、skip にすると配線の検証が丸ごと消えてしまう）
+            boolean syncActuallyFails = !directorySyncSupported(dir);
             JsonExecutionStore store = new JsonExecutionStore(dir);
             // 同期が失敗しても保存そのものは例外にならない。ここが崩れると、記録が
             // ディスクに載っている実行に対して RunCommand が「保存に失敗しました」と
@@ -403,9 +404,11 @@ class DurabilityTest {
             assertDoesNotThrow(() -> store.save(sampleRun("run1")));
             // 記録は実際に読み戻せる（＝保存は成立している）
             assertTrue(store.findById("run1").isPresent());
-            // 握り潰したのではなく、警告としてきちんと痕跡が残っている
-            assertTrue(warnings().stream().anyMatch(w -> w.contains("RECORD_RENAME")),
-                    warnings().toString());
+            // 同期を実際に失敗させられた環境でだけ、握り潰しではなく警告が残ることも確かめる
+            if (syncActuallyFails) {
+                assertTrue(warnings().stream().anyMatch(w -> w.contains("RECORD_RENAME")),
+                        warnings().toString());
+            }
         } finally {
             // 後片付け（@TempDir が消せるよう権限を戻す）
             Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
@@ -446,8 +449,7 @@ class DurabilityTest {
 
     @Test
     void syncFailureWarnsInsteadOfThrowing(@TempDir Path dir) {
-        // 存在しないファイルとディレクトリを指して、同期が必ず失敗する状況を作る
-        Path missingFile = dir.resolve("gone.json");
+        // 存在しないディレクトリを指して、同期が必ず失敗する状況を作る
         Path missingDir = dir.resolve("gone-dir");
         // ディレクトリ対象の 2 段階は、失敗しても例外を投げずに戻る
         // （環境によっては実行できないため。保存の成功を失敗へ変えない契約）
@@ -458,8 +460,6 @@ class DurabilityTest {
         // 警告には「省略すると何が起こりうるか」が含まれ、読んだ人が影響を判断できる
         assertTrue(warnings().get(0).contains("taking every record inside it"), warnings().get(0));
         assertTrue(warnings().get(1).contains("vanish or roll back"), warnings().get(1));
-        // 使っていない変数を残さないよう、ファイル側は別の検査で扱う
-        assertTrue(Files.notExists(missingFile));
     }
 
     @Test

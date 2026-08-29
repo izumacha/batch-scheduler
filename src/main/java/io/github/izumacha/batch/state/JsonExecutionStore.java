@@ -527,7 +527,19 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
         // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
         // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）
-        durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
+        try {
+            durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
+        } catch (IOException syncFailed) {
+            // この経路では移動が既に成功しており、記録はもう見えている。保存を失敗として
+            // 報告するのは変えない（fsync のエラーはカーネルが書き込みエラーに当たった
+            // ことを意味し、ページキャッシュ側が読めても disk 上は壊れていることがある）が、
+            // 「書けなかった」と読める報告のままだと、実際には list に出て
+            // --rerun-failed も引ける記録に対して全ジョブの再実行へ誘導してしまう。
+            // 何が起きたのかを添えて、記録が残っている可能性を伝える
+            throw new IOException("the record was published but could not be confirmed durable; "
+                    + "'" + target.getFileName() + "' may still be readable, so check "
+                    + "'list' before re-running the batch", syncFailed);
+        }
     }
 
     /**

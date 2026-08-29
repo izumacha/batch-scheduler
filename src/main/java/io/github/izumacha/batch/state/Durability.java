@@ -189,6 +189,7 @@ final class Durability {
      * class -- along with the trap that a test which forgot to call it would
      * observe zero warnings and pass without checking anything.
      */
+    // 警告を出し終えた段階を覚えておく集合（このストア専用。空の状態から始まる）
     private final Set<Step> warned = EnumSet.noneOf(Step.class);
 
     /**
@@ -197,7 +198,9 @@ final class Durability {
      */
     private boolean claimWarningBudget(Step step) {
         // 追加できたときだけ true（既に入っていれば消費済みなので false）
+        // 同じストアを複数スレッドから使われても二重に警告しないよう、集合への出し入れを直列化する
         synchronized (warned) {
+            // 追加できたら初回（＝予算を確保できた）、既に入っていれば消費済み
             return warned.add(step);
         }
     }
