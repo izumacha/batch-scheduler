@@ -53,6 +53,10 @@ class DurabilityTest {
     // どの検査の期待値にも影響しない
     private static final Durability.Step PROBE_STEP = Durability.Step.RECORD_RENAME;
 
+    // 別ファイルストアの候補（アトミック移動を確実に失敗させるために使う）
+    private static final List<Path> OTHER_FILE_STORE_CANDIDATES =
+            List.of(Path.of("/dev/shm"), Path.of("/run/shm"));
+
     // このテストが取り付けたハンドラ（後片付けで取り外すために保持する）
     private Handler handler;
     // 取り付けたハンドラが記録したログの一覧
@@ -227,6 +231,37 @@ class DurabilityTest {
         return List.copyOf(reduced);
     }
 
+    /**
+     * {@code sameStoreAs} とは別のファイルストア上にある、書き込み可能なディレクトリを
+     * 返す（見つからなければ {@code null}）。
+     *
+     * <p>アトミック移動はファイルシステムをまたぐと
+     * {@code AtomicMoveNotSupportedException} になる。フォールバック分岐を実物で
+     * 踏める唯一の手段がこれなので、候補は定数に持たせて増やせるようにしてある
+     * （§6 マジック文字列を散らさない）。候補が無い環境（多くの macOS / Windows）では
+     * 呼び出し元が検査を飛ばす。
+     */
+    private static Path otherFileStoreDirectory(Path sameStoreAs) {
+        // 別ストアになりやすい場所を順に試す（POSIX の共有メモリ領域は多くの Linux で tmpfs）
+        for (Path candidate : OTHER_FILE_STORE_CANDIDATES) {
+            try {
+                // 書き込めるディレクトリでなければ使えない
+                if (!Files.isDirectory(candidate) || !Files.isWritable(candidate)) {
+                    continue;
+                }
+                // 同じストアだとアトミック移動が成功してしまうので、別ストアのものだけ返す
+                if (!Files.getFileStore(candidate).equals(Files.getFileStore(sameStoreAs))) {
+                    return candidate;
+                }
+            } catch (IOException e) {
+                // ストアを調べられない候補は単に使わない（次の候補へ進む）
+                continue;
+            }
+        }
+        // どの候補も使えなかった
+        return null;
+    }
+
     /** テスト用の最小限の実行結果を組み立てる。 */
     private static ExecutionResult sampleRun(String runId) {
         // 開始時刻を固定する（内容はこのテストの関心事ではないので毎回同じでよい）
@@ -345,11 +380,10 @@ class DurabilityTest {
         // 別のファイルシステムをまたぐとアトミック移動は使えず、フォールバックが走る。
         // save() 自身は同一ディレクトリ内で移動するためこの分岐を踏めないので、
         // 実際に踏める形（跨ぎ移動）でここだけ検証する
-        Path otherFs = Path.of("/dev/shm");
-        assumeTrue(Files.isDirectory(otherFs) && Files.isWritable(otherFs),
-                "別のファイルシステムが無いのでフォールバックを再現できない");
-        assumeTrue(!Files.getFileStore(otherFs).equals(Files.getFileStore(dir)),
-                "同じファイルストアなのでアトミック移動が成功してしまう");
+        Path otherFs = otherFileStoreDirectory(dir);
+        assumeTrue(otherFs != null,
+                "別のファイルストア上の書き込み可能なディレクトリが見つからないので"
+                        + "アトミック移動の失敗を再現できない");
         Path crossFsTmp = Files.createTempFile(otherFs, "run-", ".tmp");
         try {
             Files.writeString(crossFsTmp, "{}");
@@ -382,20 +416,24 @@ class DurabilityTest {
 
     @Test
     void everyFileStepFailsTheSaveAndEveryDirectoryStepOnlyWarns() {
+        // まず、どの段階が何を対象にしているかを 1 つずつ書き下して固定する。
+        // 実装と同じ式（target == FILE）から期待値を導くと、分類を取り違えても
+        // 両辺が一緒に動いて検査が素通りしてしまうため、ここは必ず直接書く
+        assertEquals(Durability.Step.Target.FILE, Durability.Step.RECORD_CONTENT.target());
+        assertEquals(Durability.Step.Target.FILE,
+                Durability.Step.PUBLISHED_RECORD_CONTENT.target());
+        assertEquals(Durability.Step.Target.DIRECTORY, Durability.Step.BASE_DIRECTORY.target());
+        assertEquals(Durability.Step.Target.DIRECTORY, Durability.Step.RECORD_RENAME.target());
         // 記録のバイト列を対象にする段階は、失敗したら保存を失敗させる。
         // ここが緩むと、fsync が「書けていない」と言った後でも成功と報告してしまう
-        for (Durability.Step step : Durability.Step.values()) {
-            // 対象がファイルかどうかで、期待する扱いが決まる
-            boolean expected = step.target() == Durability.Step.Target.FILE;
-            // 段階ごとに、規則どおりの扱いになっていることを確かめる
-            assertEquals(expected, step.failureFailsTheSave(), step.name());
-        }
-        // 規則が空回りしないよう、両方の側に段階が実在することも確かめる
-        // （全段階がディレクトリ対象になれば、上のループは何も検証しなくなる）
-        assertTrue(Arrays.stream(Durability.Step.values())
-                .anyMatch(Durability.Step::failureFailsTheSave));
-        assertTrue(Arrays.stream(Durability.Step.values())
-                .anyMatch(step -> !step.failureFailsTheSave()));
+        assertTrue(Durability.Step.RECORD_CONTENT.failureFailsTheSave());
+        assertTrue(Durability.Step.PUBLISHED_RECORD_CONTENT.failureFailsTheSave());
+        // ディレクトリを対象にする段階は、環境によっては実行できないので警告に留める
+        assertFalse(Durability.Step.BASE_DIRECTORY.failureFailsTheSave());
+        assertFalse(Durability.Step.RECORD_RENAME.failureFailsTheSave());
+        // 段階を足したときに上の書き下しが古くなっていないことも確かめる
+        assertEquals(4, Durability.Step.values().length,
+                "段階を増減したら、この検査の書き下しも合わせて更新すること");
     }
 
     @Test

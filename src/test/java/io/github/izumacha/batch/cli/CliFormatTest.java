@@ -176,6 +176,26 @@ class CliFormatTest {
         assertEquals(cause.toString(), rendered);
     }
 
+    /**
+     * 原因が 2 段以上ある場合に、根元まで併記されることを確認する。
+     * 非アトミック移動の経路は save が「記録は公開済みだが耐久性を確認できなかった」を
+     * 挟んで包み直すため 3 段になり、1 段だけ辿る実装では ENOSPC 等の実際の理由が
+     * 落ちていた（説明を足した経路ほど理由が消える、という逆転になっていた）。
+     */
+    @Test
+    void safeMessageWithCause_walksTheWholeCauseChain() {
+        // 3 段の入れ子を作る（save がこの経路で作る形と同じ）
+        java.io.IOException root = new java.io.IOException("No space left on device");
+        java.io.IOException middle =
+                new java.io.IOException("the record was published but could not be confirmed durable", root);
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", middle);
+        // 3 段すべての情報が 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("failed to save execution result"), rendered);
+        assertTrue(rendered.contains("could not be confirmed durable"), rendered);
+        assertTrue(rendered.contains("No space left on device"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

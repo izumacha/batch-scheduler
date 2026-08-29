@@ -124,6 +124,9 @@ final class CliFormat {
      * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      */
+    /** 原因の連鎖をたどる上限段数（循環していても止まるようにするための歯止め）。 */
+    private static final int MAX_CAUSE_DEPTH = 5;
+
     static String safeMessage(Throwable t) {
         // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を返す
         return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
@@ -139,18 +142,28 @@ final class CliFormat {
      * バッチ全体の再実行へ誘導してしまう。スタックトレースは出さない（§9）。
      */
     static String safeMessageWithCause(Throwable t) {
-        // 外側の例外のメッセージ（無ければクラス名）を取り出す
-        String message = safeMessage(t);
-        // 失敗の根本原因（例: 既存ファイルと衝突・権限不足・同期の失敗）を取り出す
+        // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める
+        StringBuilder rendered = new StringBuilder(safeMessage(t));
+        // 原因を根元までたどって併記する。1 段だけだと、途中で説明を足して包み直した
+        // 経路（保存の「記録は公開済みだが耐久性を確認できなかった」がこれ）で
+        // 肝心の理由（ENOSPC など）が落ちる。説明を足した経路ほど根本原因が消える、
+        // という逆転になっていた
         Throwable cause = t.getCause();
-        // 原因があり、かつ外側のメッセージに既に含まれていないときだけ併記する。
-        // メッセージを渡さずに new UncheckedIOException(cause) とした場合、Throwable が
-        // 原因の toString() をそのまま detailMessage に採用するため、無条件に足すと
-        // まったく同じ文が 2 回並ぶ（シンボリックリンクの拒否がこの形をしている）
-        boolean alreadyShown = cause != null && message.contains(cause.toString());
-        String detail = cause != null && !alreadyShown ? " (" + cause + ")" : "";
-        // 外側のメッセージと原因を 1 行にまとめて返す
-        return message + detail;
+        // 万一 getCause() が循環していても止まるよう、たどる深さに上限を設ける
+        for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            // この段の表現（クラス名とメッセージ）を組み立てる
+            String step = cause.toString();
+            // 既に出ている文言は繰り返さない。メッセージを渡さずに包んだ例外
+            // （new UncheckedIOException(cause)）は Throwable が原因の toString() を
+            // そのまま detailMessage に採用するため、無条件に足すと同じ文が 2 回並ぶ
+            if (rendered.indexOf(step) < 0) {
+                rendered.append(" (").append(step).append(')');
+            }
+            // 次の段（さらに内側の原因）へ進む
+            cause = cause.getCause();
+        }
+        // 1 行にまとめた文字列を返す
+        return rendered.toString();
     }
 
     /**
