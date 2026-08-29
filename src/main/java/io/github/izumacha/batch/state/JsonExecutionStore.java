@@ -249,44 +249,15 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // ここで握り潰して改名まで進むと「空の記録を公開して成功と報告する」
                 // という、この仕組みが防ごうとしている失敗そのものを作ってしまう
                 durability.sync(tmp, Durability.Step.RECORD_CONTENT);
-                try {
-                    // 一時ファイルを最終ファイルへアトミックに移動する（読者が半端なファイルを読まないようにする）
-                    Files.move(tmp, target,
-                            StandardCopyOption.REPLACE_EXISTING,
-                            StandardCopyOption.ATOMIC_MOVE);
-                } catch (IOException atomicFailed) {
-                    // Some filesystems don't support atomic moves; fall back.
-                    // Note: on such filesystems this fallback may not be atomic (could
-                    // internally copy+delete), so the "readers never observe a half-written
-                    // file" guarantee above is weaker here; tryRead() already tolerates a
-                    // partially-written/corrupt file by skipping it, so the only user-visible
-                    // effect is that one row is transiently missing from list/find results.
-                    // アトミック移動に対応していないファイルシステムの場合は通常の移動にフォールバックする
-                    // （/code-review ultra 指摘対応: この分岐は内部的にコピー→削除になりうるため、
-                    // 上記の「読者が半端なファイルを読まない」保証はこの経路には及ばない。ただし
-                    // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
-                    // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
-                    try {
-                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-                    } catch (IOException fallbackFailed) {
-                        // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
-                        // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
-                        // 通るのが普通なのか」を判断する材料になるため、握り潰さず添える
-                        fallbackFailed.addSuppressed(atomicFailed);
-                        throw fallbackFailed;
-                    }
-                    // コピー→削除で公開された可能性があるので、あとで移動先を同期し直す。
-                    // 同期をこの場で行わないのは、下の検証（誤配置なら削除して拒否する）より
-                    // 前に例外を投げると、その後始末に到達できなくなるため
-                    publishedWithoutAtomicity = true;
-                }
+                // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
+                publishedWithoutAtomicity = publishRecord(tmp, target);
             } finally {
                 // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
                 Files.deleteIfExists(tmp);
             }
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
-            Path verifiedBase = verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
+            verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
             // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる。
             // 検証より前に確定させると、差し替えを検知して削除するはずの誤配置ファイルを
             // 先に永続化してしまう。同期先に baseDir ではなく expectedRealBase を使うのは、
@@ -304,9 +275,11 @@ public final class JsonExecutionStore implements ExecutionStore {
             } finally {
                 // 上が失敗しても改名だけは確定させる。その場合の報告は「記録は公開済みだが
                 // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく。
-                // この同期はディレクトリ対象＝失敗しても例外にならない（Durability の
-                // shouldFailTheSave 参照）ため、finally に置いても元の例外を隠さない
-                durability.sync(verifiedBase, Durability.Step.RECORD_RENAME);
+                // この同期はディレクトリ対象なので、同期の失敗そのものでは例外にならない
+                // （Durability の shouldFailTheSave 参照）＝元の例外を隠さない。
+                // 例外を投げうるのはログハンドラが投げた場合だけで、それはこのリポジトリの
+                // どのログ呼び出しにも等しく当てはまる前提であり、ここ固有の話ではない
+                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
             }
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
@@ -515,6 +488,52 @@ public final class JsonExecutionStore implements ExecutionStore {
     }
 
     /**
+     * Moves {@code tmp} onto {@code target}, preferring an atomic rename and
+     * falling back to a plain move where the filesystem has no atomic one.
+     *
+     * <p>The atomic move is what gives the "a reader never sees a half-written
+     * file" guarantee. The fallback may internally copy-and-delete, so that
+     * guarantee does not reach this path; {@code tryRead} already skips a
+     * partially-written file, so the visible effect is one row transiently
+     * missing from {@code list} rather than a crash.
+     *
+     * <p>Package-private and returning which path it took, so a test can
+     * drive the fallback for real: {@code ATOMIC_MOVE} across two filesystems
+     * throws {@link java.nio.file.AtomicMoveNotSupportedException}, which is
+     * reachable from a test in a way that {@code save}'s own single-directory
+     * move is not. Without this seam the fallback branch -- and the re-sync it
+     * turns on -- would be reachable only on the deployments it exists for.
+     *
+     * @return {@code true} if the record had to be published by a non-atomic
+     *     move, so its destination still needs flushing
+     * @throws IOException if neither move succeeded, carrying the atomic
+     *     move's own failure as a suppressed exception
+     */
+    static boolean publishRecord(Path tmp, Path target) throws IOException {
+        try {
+            // まずアトミック移動を試す（読者が半端なファイルを読まないようにするため）
+            Files.move(tmp, target,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+            // 成功したので、移動先は一時ファイルと同じ実体＝同期済み
+            return false;
+        } catch (IOException atomicFailed) {
+            try {
+                // アトミック移動に対応していないファイルシステムでは通常の移動にフォールバックする
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException fallbackFailed) {
+                // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
+                // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
+                // 通るのが普通なのか」を判断する材料になるため、握り潰さず添える
+                fallbackFailed.addSuppressed(atomicFailed);
+                throw fallbackFailed;
+            }
+            // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
+            return true;
+        }
+    }
+
+    /**
      * Re-flushes a record that was published by the non-atomic fallback.
      *
      * <p>Needed only when {@link StandardCopyOption#ATOMIC_MOVE} is
@@ -590,7 +609,7 @@ public final class JsonExecutionStore implements ExecutionStore {
      * real directories, without needing to race an actual filesystem swap
      * into the middle of a single {@link #save} call.
      */
-    static Path verifyWroteUnderExpectedBase(Path target, Path expectedRealBase, Path baseDir) throws IOException {
+    static void verifyWroteUnderExpectedBase(Path target, Path expectedRealBase, Path baseDir) throws IOException {
         // 実際に書き込んだ場所（target の実体パスの親）が、書き込み開始時に確認した
         // 実体ディレクトリと一致するかを検証する
         if (!target.toRealPath().getParent().equals(expectedRealBase)) {
@@ -601,10 +620,6 @@ public final class JsonExecutionStore implements ExecutionStore {
             throw new UncheckedIOException(new IOException(
                     "refusing to use a symlinked state directory: " + baseDir));
         }
-        // 検証を通った実体ディレクトリを返す。呼び出し元の改名同期はこの戻り値を使うため、
-        // 同期を検証より前へ動かすとコンパイルが通らない。順序を守らせる手段を
-        // 「コメントとレビュー」から「型」へ移している（誤配置の記録を先に確定させない）
-        return expectedRealBase;
     }
 
     /**

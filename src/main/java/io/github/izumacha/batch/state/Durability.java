@@ -245,11 +245,15 @@ final class Durability {
             if (shouldFailTheSave(step, e)) {
                 throw e;
             }
-            // そうでなければ、確定できなかったことを警告として残すだけにする
-            warnOnce(path, step, e, describeFailure(step, e));
+            // そうでなければ、確定できなかったことを警告として残すだけにする。
+            // 書き戻しまで到達していたかどうかで文面が変わる
+            warnOnce(path, step, e, describeFailure(step, !(e instanceof OpenFailure)));
         } catch (RuntimeException e) {
-            // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）
-            warnOnce(path, step, e, "could not attempt the sync on this platform");
+            // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）。
+            // 開く前に落ちているので、開けなかった場合と同じ文面を使う。文面の決定を
+            // ここで独自に持つと、通常ファイルの失敗まで「この環境の制約」と読める
+            // 文言になり、describeFailure が塞いでいるはずの取り違えが復活する
+            warnOnce(path, step, e, describeFailure(step, false));
         }
     }
 
@@ -438,17 +442,24 @@ final class Durability {
      * a real permissions problem. It names both possibilities and points at
      * the cause, which {@code warnOnce} appends.
      *
+     * <p>Takes "did we reach the flush?" rather than the exception, so the
+     * unchecked path (which has no {@link IOException} to inspect) routes
+     * through here too. Every wording this class emits comes from this method;
+     * a call site that invented its own would be free to describe a regular
+     * file's failure as a platform quirk, which is the mistake this exists to
+     * prevent.
+     *
      * <p>Package-private so both wordings can be pinned by a test: the
      * "opened but the flush failed" branch needs a disk that reports an error
      * from {@code fsync}, which no test environment can arrange on demand.
      */
-    static String describeFailure(Step step, IOException e) {
+    static String describeFailure(Step step, boolean reachedTheFlush) {
         // 通常ファイルは開けないこと自体が異常なので、環境差の言い訳をしない
         if (step.target() == Step.Target.FILE) {
             return "could not sync the file";
         }
-        // 開く段階で失敗したのなら、この環境がディレクトリを開けないという説明が妥当
-        if (e instanceof OpenFailure) {
+        // 書き戻しまで到達していないなら、この環境がディレクトリを開けない可能性がある
+        if (!reachedTheFlush) {
             return "could not open the directory to sync it "
                     + "(never possible on platforms such as Windows; anywhere else this is a "
                     + "real problem -- permissions, or the directory was removed -- so read "

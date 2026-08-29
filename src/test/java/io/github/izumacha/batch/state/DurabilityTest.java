@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributeView;
@@ -333,6 +336,35 @@ class DurabilityTest {
     }
 
     @Test
+    void publishRecordReportsWhetherItHadToFallBackToANonAtomicMove(@TempDir Path dir) throws IOException {
+        // 同じファイルシステム内ならアトミック移動が使えるので false が返る
+        Path sameFsTmp = dir.resolve("run-1.tmp");
+        Files.writeString(sameFsTmp, "{}");
+        assertFalse(JsonExecutionStore.publishRecord(sameFsTmp, dir.resolve("run1.json")));
+
+        // 別のファイルシステムをまたぐとアトミック移動は使えず、フォールバックが走る。
+        // save() 自身は同一ディレクトリ内で移動するためこの分岐を踏めないので、
+        // 実際に踏める形（跨ぎ移動）でここだけ検証する
+        Path otherFs = Path.of("/dev/shm");
+        assumeTrue(Files.isDirectory(otherFs) && Files.isWritable(otherFs),
+                "別のファイルシステムが無いのでフォールバックを再現できない");
+        assumeTrue(!Files.getFileStore(otherFs).equals(Files.getFileStore(dir)),
+                "同じファイルストアなのでアトミック移動が成功してしまう");
+        Path crossFsTmp = Files.createTempFile(otherFs, "run-", ".tmp");
+        try {
+            Files.writeString(crossFsTmp, "{}");
+            Path target = dir.resolve("run2.json");
+            // フォールバックを使ったことが true として返る（save() はこれを見て再同期する）
+            assertTrue(JsonExecutionStore.publishRecord(crossFsTmp, target));
+            // 移動そのものは成功しており、中身も移っている
+            assertEquals("{}", Files.readString(target));
+        } finally {
+            // 跨ぎ先に一時ファイルが残らないよう片付ける
+            Files.deleteIfExists(crossFsTmp);
+        }
+    }
+
+    @Test
     void nonAtomicMoveFallbackSyncsTheDestinationNotJustTheTempFile(@TempDir Path dir) throws IOException {
         // 公開済みの記録に見立てたファイルを用意する
         Path target = dir.resolve("run1.json");
@@ -368,21 +400,23 @@ class DurabilityTest {
 
     @Test
     void directoryFailureWordingSeparatesAPlatformGapFromARealError() {
-        // 開けなかった場合は、環境差の可能性と本物の問題の可能性を両方示す文面になる。
+        // 書き戻しまで到達していない場合は、環境差の可能性と本物の問題の可能性を両方示す。
         // どちらかを断定しないのは、Windows の「そもそも開けない」も POSIX の
         // AccessDenied も同じ IOException として届き、型からは区別できないため
-        String openFailed = Durability.describeFailure(Durability.Step.RECORD_RENAME,
-                new Durability.OpenFailure(new IOException("boom")));
+        String openFailed = Durability.describeFailure(Durability.Step.RECORD_RENAME, false);
         assertTrue(openFailed.contains("never possible on platforms such as Windows"), openFailed);
         assertTrue(openFailed.contains("real problem"), openFailed);
         // 開けたうえで同期に失敗した場合は、環境差ではなく本物のエラーだと言い切る。
         // ここを取り違えると、警告は段階ごとに 1 回きりなので、記録が確定していない
         // という唯一の合図を「この環境ではよくあること」として読み飛ばさせてしまう
-        assertTrue(Durability.describeFailure(Durability.Step.RECORD_RENAME, new IOException("boom"))
+        assertTrue(Durability.describeFailure(Durability.Step.RECORD_RENAME, true)
                 .contains("real error"));
-        // 通常ファイルには環境差の言い訳が無い（開けないこと自体が異常）
-        assertTrue(Durability.describeFailure(Durability.Step.PUBLISHED_RECORD_CONTENT,
-                new IOException("boom")).contains("could not sync the file"));
+        // 通常ファイルには環境差の言い訳が無い。到達したかどうかに関わらず同じ文面で、
+        // 「この環境の制約」と読める言い回しは決して使わない
+        assertTrue(Durability.describeFailure(Durability.Step.PUBLISHED_RECORD_CONTENT, true)
+                .contains("could not sync the file"));
+        assertTrue(Durability.describeFailure(Durability.Step.RECORD_CONTENT, false)
+                .contains("could not sync the file"));
     }
 
     @Test
@@ -446,6 +480,32 @@ class DurabilityTest {
         assertEquals(1, warnings().size());
         // 通常ファイルには環境差の言い訳をしない文面が使われる
         assertTrue(warnings().get(0).contains("could not sync the file"), warnings().get(0));
+    }
+
+    @Test
+    void anUncheckedFailureWarnsWithTheSameWordingAsAnyOtherFileFailure() {
+        // JDK 自身のランタイムイメージ（jrt:/）は読み取り専用のファイルシステムで、
+        // 書き込みモードで開こうとすると検査例外ではない UnsupportedOperationException に
+        // なる。「同期を試せなかった」側の失敗を、モックを使わず実物で再現できる唯一の経路
+        Path readOnly;
+        try {
+            FileSystem jrt = FileSystems.getFileSystem(URI.create("jrt:/"));
+            readOnly = jrt.getPath("/modules/java.base/java/lang/Object.class");
+        } catch (RuntimeException e) {
+            // ランタイムイメージを開けない環境ではこの経路を再現できないので飛ばす
+            assumeTrue(false, "jrt ファイルシステムが使えないので非検査例外を再現できない");
+            return;
+        }
+        // 対象が実在することを確かめてから試す（存在しないと別の失敗になってしまう）
+        assumeTrue(Files.exists(readOnly), "ランタイムイメージ内の対象が見つからない");
+        // 非検査例外は方針によらず警告どまりで、保存を失敗させない
+        assertDoesNotThrow(() -> durability.sync(readOnly, Durability.Step.RECORD_CONTENT));
+        // 文面は他のファイル失敗と同じ。ここで独自の文言を持つと、通常ファイルの失敗まで
+        // 「この環境の制約」と読めてしまい、記録が確定していないという唯一の合図を
+        // 読み飛ばさせる（describeFailure を通すことがその歯止めになっている）
+        assertEquals(1, warnings().size());
+        assertTrue(warnings().get(0).contains("could not sync the file"), warnings().get(0));
+        assertFalse(warnings().get(0).contains("platform"), warnings().get(0));
     }
 
     @Test
