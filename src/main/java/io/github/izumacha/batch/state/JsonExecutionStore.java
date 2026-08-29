@@ -552,72 +552,43 @@ public final class JsonExecutionStore implements ExecutionStore {
      */
     void commitPublishedRecord(Path target, Path expectedRealBase, boolean publishedWithoutAtomicity)
             throws IOException {
-        try {
-            // コピー→削除で公開された場合だけ、移動先そのものを同期し直す。
-            // target ではなく検証済みの実体ディレクトリから組み立て直した経路を渡すのは、
-            // target が baseDir を途中に含んでおり、開き直す時点でもう一度たどることに
+        // 公開側の同期が失敗したときの例外を覚えておく入れ物（成功なら null のまま）
+        IOException publishFailed = null;
+        // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
+        if (publishedWithoutAtomicity) {
+            // target ではなく検証済みの実体ディレクトリから組み立て直した経路を使う。
+            // target は baseDir を途中に含んでおり、開き直す時点でもう一度たどることに
             // なるため（改名の同期が expectedRealBase を使うのと同じ理由）
-            if (publishedWithoutAtomicity) {
-                syncPublishedRecord(expectedRealBase.resolve(target.getFileName()));
-            }
-        } catch (IOException publishFailed) {
-            // 失敗しても改名だけは確定させる（上記 Javadoc 参照）
+            Path published = expectedRealBase.resolve(target.getFileName());
             try {
-                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
-            } catch (IOException renameFailed) {
-                // 改名の確定にも失敗したら、運用者に伝えるべき主因は公開側なので添える
-                publishFailed.addSuppressed(renameFailed);
+                durability.sync(published, Durability.Step.PUBLISHED_RECORD_CONTENT);
+            } catch (IOException syncFailed) {
+                // この経路では移動が既に成功しており、記録はもう見えている。保存を失敗として
+                // 報告するのは変えない（fsync のエラーはカーネルが書き込みエラーに当たった
+                // ことを意味し、ページキャッシュ側が読めても disk 上は壊れていることがある）が、
+                // 「書けなかった」と読める報告のままだと、実際には list に出て
+                // --rerun-failed も引ける記録に対して全ジョブの再実行へ誘導してしまう
+                publishFailed = new IOException(
+                        "the record was published but could not be confirmed durable; '"
+                        + published.getFileName() + "' may still be readable, so check "
+                        + "'list' before re-running the batch", syncFailed);
             }
-            // 公開側の失敗をそのまま伝える（案内の文面はこちらが持っている）
-            throw publishFailed;
         }
-        // 改名（ディレクトリエントリ）をディスクへ確定させる
-        durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
-    }
-
-    /**
-     * Re-flushes a record that was published by the non-atomic fallback.
-     *
-     * <p>Needed only when {@link StandardCopyOption#ATOMIC_MOVE} is
-     * unavailable. That fallback may internally copy-and-delete rather than
-     * rename, in which case {@code target} is a <em>different</em> file than
-     * the one {@link #save} already synced: the synced temp file gets unlinked
-     * and the destination is left holding fresh pages that have never been
-     * flushed. Syncing only the directory afterwards would then publish a
-     * durable entry pointing at non-durable bytes -- precisely the failure
-     * {@link Durability} exists to prevent. When the fallback did perform a
-     * plain rename it is the same inode and this is a harmless no-op.
-     *
-     * <p>Called <em>after</em> {@link #verifyWroteUnderExpectedBase}, not
-     * inside the fallback branch: it can throw, and a throw before that check
-     * would skip the check's own cleanup, leaving a misdirected record in
-     * place instead of unlinking it.
-     *
-     * <p>Package-private so a test can exercise this directly: no filesystem
-     * in the test environment refuses {@code ATOMIC_MOVE}, so the only other
-     * way to reach it would be a fake {@code FileSystemProvider}. An instance
-     * method rather than a static one taking the collaborator as an argument,
-     * so the store's own {@link Durability} -- and with it the per-store
-     * warn-once budget -- is the only one that can be used here.
-     * ({@link #verifyWroteUnderExpectedBase} stays static for a different
-     * reason: it touches no instance state at all.)
-     */
-    void syncPublishedRecord(Path target) throws IOException {
-        // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
-        // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
-        // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）
+        // 公開側が失敗していても改名だけは確定させる。その場合の報告は「公開済みだが
+        // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく
         try {
-            durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
-        } catch (IOException syncFailed) {
-            // この経路では移動が既に成功しており、記録はもう見えている。保存を失敗として
-            // 報告するのは変えない（fsync のエラーはカーネルが書き込みエラーに当たった
-            // ことを意味し、ページキャッシュ側が読めても disk 上は壊れていることがある）が、
-            // 「書けなかった」と読める報告のままだと、実際には list に出て
-            // --rerun-failed も引ける記録に対して全ジョブの再実行へ誘導してしまう。
-            // 何が起きたのかを添えて、記録が残っている可能性を伝える
-            throw new IOException("the record was published but could not be confirmed durable; "
-                    + "'" + target.getFileName() + "' may still be readable, so check "
-                    + "'list' before re-running the batch", syncFailed);
+            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+        } catch (IOException renameFailed) {
+            // 運用者に伝えるべき主因は公開側なので、そちらがあれば添えるに留める
+            if (publishFailed != null) {
+                publishFailed.addSuppressed(renameFailed);
+            } else {
+                publishFailed = renameFailed;
+            }
+        }
+        // どちらかが失敗していれば、案内の文面を持つ方をそのまま伝える
+        if (publishFailed != null) {
+            throw publishFailed;
         }
     }
 

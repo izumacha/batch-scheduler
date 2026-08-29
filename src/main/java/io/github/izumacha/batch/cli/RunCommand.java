@@ -159,8 +159,11 @@ public final class RunCommand implements Callable<Integer> {
             // ここで捕捉しないと picocli の既定ハンドラがスタックトレースをそのまま
             // 標準エラーに出してしまい、他のすべての失敗経路が守っている
             // 「スタックトレースを外部に出さない」という規約（§9 fail-closed）から
-            // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する
-            System.err.println("error: " + CliFormat.safeMessage(e));
+            // この一箇所だけ外れてしまうため、他の catch と同様に 1 行のメッセージへ変換する。
+            // 原因まで併記するのは、BatchExecutionException の外側メッセージが
+            // 「unexpected error while executing batch '...' (runId=...)」で診断情報を
+            // 一切持たず、原因を落とすと何が起きたのか手がかりがゼロになるため
+            System.err.println("error: " + CliFormat.safeMessageWithCause(e));
             return BatchCli.EXIT_CONFIG;
         }
 

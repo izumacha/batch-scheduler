@@ -237,6 +237,26 @@ class CliFormatTest {
         assertTrue(rendered.contains("state"), rendered);
     }
 
+    /**
+     * 添えられた診断（addSuppressed）が併記されることを確認する。
+     * 保存側は「アトミック移動が使えなかった理由」「誤配置ファイルを削除できなかった
+     * こと」などを主因ではない情報として addSuppressed で運んでいる。ここで描画
+     * しなければ、集めているだけで誰にも届かない情報になる。
+     */
+    @Test
+    void safeMessageWithCause_rendersSuppressedDiagnostics() {
+        // 主因に、判断材料となる別の失敗を添える（保存側と同じ形）
+        java.io.IOException primary = new java.io.IOException("fallback move failed");
+        primary.addSuppressed(new java.io.IOException("atomic move unsupported"));
+        Exception outer = new java.io.UncheckedIOException("failed to save execution result", primary);
+        // 主因も添えられた側も 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("fallback move failed"), rendered);
+        assertTrue(rendered.contains("atomic move unsupported"), rendered);
+        // 主因と区別できる印が付いている
+        assertTrue(rendered.contains("also:"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

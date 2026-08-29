@@ -144,21 +144,18 @@ final class CliFormat {
     static String safeMessageWithCause(Throwable t) {
         // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める
         StringBuilder rendered = new StringBuilder(safeMessage(t));
+        // 外側に添えられた診断（addSuppressed）も併記する
+        appendSuppressed(rendered, t);
         // 原因を根元までたどって併記する。1 段だけだと、途中で説明を足して包み直した
         // 経路（保存の「記録は公開済みだが耐久性を確認できなかった」がこれ）で
-        // 肝心の理由（ENOSPC など）が落ちる。説明を足した経路ほど根本原因が消える、
-        // という逆転になっていた
+        // 肝心の理由（ENOSPC 等）が落ちる。説明を足した経路ほど理由が消える逆転になる
         Throwable cause = t.getCause();
         // 万一 getCause() が循環していても止まるよう、たどる深さに上限を設ける
         for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
-            // この段の表現（クラス名とメッセージ）を組み立てる
-            String step = cause.toString();
-            // 既に出ている文言は繰り返さない。メッセージを渡さずに包んだ例外
-            // （new UncheckedIOException(cause)）は Throwable が原因の toString() を
-            // そのまま detailMessage に採用するため、無条件に足すと同じ文が 2 回並ぶ
-            if (rendered.indexOf(step) < 0) {
-                rendered.append(" (").append(step).append(')');
-            }
+            // この段の表現（クラス名とメッセージ）を併記する
+            appendDetail(rendered, cause.toString());
+            // その段に添えられた診断も併記する
+            appendSuppressed(rendered, cause);
             // 次の段（さらに内側の原因）へ進む
             cause = cause.getCause();
         }
@@ -172,6 +169,37 @@ final class CliFormat {
         // それが端末へ出る。このクラスは stripControlChars を「唯一のチョークポイント」と
         // 位置づけているので、端末へ向かう新しい経路もそこを通す
         return stripControlChars(rendered.toString());
+    }
+
+    /**
+     * {@code throwable} に添えられた診断（{@code addSuppressed}）を併記する。
+     *
+     * <p>抑制された例外は「主因ではないが、判断材料になる別の失敗」を運ぶために
+     * 付けられている。たとえばアトミック移動が使えなかった理由は、フォールバックも
+     * 失敗したときに主因ではなくなるが、「この保存先ではこの経路を通るのが普通なのか」を
+     * 判断する材料はそちらにしかない。ここで描画しなければ、集めているだけで
+     * 誰にも届かない情報になる。
+     */
+    private static void appendSuppressed(StringBuilder rendered, Throwable throwable) {
+        // 添えられた失敗を順に併記する（無ければ何もしない）
+        for (Throwable suppressed : throwable.getSuppressed()) {
+            // 主因と区別できるよう "also:" を付ける
+            appendDetail(rendered, "also: " + suppressed);
+        }
+    }
+
+    /**
+     * まだ出ていない詳細だけを「 (詳細)」の形で追記する。
+     *
+     * <p>メッセージを渡さずに包んだ例外（{@code new UncheckedIOException(cause)}）は
+     * {@code Throwable} が原因の {@code toString()} をそのまま detailMessage に
+     * 採用するため、無条件に足すとまったく同じ文が 2 回並ぶ。
+     */
+    private static void appendDetail(StringBuilder rendered, String detail) {
+        // 既に出ている文言は繰り返さない
+        if (rendered.indexOf(detail) < 0) {
+            rendered.append(" (").append(detail).append(')');
+        }
     }
 
     /**
