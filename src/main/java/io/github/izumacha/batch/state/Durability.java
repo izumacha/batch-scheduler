@@ -7,6 +7,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -504,15 +505,26 @@ final class Durability {
             // 判定と open の間で差し替えられる隙間は残るが（Java から原子的に
             // 「通常ファイルなら開く」と要求する手段が無い）、置きっぱなしの FIFO は
             // これで確実に警告へ落ちる。失敗の扱いは他の開けない理由と同じ
-            // 判定はそれぞれの open と同じリンクの扱いで行う。ディレクトリ側は追従して
-            // 開くので追従して確かめ、通常ファイル側は NOFOLLOW で開くので追従せずに確かめる
-            boolean openable = directory
-                    ? Files.isDirectory(path)
-                    : Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS);
-            if (!openable) {
-                throw new IOException("refusing to sync '" + path + "': not a "
-                        + (directory ? "directory" : "regular file")
-                        + " (a pipe or device here would block the open forever)");
+            // 「開くとブロックしうる種別か」だけを見る。isOther() が真になるのは
+            // 通常ファイル・ディレクトリ・シンボリックリンクのいずれでもないもの、
+            // つまり FIFO・ソケット・デバイスで、まさに open(2) が固まる相手。
+            // 「通常ファイルか」で判定してしまうと、単に存在しない・stat できない
+            // だけの場合まで自前の文面に化けてしまう。警告は段階につき 1 回きりで
+            // 運用者が受け取る唯一の通知なので、行方不明のファイルに対して
+            // 「パイプを探せ」と言うのは、その 1 回を無駄にすることになる。
+            // 読めなければ判定はあきらめ、open が本当の理由を出すのに任せる
+            BasicFileAttributes attributes = null;
+            try {
+                attributes = Files.readAttributes(
+                        path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            } catch (IOException | RuntimeException statFailed) {
+                // 種別が分からないだけなので、下の open に本当の失敗を語らせる
+                attributes = null;
+            }
+            if (attributes != null && attributes.isOther()) {
+                throw new IOException("refusing to sync '" + path
+                        + "': it is a pipe, socket, or device, and opening one here "
+                        + "would block until a peer appeared");
             }
             opened = FileChannel.open(path, options);
         } catch (IOException | RuntimeException e) {

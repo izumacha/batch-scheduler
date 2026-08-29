@@ -553,7 +553,9 @@ class DurabilityTest {
         assertDoesNotThrow(() -> durability.sync(fifo, Durability.Step.RECORD_CONTENT));
         // 握り潰しではなく、理由の分かる警告として残る
         assertEquals(1, warnings().size(), warnings().toString());
-        assertTrue(warnings().get(0).contains("not a regular file"), warnings().get(0));
+        assertTrue(warnings().get(0).contains("pipe, socket, or device"), warnings().get(0));
+        // 通常ファイルとして扱えないことも分かる文面になっている
+        assertTrue(warnings().get(0).contains("block"), warnings().get(0));
         // 同期していないので完了ログは出ない
         assertEquals(List.of(), completedSteps());
     }
@@ -577,6 +579,42 @@ class DurabilityTest {
         // 「エントリは耐久・中身は非耐久」という最悪の組み合わせを自分で作ってしまう
         new JsonExecutionStore(dir).commitPublishedRecord(target, dir, false, false);
         assertEquals(List.of(), completedSteps());
+    }
+
+    @Test
+    void aFallbackPublishThatCannotBeConfirmedDoesNotCommitTheRename(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        // 公開された記録の位置に FIFO を置き、その中身の同期を確実に失敗させる
+        Path published = dir.resolve("run1.json");
+        Process mkfifo = new ProcessBuilder("mkfifo", published.toString())
+                .redirectErrorStream(true).start();
+        assumeTrue(mkfifo.waitFor() == 0, "mkfifo が使えないので FIFO を用意できない");
+        // ディレクトリの同期ができる環境でだけ「改名を確定させていない」ことを観測できる
+        assumeTrue(directorySyncSupported(dir), "この環境ではディレクトリを同期できない");
+        // 非アトミック移動で公開した体で呼ぶ。一時ファイル側は確定できていた（true）と
+        // しても、この経路の公開先は別の inode なので、それを引き継いではいけない
+        new JsonExecutionStore(dir).commitPublishedRecord(published, dir, true, true);
+        // 公開先の中身が未確定なので改名も確定させない（＝完了ログが 1 つも出ない）。
+        // ここで RECORD_RENAME が出ると「エントリは耐久・中身は非耐久」を作ってしまう
+        assertEquals(List.of(), completedSteps());
+    }
+
+    @Test
+    void aFallbackPublishWhoseFlushFailsStillReportsTheFailure(@TempDir Path dir) throws IOException {
+        // 公開先を用意し、そのディレクトリの権限を落として同期を失敗させる…のではなく、
+        // 中身が未確定でも例外の伝播が止まらないことを、公開側の失敗を作って確かめる。
+        // 公開先が存在しなければ PUBLISHED_RECORD_CONTENT は open に失敗して警告どまり
+        // （＝伝播しない）になるので、ここで検証するのは「未確定でも return で
+        // 握り潰さない」構造の方: 未確定かつ失敗なしなら例外は出ない
+        Path missing = dir.resolve("run1.json");
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        // 公開先が無いので同期は警告どまり。改名も抑止されるが、例外にはならない
+        assertDoesNotThrow(() -> store.commitPublishedRecord(missing, dir, true, true));
+        // 未確定なので改名は確定していない
+        assertFalse(completedSteps().contains(Durability.Step.RECORD_RENAME), completedSteps().toString());
+        // 握り潰しではなく警告として残っている
+        assertTrue(warnings().stream().anyMatch(w -> w.contains("PUBLISHED_RECORD_CONTENT")),
+                warnings().toString());
     }
 
     @Test
@@ -609,6 +647,11 @@ class DurabilityTest {
         assertEquals(1, warnings().size());
         // 通常ファイルには環境差の言い訳をしない文面が使われる
         assertTrue(warnings().get(0).contains("could not sync the file"), warnings().get(0));
+        // 原因は open が出した本物（NoSuchFile）で、種別チェックの自前の文面ではない。
+        // 警告は段階につき 1 回きり＝運用者が受け取る唯一の通知なので、行方不明の
+        // ファイルに対して「パイプを探せ」と言うとその 1 回を無駄にしてしまう
+        assertTrue(warnings().get(0).contains("NoSuchFile"), warnings().get(0));
+        assertFalse(warnings().get(0).contains("pipe, socket, or device"), warnings().get(0));
     }
 
     @Test

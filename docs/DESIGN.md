@@ -378,7 +378,12 @@ malicious resource exhaustion and against tampering with the state directory:
   a state directory on a mount whose `fsync(2)` is not implemented for regular
   files (some `vboxsf`/9p/FUSE setups return `EINVAL`/`ENOSYS` there): every
   `run` will report a persistence failure rather than silently accept writes it
-  cannot confirm. `IOException` carries no way to tell "fsync unsupported" from
+  cannot confirm. Be clear about the blast radius — the record is not merely
+  reported as unconfirmed, it is **discarded**: the flush throws before the
+  rename, the `finally` deletes the temp file, and `run` exits 3 with no
+  `<runId>.json` at all, so `list` stays empty and `--rerun-failed` is
+  unusable on that mount, on every run rather than once. That is deliberate.
+  `IOException` carries no way to tell "fsync unsupported" from
   "fsync reported ENOSPC", and between the two mistakes a loud, immediate
   failure the operator sees on the very first run is preferable to records that
   look saved and are not. Directory syncs keep their escape hatch because there

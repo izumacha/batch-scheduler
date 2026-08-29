@@ -602,14 +602,21 @@ public final class JsonExecutionStore implements ExecutionStore {
             boolean publishedWithoutAtomicity, boolean contentConfirmed) throws IOException {
         // 公開側の同期が失敗したときの例外を覚えておく入れ物（成功なら null のまま）
         IOException publishFailed = null;
+        // 「公開された記録の中身がディスクへ確定しているか」。改名を確定させてよいかは
+        // これで決める。既定は呼び出し元が確かめた一時ファイル側の結果
+        boolean contentsDurable = contentConfirmed;
         // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
         if (publishedWithoutAtomicity) {
             // target ではなく検証済みの実体ディレクトリから組み立て直した経路を使う。
             // target は baseDir を途中に含んでおり、開き直す時点でもう一度たどることに
             // なるため（改名の同期が expectedRealBase を使うのと同じ理由）
             Path published = expectedRealBase.resolve(target.getFileName());
+            // この経路では公開先は別の inode で、一時ファイル側の同期は「別のファイルを
+            // 確定させた」だけ。公開された中身が確定したかを語れるのはこの同期しかないので、
+            // 一時ファイル側の結果は引き継がず、ここで測り直す（fail-safe に false から）
+            contentsDurable = false;
             try {
-                durability.sync(published, Durability.Step.PUBLISHED_RECORD_CONTENT);
+                contentsDurable = durability.sync(published, Durability.Step.PUBLISHED_RECORD_CONTENT);
             } catch (IOException syncFailed) {
                 // この経路では移動が既に成功しており、記録はもう見えている。保存を失敗として
                 // 報告するのは変えない（fsync のエラーはカーネルが書き込みエラーに当たった
@@ -622,28 +629,27 @@ public final class JsonExecutionStore implements ExecutionStore {
                         + "'list' before re-running the batch", syncFailed);
             }
         }
-        // 公開側が失敗していても改名だけは確定させる。その場合の報告は「公開済みだが
-        // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく
-        try {
-            // 中身を確定できていないときは改名も確定させない。ここで改名だけを確定させると
-            // 「ディレクトリエントリは耐久、中身は非耐久」という、このクラスの説明が
-            // 1 つ目に挙げている最悪の組み合わせを自分で作ってしまう（記録は存在するのに
-            // 読むと壊れていて tryRead に飛ばされ、list からは消え --rerun-failed も
-            // 引けない）。両方を確定させないままにしておけば、電源断で失うのは記録
-            // まるごとで、少なくとも「壊れた記録が残る」状態にはならない
-            if (!contentConfirmed) {
-                LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
-                        + "' because its contents were never confirmed durable");
-                return;
+        // 中身を確定できているときだけ改名も確定させる。中身が未確定なのに改名だけを
+        // 確定させると「ディレクトリエントリは耐久、中身は非耐久」という、このクラスの
+        // 説明が 1 つ目に挙げている最悪の組み合わせを自分で作ってしまう（記録は存在するのに
+        // 読むと壊れていて tryRead に飛ばされ、list からは消え --rerun-failed も引けない）。
+        // 両方を確定させないままにしておけば、電源断で失うのは記録まるごとで、
+        // 少なくとも「壊れた記録が残る」状態にはならない
+        if (contentsDurable) {
+            try {
+                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            } catch (IOException renameFailed) {
+                // 運用者に伝えるべき主因は公開側なので、そちらがあれば添えるに留める
+                if (publishFailed != null) {
+                    publishFailed.addSuppressed(renameFailed);
+                } else {
+                    publishFailed = renameFailed;
+                }
             }
-            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
-        } catch (IOException renameFailed) {
-            // 運用者に伝えるべき主因は公開側なので、そちらがあれば添えるに留める
-            if (publishFailed != null) {
-                publishFailed.addSuppressed(renameFailed);
-            } else {
-                publishFailed = renameFailed;
-            }
+        } else {
+            // 抑止したこと自体は追えるようにしておく（同期の完了ログと同じ FINE）
+            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
+                    + "' because its contents were never confirmed durable");
         }
         // どちらかが失敗していれば、案内の文面を持つ方をそのまま伝える
         if (publishFailed != null) {
