@@ -160,6 +160,22 @@ class CliFormatTest {
         assertTrue(rendered.contains("record published but unconfirmed"), rendered);
     }
 
+    /**
+     * 外側にメッセージを渡さずに包んだ例外（Throwable が原因の toString() を
+     * そのまま detailMessage に採用する形）では、同じ文が 2 回並ばないことを確認する。
+     * JsonExecutionStore のシンボリックリンク拒否がこの形をしており、無条件に
+     * 原因を足すと「... /x (java.io.IOException: ... /x)」になっていた。
+     */
+    @Test
+    void safeMessageWithCause_doesNotRepeatACauseAlreadyInTheMessage() {
+        // メッセージを渡さずに包む（detailMessage は原因の toString() になる）
+        Exception cause = new java.io.IOException("refusing to use a symlinked state directory: /x");
+        Exception outer = new java.io.UncheckedIOException((java.io.IOException) cause);
+        // 併記されるのは 1 回だけで、丸括弧での繰り返しは付かない
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertEquals(cause.toString(), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

@@ -286,7 +286,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             }
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
-            verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
+            Path verifiedBase = verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
             // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる。
             // 検証より前に確定させると、差し替えを検知して削除するはずの誤配置ファイルを
             // 先に永続化してしまう。同期先に baseDir ではなく expectedRealBase を使うのは、
@@ -306,7 +306,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく。
                 // この同期はディレクトリ対象＝失敗しても例外にならない（Durability の
                 // shouldFailTheSave 参照）ため、finally に置いても元の例外を隠さない
-                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+                durability.sync(verifiedBase, Durability.Step.RECORD_RENAME);
             }
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
@@ -590,7 +590,7 @@ public final class JsonExecutionStore implements ExecutionStore {
      * real directories, without needing to race an actual filesystem swap
      * into the middle of a single {@link #save} call.
      */
-    static void verifyWroteUnderExpectedBase(Path target, Path expectedRealBase, Path baseDir) throws IOException {
+    static Path verifyWroteUnderExpectedBase(Path target, Path expectedRealBase, Path baseDir) throws IOException {
         // 実際に書き込んだ場所（target の実体パスの親）が、書き込み開始時に確認した
         // 実体ディレクトリと一致するかを検証する
         if (!target.toRealPath().getParent().equals(expectedRealBase)) {
@@ -601,6 +601,10 @@ public final class JsonExecutionStore implements ExecutionStore {
             throw new UncheckedIOException(new IOException(
                     "refusing to use a symlinked state directory: " + baseDir));
         }
+        // 検証を通った実体ディレクトリを返す。呼び出し元の改名同期はこの戻り値を使うため、
+        // 同期を検証より前へ動かすとコンパイルが通らない。順序を守らせる手段を
+        // 「コメントとレビュー」から「型」へ移している（誤配置の記録を先に確定させない）
+        return expectedRealBase;
     }
 
     /**

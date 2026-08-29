@@ -368,10 +368,13 @@ class DurabilityTest {
 
     @Test
     void directoryFailureWordingSeparatesAPlatformGapFromARealError() {
-        // 開けなかった場合は「この環境では開けない」という説明になる
-        assertTrue(Durability.describeFailure(Durability.Step.RECORD_RENAME,
-                        new Durability.OpenFailure(new IOException("boom")))
-                .contains("does not allow this"));
+        // 開けなかった場合は、環境差の可能性と本物の問題の可能性を両方示す文面になる。
+        // どちらかを断定しないのは、Windows の「そもそも開けない」も POSIX の
+        // AccessDenied も同じ IOException として届き、型からは区別できないため
+        String openFailed = Durability.describeFailure(Durability.Step.RECORD_RENAME,
+                new Durability.OpenFailure(new IOException("boom")));
+        assertTrue(openFailed.contains("never possible on platforms such as Windows"), openFailed);
+        assertTrue(openFailed.contains("real problem"), openFailed);
         // 開けたうえで同期に失敗した場合は、環境差ではなく本物のエラーだと言い切る。
         // ここを取り違えると、警告は段階ごとに 1 回きりなので、記録が確定していない
         // という唯一の合図を「この環境ではよくあること」として読み飛ばさせてしまう
@@ -456,7 +459,7 @@ class DurabilityTest {
         // 失敗は握り潰さず警告として残る
         assertEquals(2, warnings().size());
         // 警告には「省略すると何が起こりうるか」が含まれ、読んだ人が影響を判断できる
-        assertTrue(warnings().get(0).contains("taking every record inside it"), warnings().get(0));
+        assertTrue(warnings().get(0).contains("taking every record in it"), warnings().get(0));
         assertTrue(warnings().get(1).contains("vanish or roll back"), warnings().get(1));
     }
 

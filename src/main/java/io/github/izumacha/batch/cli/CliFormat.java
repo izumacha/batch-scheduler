@@ -139,12 +139,18 @@ final class CliFormat {
      * バッチ全体の再実行へ誘導してしまう。スタックトレースは出さない（§9）。
      */
     static String safeMessageWithCause(Throwable t) {
+        // 外側の例外のメッセージ（無ければクラス名）を取り出す
+        String message = safeMessage(t);
         // 失敗の根本原因（例: 既存ファイルと衝突・権限不足・同期の失敗）を取り出す
         Throwable cause = t.getCause();
-        // 原因がある場合だけ「 (原因)」の形で併記する
-        String detail = cause != null ? " (" + cause + ")" : "";
+        // 原因があり、かつ外側のメッセージに既に含まれていないときだけ併記する。
+        // メッセージを渡さずに new UncheckedIOException(cause) とした場合、Throwable が
+        // 原因の toString() をそのまま detailMessage に採用するため、無条件に足すと
+        // まったく同じ文が 2 回並ぶ（シンボリックリンクの拒否がこの形をしている）
+        boolean alreadyShown = cause != null && message.contains(cause.toString());
+        String detail = cause != null && !alreadyShown ? " (" + cause + ")" : "";
         // 外側のメッセージと原因を 1 行にまとめて返す
-        return safeMessage(t) + detail;
+        return message + detail;
     }
 
     /**

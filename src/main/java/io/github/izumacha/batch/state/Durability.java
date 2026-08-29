@@ -98,8 +98,10 @@ final class Durability {
     enum Step {
         // 保存先ディレクトリの作成を確定させる用途（省略すると初回保存でディレクトリごと消えうる）
         BASE_DIRECTORY(Target.DIRECTORY,
-                "the state directory itself may not survive a power loss, "
-                + "taking every record inside it"),
+                // 同期する相手は「作った階層」ではなく「それを含むディレクトリ」なので、
+                // 警告に出るパスもそちら。危ないのはその中に作った階層の方だと分かる文面にする
+                "the state directory level created inside this one may not survive a power "
+                + "loss, taking every record in it"),
         // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）
         RECORD_CONTENT(Target.FILE,
                 "the record may come back empty or garbled after a power loss, "
@@ -423,11 +425,18 @@ final class Durability {
      * {@link #flush} failed.
      *
      * <p>Getting this wrong is not cosmetic. The warning is emitted once per
-     * step for the life of the process, so it is the only notice the operator
-     * will ever get. Only a directory can plausibly fail to open because of
-     * the platform, so wording a genuine flush error that way -- or wording a
+     * step per store, so it is effectively the only notice the operator will
+     * get. Only a directory can plausibly fail to open because of the
+     * platform, so wording a genuine flush error that way -- or wording a
      * regular file's failure that way at all -- tells the operator to ignore
      * the one signal saying their records are not reaching the disk.
+     *
+     * <p>The open-failure wording deliberately stops short of calling itself
+     * benign. Windows and a POSIX {@code AccessDenied}/{@code NoSuchFile} both
+     * surface as an {@link IOException} from the same call, so the type cannot
+     * tell them apart; claiming "this platform may not allow it" would dismiss
+     * a real permissions problem. It names both possibilities and points at
+     * the cause, which {@code warnOnce} appends.
      *
      * <p>Package-private so both wordings can be pinned by a test: the
      * "opened but the flush failed" branch needs a disk that reports an error
@@ -441,7 +450,9 @@ final class Durability {
         // 開く段階で失敗したのなら、この環境がディレクトリを開けないという説明が妥当
         if (e instanceof OpenFailure) {
             return "could not open the directory to sync it "
-                    + "(a platform such as Windows does not allow this)";
+                    + "(never possible on platforms such as Windows; anywhere else this is a "
+                    + "real problem -- permissions, or the directory was removed -- so read "
+                    + "the cause)";
         }
         // 開けたうえで失敗したのなら、環境差ではなく本物の同期エラーである
         return "the directory opened but the sync itself failed, "
