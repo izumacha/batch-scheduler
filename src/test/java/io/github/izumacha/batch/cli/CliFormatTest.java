@@ -217,6 +217,26 @@ class CliFormatTest {
         assertFalse(rendered.contains("root"), rendered);
     }
 
+    /**
+     * セキュリティ回帰テスト: 原因のメッセージに含まれる端末制御文字が除去されることを
+     * 確認する。NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージに
+     * するため、外部から与えられたパスが端末へ生で出る経路になりうる。
+     * 本クラスは stripControlChars を「唯一のチョークポイント」と位置づけている。
+     */
+    @Test
+    void safeMessageWithCause_stripsTerminalControlCharactersFromCauses() {
+        // 端末制御文字（ESC・BEL）を含むパスを持つ原因を組み立てる
+        Exception cause = new java.nio.file.NoSuchFileException("/srv/\u001b]0;pwned\u0007state");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        // 生の ESC / BEL が出力へ漏れていない
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertFalse(rendered.contains("\u001b"), rendered);
+        assertFalse(rendered.contains("\u0007"), rendered);
+        // 診断に必要なパスそのものは残っている
+        assertTrue(rendered.contains("state"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

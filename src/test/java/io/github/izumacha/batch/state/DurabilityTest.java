@@ -516,9 +516,9 @@ class DurabilityTest {
 
     @Test
     void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
-        // 開けなかった失敗と、開けたうえで書き戻しに失敗した場合を用意する
-        IOException openFailed = new Durability.OpenFailure(new IOException("boom"));
-        IOException flushFailed = new IOException("boom");
+        // 「書き戻しまで到達したか」の 2 通りを用意する（false=開けなかった / true=書き戻しで失敗）
+        boolean openFailed = false;
+        boolean flushFailed = true;
         // 記録のバイト列を対象にする 2 段階は、書き戻しの失敗なら保存を失敗させる。
         // ここを握り潰すと、fsync が ENOSPC を返してダーティページが捨てられた後でも
         // 改名まで進み、空の記録を公開して「保存できました」と報告してしまう

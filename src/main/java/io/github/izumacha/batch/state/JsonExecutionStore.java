@@ -251,10 +251,21 @@ public final class JsonExecutionStore implements ExecutionStore {
                 durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
                 publishedWithoutAtomicity = publishRecord(tmp, target);
-            } finally {
-                // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
-                Files.deleteIfExists(tmp);
+            } catch (IOException failed) {
+                // 後始末が失敗しても、進行中の失敗を差し替えない。ここを finally に
+                // すると、たとえばディスク満杯（同期が投げた ENOSPC）が、直後の削除失敗
+                // （親ディレクトリの消失など）に置き換わり、このクラスが伝えるべき
+                // ただ一つの診断が捨てられる。commitPublishedRecord と同じ形に揃える
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException cleanupFailed) {
+                    failed.addSuppressed(cleanupFailed);
+                }
+                throw failed;
             }
+            // 正常に公開できたので、残っていれば一時ファイルを片付ける
+            // （移動が成功していれば既に存在しないため、通常は何もしない）
+            Files.deleteIfExists(tmp);
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
@@ -644,9 +655,17 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 一致しない場合、シーケンスの途中で baseDir がシンボリックリンクへ差し替えられ、
             // 意図しない場所へ書き込まれたことを意味するため、誤って書き込まれたファイルを
             // 削除したうえで拒否する（fail-closed）
-            Files.deleteIfExists(target);
-            throw new UncheckedIOException(new IOException(
+            UncheckedIOException rejection = new UncheckedIOException(new IOException(
                     "refusing to use a symlinked state directory: " + baseDir));
+            try {
+                Files.deleteIfExists(target);
+            } catch (IOException cleanupFailed) {
+                // 差し替え先は攻撃者の持ち物になりうるので、削除に失敗することは十分あり得る。
+                // その場合でも拒否そのものは必ず伝える。削除の失敗で置き換わってしまうと、
+                // 「state ディレクトリが差し替えられた」という唯一の合図が消える
+                rejection.addSuppressed(cleanupFailed);
+            }
+            throw rejection;
         }
     }
 

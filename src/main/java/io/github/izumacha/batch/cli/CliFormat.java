@@ -167,8 +167,11 @@ final class CliFormat {
         if (cause != null) {
             rendered.append(" (...further causes omitted)");
         }
-        // 1 行にまとめた文字列を返す
-        return rendered.toString();
+        // 端末制御文字を取り除いてから返す。原因のメッセージにはパス（NoSuchFile /
+        // AccessDenied はオフェンディングパスをそのままメッセージにする）が生で入り、
+        // それが端末へ出る。このクラスは stripControlChars を「唯一のチョークポイント」と
+        // 位置づけているので、端末へ向かう新しい経路もそこを通す
+        return stripControlChars(rendered.toString());
     }
 
     /**

@@ -243,13 +243,16 @@ final class Durability {
         try {
             flush(path, step);
         } catch (IOException e) {
+            // 「書き戻しまで到達したか」を 1 度だけ判定し、方針の決定と文面の決定の
+            // 両方に同じ答えを渡す。2 か所で別々に判定すると、片方だけ直したときに
+            // 「本物のエラーなのに環境の制約として説明する」ずれが生まれる
+            boolean reachedTheFlush = !(e instanceof OpenFailure);
             // 保存そのものを失敗させるべき失敗かどうかを判定する（下の表を参照）
-            if (shouldFailTheSave(step, e)) {
+            if (shouldFailTheSave(step, reachedTheFlush)) {
                 throw e;
             }
-            // そうでなければ、確定できなかったことを警告として残すだけにする。
-            // 書き戻しまで到達していたかどうかで文面が変わる
-            warnOnce(path, step, e, describeFailure(step, !(e instanceof OpenFailure)));
+            // そうでなければ、確定できなかったことを警告として残すだけにする
+            warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
         } catch (RuntimeException e) {
             // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）。
             // 開く前に落ちているので、開けなかった場合と同じ文面を使う。文面の決定を
@@ -269,21 +272,27 @@ final class Durability {
      *   <li>The step flushes the record's own bytes ({@link Step.Target#FILE}). A
      *       directory flush costs the entry rather than the bytes, and is the
      *       one that legitimately cannot run on some platforms.</li>
-     *   <li>The failure came from the flush, not from the open. Being unable
+     *   <li>{@code reachedTheFlush} -- the failure came from the flush, not
+     *       from the open. Being unable
      *       to reopen a file whose bytes were already written and closed says
      *       nothing about whether those bytes are good -- an antivirus holding
      *       the file on Windows, say -- so failing the save there would report
      *       "failed to persist run state" for a record that is on disk.</li>
      * </ul>
      *
+     * <p>Takes the boolean rather than the exception so the caller decides
+     * "did we reach the flush?" once and hands the same answer to this method
+     * and to {@link #describeFailure}; deciding it twice lets the policy and
+     * the wording that explains it drift apart.
+     *
      * <p>Package-private and pure, because the second condition cannot be
      * reached from a test any other way: no test environment can make
      * {@code fsync} itself report an error on demand, so without this seam
      * the difference between the two halves would go unverified.
      */
-    static boolean shouldFailTheSave(Step step, IOException e) {
-        // 記録のバイト列を対象にする段階で、かつ「開けなかった」以外の失敗のときだけ
-        return step.failureFailsTheSave() && !(e instanceof OpenFailure);
+    static boolean shouldFailTheSave(Step step, boolean reachedTheFlush) {
+        // 記録のバイト列を対象にする段階で、かつ書き戻しまで到達していた失敗のときだけ
+        return step.failureFailsTheSave() && reachedTheFlush;
     }
 
     /**
