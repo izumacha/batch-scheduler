@@ -117,15 +117,6 @@ import java.util.logging.Logger;
  */
 final class Durability {
 
-    /**
-     * ログ 1 行に載せる例外表現の最大文字数。
-     *
-     * <p>{@code FileSystemException} は関係するパスを丸ごと本文に持つため、上限が
-     * 無いと 1 行が数キロバイトになりうる。既定の {@code ConsoleHandler} は CLI と
-     * 同じ stderr へ書くので、表示経路としては CLI のエラー行と同じ扱いにする。
-     */
-    private static final int MAX_LOGGED_DETAIL_CHARS = 500;
-
     // このクラス専用のロガー（同期に失敗したときの警告に使う）
     private static final Logger LOGGER = Logger.getLogger(Durability.class.getName());
 
@@ -619,7 +610,7 @@ final class Durability {
                 LOGGER.fine(() -> "could not determine the file type of '"
                         + SafeText.oneLine(path.toString())
                         + "' (" + SafeText.bounded(SafeText.oneLine(String.valueOf(statFailed)),
-                                MAX_LOGGED_DETAIL_CHARS) + "); letting the open report the reason");
+                                JsonExecutionStore.MAX_LOGGED_DETAIL_CHARS) + "); letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
                 throw new IOException("refusing to sync '" + path
@@ -701,7 +692,7 @@ final class Durability {
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
         LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.oneLine(path.toString()) + "': "
                 + reason + " (" + SafeText.bounded(SafeText.oneLine(String.valueOf(shown)),
-                        MAX_LOGGED_DETAIL_CHARS) + "); " + step.consequence
+                        JsonExecutionStore.MAX_LOGGED_DETAIL_CHARS) + "); " + step.consequence
                 + ". This warning is reported once per step, per store.");
     }
 }

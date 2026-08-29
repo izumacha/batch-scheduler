@@ -507,8 +507,11 @@ class DurabilityTest {
         // mkfifo が使えない環境（Windows など）ではこの検査を飛ばす
         assumeTrue(mkfifo.waitFor() == 0, "mkfifo が使えないので FIFO を用意できない");
         // 通常ファイルでないと分かった時点で開かずに拒否するので、ここで固まらない。
-        // 固まれば junit-platform.properties の既定タイムアウト（60 秒）で落ちる
-        // （＝ブロックの回帰が、CI ジョブのハングではなくテスト失敗として現れる）
+        // 固まった場合、JUnit の既定タイムアウトはこのテストを失敗として報告するが、
+        // open(2) でブロックしたスレッドは Thread.interrupt() では止まらないため
+        // フォークは残り続ける。CI が 6 時間上限まで走らないのは pom.xml の
+        // forkedProcessTimeoutInSeconds が外側から切るおかげ（どちらか片方では
+        // 足りない。詳細は junit-platform.properties のコメント）
         assertDoesNotThrow(() -> durability.sync(fifo, Durability.Step.RECORD_CONTENT));
         // 握り潰しではなく、理由の分かる警告として残る
         assertEquals(1, warnings().size(), warnings().toString());
@@ -599,8 +602,11 @@ class DurabilityTest {
         }
         // ディレクトリの段階は追従して開くため、種別の判定も追従して行わないと
         // リンク自体は「その他」に見えず素通しし、open で無期限にぶら下がる。
-        // 固まれば junit-platform.properties の既定タイムアウト（60 秒）で落ちる
-        // （＝ブロックの回帰が、CI ジョブのハングではなくテスト失敗として現れる）
+        // 固まった場合、JUnit の既定タイムアウトはこのテストを失敗として報告するが、
+        // open(2) でブロックしたスレッドは Thread.interrupt() では止まらないため
+        // フォークは残り続ける。CI が 6 時間上限まで走らないのは pom.xml の
+        // forkedProcessTimeoutInSeconds が外側から切るおかげ（どちらか片方では
+        // 足りない。詳細は junit-platform.properties のコメント）
         assertDoesNotThrow(() -> durability.sync(link, Durability.Step.RECORD_RENAME));
         // 握り潰しではなく警告として残る
         assertEquals(1, warnings().size(), warnings().toString());

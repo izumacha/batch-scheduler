@@ -31,16 +31,6 @@ import java.util.concurrent.Callable;
 )
 public final class RunCommand implements Callable<Integer> {
 
-    /**
-     * エラー行に反映する {@code --rerun-failed} の run ID の最大文字数。
-     *
-     * <p>この値は {@code list} 経由で state ファイルから渡ってくる想定なので、
-     * 長さも外部が選べる。同じ行の {@code safeMessage} 側は既に有界なので、
-     * ここだけ無界だと「同じ値が 1 回は切られ、1 回はそのまま」出ることになる。
-     * 生成される run ID は 22 文字なので、正規の値が切られることはない。
-     */
-    private static final int MAX_ECHOED_RUN_ID_CHARS = 256;
-
     // バッチ YAML ファイルのパス（コマンドライン引数として受け取る）
     @Parameters(index = "0", paramLabel = "CONFIG", description = "path to the batch YAML file")
     Path config;
@@ -118,14 +108,14 @@ public final class RunCommand implements Callable<Integer> {
                 // safeMessage 側だけが整形されていると、同じ値が「1 回は無害化され、
                 // 1 回は生のまま」端末へ出て、制御文字の注入が素通りする
                 System.err.println("error: invalid --rerun-failed run id '"
-                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), MAX_ECHOED_RUN_ID_CHARS)
+                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), CliFormat.MAX_RUN_ID_CHARS)
                         + "': " + CliFormat.safeMessage(e));
                 return BatchCli.EXIT_CONFIG;
             }
             if (priorResult == null) {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '"
-                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), MAX_ECHOED_RUN_ID_CHARS)
+                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), CliFormat.MAX_RUN_ID_CHARS)
                         + "' under " + stateDir.toAbsolutePath());
                 // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
                 // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では

@@ -541,8 +541,9 @@ class CliFormatTest {
     void bounded_neverSplitsASurrogatePair() {
         // 補助文字（絵文字）だけを並べ、どこで切ってもペアの境界に当たりうる形にする
         String emoji = "\uD83D\uDE00";
-        // 切る位置が 1 文字ずつずれるよう、いろいろな上限で試す
-        for (int max = 4; max <= 40; max++) {
+        // 切る位置が 1 文字ずつずれるよう、いろいろな上限で試す。0〜3 も含めるのは、
+        // マーカーすら入らない極端な上限の分岐にだけ穴が残るのを防ぐため
+        for (int max = 0; max <= 40; max++) {
             String bounded = SafeText.bounded(emoji.repeat(50), max);
             // 片割れのサロゲートが残っていない
             for (int i = 0; i < bounded.length(); i++) {
@@ -558,6 +559,32 @@ class CliFormatTest {
             }
             // 上限は超えない
             assertTrue(bounded.length() <= max, "max=" + max + " got " + bounded.length());
+        }
+    }
+
+    /**
+     * 表のセル向けの切り詰め（末尾を落とす方）でもサロゲートを分断しないことを
+     * 確認する。run のサマリ表はジョブ出力を、list の BATCH 列は state ファイル由来の
+     * 値をここへ流すので、桁を揃えるために壊れた文字を作ってはいけない。
+     */
+    @Test
+    void shortMessage_neverSplitsASurrogatePair() {
+        String emoji = "\uD83D\uDE00";
+        for (int max = 0; max <= 40; max++) {
+            String shortened = CliFormat.shortMessage("x".repeat(10) + emoji.repeat(20), max);
+            for (int i = 0; i < shortened.length(); i++) {
+                char c = shortened.charAt(i);
+                if (Character.isHighSurrogate(c)) {
+                    assertTrue(i + 1 < shortened.length()
+                            && Character.isLowSurrogate(shortened.charAt(i + 1)),
+                            "lone high surrogate at " + i + " for max=" + max);
+                } else if (Character.isLowSurrogate(c)) {
+                    assertTrue(i > 0 && Character.isHighSurrogate(shortened.charAt(i - 1)),
+                            "lone low surrogate at " + i + " for max=" + max);
+                }
+            }
+            // 表の桁を崩さない（上限は超えない）
+            assertTrue(shortened.length() <= max, "max=" + max + " got " + shortened.length());
         }
     }
 

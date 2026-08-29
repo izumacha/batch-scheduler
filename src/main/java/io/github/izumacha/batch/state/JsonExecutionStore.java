@@ -112,8 +112,13 @@ public final class JsonExecutionStore implements ExecutionStore {
      * 数キロバイトの 1 行を返すことになる。CLI 側のエラー行を有界にしているのと
      * 同じ理由（表示経路は 1 つ）。既定のしきい値でも出る WARNING の側にこそ効く
      * 必要があるので、FINE の 1 件だけでなく、例外の表現を載せる全箇所へ掛ける。
+     *
+     * <p>{@code Durability} も同じ値を使う（同じパッケージ・同じ表示経路・同じ理由）。
+     * 2 か所に書くと、片方だけ広げたときに「同じ保存の失敗を伝える 2 行が、どちらの
+     * クラスが出したかで長さが違う」状態になり、しかも互いを参照していないので
+     * 気付けない（§6 一元管理）。
      */
-    private static final int MAX_LOGGED_DETAIL_CHARS = 500;
+    static final int MAX_LOGGED_DETAIL_CHARS = 500;
 
     // JSON ファイルを保存するベースディレクトリのパスを保持するフィールド
     private final Path baseDir;

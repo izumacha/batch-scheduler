@@ -56,7 +56,7 @@ final class CliFormat {
      * 上限を置くのは、改変された記録の runId が 16MiB まで許される（記録サイズの
      * 上限しか効かない）ため。
      */
-    private static final int MAX_RUN_ID_CHARS = 256;
+    static final int MAX_RUN_ID_CHARS = 256;
 
     /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
@@ -72,17 +72,6 @@ final class CliFormat {
     // null の Instant と、フォーマッタの表現範囲を超えて整形できない値の両方で共用する
     // （§6: マジック文字列を避け、単一の参照元に置く）
     private static final String PLACEHOLDER = "-";
-
-    // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
-    // ASCII の "..." にしているのは DESIGN.md「ASCII-only CLI diagnostics」の不変条件のため。
-    // System.out は JVM の stdout.encoding（＝プラットフォームのネイティブ文字集合）で符号化し、
-    // LANG 未設定の C/POSIX ロケール（Docker の JDK ベースイメージや CI コンテナの既定）では
-    // それが US-ASCII になる。以前ここで使っていた省略記号「…」(U+2026) は US-ASCII で
-    // 表現できないため "?" へ潰れ、切り詰め表示が "some messag?" のように
-    // 「壊れた出力」と区別できない見た目になっていた。
-    // ジョブ出力など外部由来の文字列の符号化はプラットフォーム側の責務とし、
-    // このツール自身が足す文言だけをロケール非依存に保つ方針（DESIGN.md 参照）
-    private static final String TRUNCATION_MARK = "...";
 
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private CliFormat() {
@@ -395,7 +384,7 @@ final class CliFormat {
      * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
      * {@link SafeText#oneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
      *
-     * <p>切り詰めマーカーは {@link #TRUNCATION_MARK}（ASCII）で、戻り値の長さは
+     * <p>切り詰めは {@link SafeText#truncate(String, int)} が行い、戻り値の長さは
      * 必ず {@code max} 以下に収まる（表の桁ずれを防ぐため）。
      */
     static String shortMessage(String message, int max) {
@@ -408,18 +397,11 @@ final class CliFormat {
         if (oneLine == null || oneLine.isEmpty()) {
             return "";
         }
-        // 最大文字数以内であればそのまま返す
-        if (oneLine.length() <= max) {
-            return oneLine;
-        }
-        // マーカーを入れる余地すら無い極端に小さい max では、マーカーを付けずに単純に切る
-        // （マーカーを足すと戻り値が max を超えて表の桁が崩れてしまうため）
-        if (max <= TRUNCATION_MARK.length()) {
-            return oneLine.substring(0, Math.max(0, max));
-        }
-        // 最大文字数を超える場合は、マーカー分を差し引いた位置で切ってマーカーを付けて返す
-        // （切り詰め後の全長がちょうど max になる）
-        return oneLine.substring(0, max - TRUNCATION_MARK.length()) + TRUNCATION_MARK;
+        // 切り詰めは SafeText へ委譲する。素の substring で切ると補助文字（絵文字など。
+        // ジョブ出力や改変された state ファイルから入りうる）の途中で切れて片割れの
+        // サロゲートが残り、端末で "?" や U+FFFD になる — マーカーを ASCII にしてまで
+        // 避けた「壊れた出力に見える」状態を、桁を揃えるために自分で作ることになる
+        return SafeText.truncate(oneLine, max);
     }
 
 }

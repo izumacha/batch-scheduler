@@ -82,7 +82,7 @@ public final class SafeText {
         // マーカーすら入らない極端な max では、マーカー無しで単純に切る
         // （足すと戻り値が max を超えて桁が崩れるため）
         if (max <= ELLIPSIS.length()) {
-            return text.substring(0, Math.max(0, max));
+            return text.substring(0, safeCut(text, Math.max(0, max)));
         }
         // マーカー分を除いた残りを、先頭側と末尾側へ分ける
         int budget = max - ELLIPSIS.length();
@@ -94,15 +94,60 @@ public final class SafeText {
         // 片割れのサロゲートが残る。これは Unicode カテゴリ Cs で、制御文字の除去でも
         // 落ちないため端末で "?" や U+FFFD になり、ASCII のマーカーをわざわざ選んで
         // 避けた「壊れた出力に見える」状態をここで作ってしまう
-        if (head > 0 && Character.isHighSurrogate(text.charAt(head - 1))) {
-            head--;
-        }
+        head = safeCut(text, head);
         int tailStart = text.length() - tail;
         if (tailStart < text.length() && Character.isLowSurrogate(text.charAt(tailStart))) {
             tailStart++;
         }
         // 先頭 + マーカー + 末尾 で組み立てる（全長は max 以下）
         return text.substring(0, head) + ELLIPSIS + text.substring(tailStart);
+    }
+
+    /**
+     * 長すぎる文字列を末尾から切り詰め、切ったことを {@code "..."} で示す。
+     *
+     * <p>{@link #bounded(String, int)} と違って末尾を落とす。表のセルのように
+     * 「桁を揃えることが目的で、続きは元々読めない」場所ではこちらが正しい。
+     * 診断のように末尾へ理由が来る文字列には {@link #bounded(String, int)} を使う。
+     *
+     * @param text 対象の文字列（{@code null} 可）
+     * @param max 戻り値の最大文字数（マーカーを含む）
+     * @return {@code max} 以下に収めた文字列。{@code null} は {@code null} のまま
+     */
+    public static String truncate(String text, int max) {
+        // null はそのまま返す（呼び出し元の null 扱いを変えないため）
+        if (text == null) {
+            return null;
+        }
+        // 収まっているならそのまま返す
+        if (text.length() <= max) {
+            return text;
+        }
+        // マーカーすら入らない極端な max では、マーカー無しで単純に切る
+        if (max <= ELLIPSIS.length()) {
+            return text.substring(0, safeCut(text, Math.max(0, max)));
+        }
+        // マーカー分を残した位置で切り、マーカーを付ける（全長は max 以下）
+        return text.substring(0, safeCut(text, max - ELLIPSIS.length())) + ELLIPSIS;
+    }
+
+    /**
+     * サロゲートペアを分断しない切り位置を返す（必要なら 1 つ内側へ寄せる）。
+     *
+     * <p>Java の {@code String} は UTF-16 の符号単位で添字を取るため、補助文字
+     * （絵文字・CJK 拡張 B など。ジョブ出力や改変された state ファイルから実際に
+     * 入りうる）の真ん中で切ると片割れのサロゲートが残る。それは Unicode カテゴリ
+     * Cs で {@link #stripControlChars(String)} でも落ちず、端末では {@code "?"} や
+     * U+FFFD になる — マーカーを ASCII にしてまで避けた「壊れた出力に見える」状態を
+     * 自分で作ることになる。
+     */
+    private static int safeCut(String text, int cut) {
+        // 直前が上位サロゲートなら、その 1 つ手前で切る
+        if (cut > 0 && cut < text.length() && Character.isHighSurrogate(text.charAt(cut - 1))) {
+            return cut - 1;
+        }
+        // それ以外はそのままの位置でよい
+        return cut;
     }
 
     /**
