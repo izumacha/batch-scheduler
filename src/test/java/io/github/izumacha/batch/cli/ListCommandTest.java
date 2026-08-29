@@ -262,8 +262,16 @@ class ListCommandTest {
         String out = runListCapturingStdout("list", "--state-dir", stateDir.toString());
         // 壊れた 1 件で中断せず、正常な記録は表示される
         assertTrue(out.contains("healthy-run"), out);
-        // runId の無い行は "null" ではなくプレースホルダで表示される（"null" という
-        // ID の実行と見分けが付かなくなるのを防ぐ）
+        // runId の無い行が実際に描画されていることを、その行の中身で確かめる。
+        // 「読み飛ばされた」だけでも上の assert は通ってしまい、プレースホルダの
+        // 回帰を素通しするため（行の先頭が "-" で始まり、同じ行に etl が載る）
+        String brokenRow = out.lines()
+                .filter(line -> line.startsWith("-") && line.contains("etl"))
+                .findFirst()
+                .orElse(null);
+        assertTrue(brokenRow != null, out);
+        // "null" ではなくプレースホルダで表示される（"null" という ID の実行と
+        // 見分けが付かなくなるのを防ぐ）
         assertFalse(out.contains("null "), out);
         // 例外がそのまま漏れていない
         assertFalse(out.contains("Cannot invoke"), out);

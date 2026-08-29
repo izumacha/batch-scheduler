@@ -255,8 +255,11 @@ final class CliFormat {
      * そのまま detailMessage にする）と分かっている 1 ケースなので抑止してよい。
      */
     private static void appendDetail(StringBuilder rendered, String head, String detail) {
-        // 冒頭のメッセージと同じ文でなければ追記する
-        if (!detail.equals(head)) {
+        // 比較は両方とも整形した形で行う。head は safeMessage が整形済みで返す一方
+        // detail は生の toString() なので、片方だけを整形した状態で比べると、
+        // 原因のメッセージに前後の空白や改行が含まれるだけで一致しなくなり、
+        // まったく同じ文が 2 回並ぶ（この抑止が存在する唯一の理由が消える）
+        if (!sanitizeOneLine(detail).equals(head)) {
             rendered.append(" (").append(detail).append(')');
         }
     }
@@ -276,12 +279,20 @@ final class CliFormat {
      * runId は state ファイル由来の信頼できない値で、切り詰めはしない。
      */
     static String runId(String runId) {
-        // 値が無い、または空白しかない場合はプレースホルダを返す
-        if (runId == null || runId.isBlank()) {
+        // null は先に弾く（整形に渡せないため）
+        if (runId == null) {
             return PLACEHOLDER;
         }
-        // 値があるときは 1 行へ整形して返す
-        return sanitizeOneLine(runId);
+        // 先に整形してから空かどうかを見る。isBlank() で判定してしまうと、
+        // 空白ではないが表示されない文字だけの ID（bidi 制御の U+202E など。
+        // 改変された state ファイルから来うる）が整形後に空文字となり、
+        // 36 桁の空白として描画される。運用者には「表示バグ」と区別が付かず、
+        // --rerun-failed へ貼るものも得られない — このメソッドが防ぐはずの行き止まり
+        String rendered = sanitizeOneLine(runId);
+        if (rendered.isEmpty()) {
+            return PLACEHOLDER;
+        }
+        return rendered;
     }
 
     /**

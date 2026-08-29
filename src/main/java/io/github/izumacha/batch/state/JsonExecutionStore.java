@@ -591,7 +591,10 @@ public final class JsonExecutionStore implements ExecutionStore {
      * were never confirmed durable would build the worse of the two crash
      * outcomes on purpose -- a durable entry pointing at unflushed bytes,
      * which comes back garbled, is skipped by {@code tryRead}, and so vanishes
-     * from {@code list} while {@code --rerun-failed} reports it missing. So it
+     * from {@code list} while {@code --rerun-failed} reports it missing.
+     * Skipping the sync does not make that outcome impossible (writeback can
+     * still order the rename ahead of the data); it only stops this code from
+     * forcing it. So it
      * runs only when the contents are known durable, and on the non-atomic
      * fallback that knowledge comes from the re-flush of the published file
      * alone: the temp file is a different inode that has already been
@@ -658,8 +661,10 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 確定させると「ディレクトリエントリは耐久、中身は非耐久」という、このクラスの
         // 説明が 1 つ目に挙げている最悪の組み合わせを自分で作ってしまう（記録は存在するのに
         // 読むと壊れていて tryRead に飛ばされ、list からは消え --rerun-failed も引けない）。
-        // 両方を確定させないままにしておけば、電源断で失うのは記録まるごとで、
-        // 少なくとも「壊れた記録が残る」状態にはならない
+        // ただし「そうすれば壊れた記録が残らない」とまでは言えない。fsync を出さない
+        // 以上、通常の書き戻しが中身より先に改名のメタデータを流す順序は止められない。
+        // ここで言えるのは「その最悪の順序を自分から確定させない」ことまでで、
+        // 起こりやすい失われ方は記録まるごと（運用者が気付ける形）になる
         if (contentsDurable) {
             try {
                 durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);

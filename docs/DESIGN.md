@@ -374,8 +374,13 @@ malicious resource exhaustion and against tampering with the state directory:
   worst of the two crash outcomes on purpose — a durable directory entry
   pointing at contents that were never flushed, which comes back garbled, is
   skipped by `tryRead`, and so vanishes from `list` while `--rerun-failed`
-  reports it missing. Leaving both halves uncommitted costs at most the whole
-  record, which is the outcome an operator can actually recognise.
+  reports it missing. Skipping it does not *prevent* that outcome — nothing
+  stops ordinary writeback from flushing the rename's metadata before the
+  file's data pages, and without an `fsync` no ordering is enforced — but it
+  stops the tool from manufacturing it deliberately, and leaves the likelier
+  loss the whole record, which is the outcome an operator can actually
+  recognise. Claiming more than that would be wrong: the guarantee here is
+  "we do not force the bad ordering", not "the bad ordering cannot happen".
   The split is by *which half failed*,
   never by checked versus unchecked: an unchecked failure raised while opening
   is wrapped and stays best-effort, but one raised by `force`/`close` reached

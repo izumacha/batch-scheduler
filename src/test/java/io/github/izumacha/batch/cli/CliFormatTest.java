@@ -171,6 +171,11 @@ class CliFormatTest {
     void runId_missingValue_returnsPlaceholder() {
         assertEquals("-", CliFormat.runId(null));
         assertEquals("-", CliFormat.runId("   "));
+        // 空白ではないが整形すると消える文字だけの ID もプレースホルダになる。
+        // 空文字のまま返すと 36 桁の空白として描画され、運用者には表示バグと
+        // 区別が付かず、--rerun-failed へ貼るものも得られない
+        assertEquals("-", CliFormat.runId("\u202E"));
+        assertEquals("-", CliFormat.runId("\u0007"));
         // 値があるときは 1 行へ整形して返す（切り詰めはしない）
         assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
     }
@@ -208,6 +213,21 @@ class CliFormatTest {
         // 併記されるのは 1 回だけで、丸括弧での繰り返しは付かない
         String rendered = CliFormat.safeMessageWithCause(outer);
         assertEquals(cause.toString(), rendered);
+    }
+
+    /**
+     * 原因のメッセージに前後の空白が含まれていても、同じ文が 2 回並ばないことを確認する。
+     * 冒頭は safeMessage が整形済みで返すため、比較の片側だけを整形していると
+     * 空白の有無だけで一致しなくなり、この抑止が存在する理由そのものが消える。
+     */
+    @Test
+    void safeMessageWithCause_dedupesEvenWhenTheCauseHasSurroundingWhitespace() {
+        // 末尾に空白を含むメッセージで包む（--state-dir "foo " のような正当な入力で起きる）
+        Exception cause = new java.io.IOException("refusing to use a symlinked state directory: /x ");
+        Exception outer = new java.io.UncheckedIOException((java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 併記は 1 回だけ（丸括弧での繰り返しが付かない）
+        assertFalse(rendered.contains("("), rendered);
     }
 
     /**

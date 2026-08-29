@@ -74,6 +74,13 @@ import java.util.logging.Logger;
  * logs alone, therefore, a {@link Step#RECORD_CONTENT} record that is neither
  * {@code FINE} nor {@code WARNING} is one whose flush failed and failed the
  * save -- the absence is the signal, not evidence that the flush was fine.
+ * That inference needs one precondition: the store performed a single save.
+ * The warning budget is per store, so if a caller reuses one
+ * {@link JsonExecutionStore} across saves, the second and later degraded
+ * flushes emit neither record -- the warning was already spent -- and their
+ * silence looks identical to a failed-and-propagated flush even though those
+ * saves succeeded. The CLI builds one store per command, so the precondition
+ * holds there; an embedder reusing a store should read the logs accordingly.
  * That inference holds for {@code RECORD_CONTENT} only, because it is the one
  * step that runs on every save. {@link Step#PUBLISHED_RECORD_CONTENT} runs
  * only when the publish had to fall back to a non-atomic move -- rare, but
@@ -445,9 +452,13 @@ final class Durability {
                 if (!sync(container, Step.BASE_DIRECTORY)) {
                     // 確定できなかった階層を数えておく
                     unconfirmed++;
-                    // 最初の 1 件は集約メッセージで名指しできるよう控えておく
+                    // 最初の 1 件は集約メッセージで名指しできるよう控えておく。
+                    // 控えるのは container ではなく level。危ないのは「作った階層」の方で、
+                    // container はそれを含む既存のディレクトリ（/tmp/x/y/z を作るなら
+                    // /tmp から始まる）なので、そちらを名指しすると、このツールが作っても
+                    // いない・危険でもないディレクトリへ運用者を向かわせてしまう
                     if (firstUnconfirmed == null) {
-                        firstUnconfirmed = container;
+                        firstUnconfirmed = level;
                     }
                 }
             }
@@ -457,6 +468,9 @@ final class Durability {
         // 「危ないのはその階層だけ」と受け取らないよう、件数だけは必ず残す。
         // 予算そのものを階層ごとにしないのは、深い --state-dir を一度作るだけで
         // 何本も同じ警告が出て、段階ごとに 1 回という設計の意図が崩れるため
+        // 注: この集約メッセージはテストで踏めない。2 階層以上を同時に失敗させるには
+        // ディレクトリの fsync ができないマウントが要り、POSIX の通常環境では作れない
+        // （root では権限を落としても素通りする）。文面の正しさはレビューで担保している
         if (unconfirmed > 1) {
             // 実効値をラムダの外へ写す（ラムダは実質 final な変数しか捕まえられない）
             int total = unconfirmed;
@@ -465,7 +479,8 @@ final class Durability {
             // 既に使われていたときに存在しない行を指すことになり、件数だけ告げて
             // 手がかりを何も渡さないメッセージになってしまう
             LOGGER.warning(() -> total + " directory levels created for the state directory "
-                    + "could not be confirmed durable, starting at '" + first + "'");
+                    + "could not be confirmed durable, starting with '" + first
+                    + "'; each may not survive a power loss, taking every record in it");
         }
     }
 
