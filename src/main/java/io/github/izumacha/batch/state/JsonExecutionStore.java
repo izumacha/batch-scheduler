@@ -133,6 +133,41 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 到達できなくなるため、作成は save() / ensureBaseDirectory() に限定する。
     }
 
+
+    /**
+     * Deletes {@code path} if it exists, returning the failure instead of
+     * throwing it.
+     *
+     * <p>Both cleanup sites in this class ({@code save}'s {@code finally} and
+     * {@code verifyWroteUnderExpectedBase}'s rejection path) must obey the same
+     * rule: a cleanup failure must never replace the diagnostic already in
+     * flight -- an {@code ENOSPC} from the content flush, or the "the state
+     * directory was swapped" rejection. Returning the throwable puts that rule
+     * in one place while leaving each caller free to react differently (warn
+     * versus {@code addSuppressed}), so a third cleanup site cannot
+     * reintroduce the swallow-the-real-error bug (§6 DRY).
+     *
+     * <p>Unchecked failures are caught too: {@code deleteIfExists} can raise a
+     * {@code SecurityException} under a security manager, or an
+     * {@code UnsupportedOperationException} from a non-default filesystem
+     * provider, and letting those escape would break the rule through the gap
+     * in the type system.
+     *
+     * @return the failure, or {@code null} if the delete succeeded or the file
+     *     was already gone
+     */
+    private static Throwable deleteQuietly(Path path) {
+        try {
+            // 存在すれば消す（既に無ければ何もせず false が返るだけ）
+            Files.deleteIfExists(path);
+            // 消せたので報告すべき失敗は無い
+            return null;
+        } catch (IOException | RuntimeException failed) {
+            // 失敗は投げずに返し、どう扱うかは呼び出し元に任せる
+            return failed;
+        }
+    }
+
     /**
      * {@code baseDir} 自体がシンボリックリンクかどうかを判定する（CWE-59 対策）。
      * {@code ensureBaseDirectory}・{@code findAll}・{@code findRecent}・{@code findById} の
@@ -231,6 +266,10 @@ public final class JsonExecutionStore implements ExecutionStore {
             Path target = fileFor(result.runId());
             // アトミック移動が使えず、コピー→削除で公開された可能性があるかどうか
             boolean publishedWithoutAtomicity = false;
+            // 記録の中身をディスクへ確定できたか（改名を確定させてよいかの判断に使う）。
+            // 初期値 false は fail-safe 側 — 例外で同期まで届かなかった場合に
+            // 「確定した」と誤って扱わないため
+            boolean contentConfirmed = false;
             // Write to a temp file in the same directory, then move atomically
             // so readers never observe a half-written file.
             // Prefix is independent of runId: createTempFile requires >= 3 chars,
@@ -252,7 +291,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // バイト列は既に書かれて閉じられており、開き直せないことは中身の良し悪しを
                 // 何も語らないため。この 2 分岐の判断は Durability.sync が持つ（同クラスの
                 // Javadoc と docs/DESIGN.md の「Record durability」が正本）
-                durability.sync(tmp, Durability.Step.RECORD_CONTENT);
+                contentConfirmed = durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 // 一時ファイルを最終ファイルへ移し、アトミック移動を使えたかどうかを受け取る
                 publishedWithoutAtomicity = publishRecord(tmp, target);
             } finally {
@@ -263,18 +302,9 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 同期が投げた ENOSPC が、直後の削除失敗に置き換わると、このクラスが
                 // 伝えるべきただ一つの診断が捨てられる）ので、削除の失敗はここで
                 // 受け止めて警告に留める
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (IOException | RuntimeException cleanupFailed) {
-                    // 非検査例外も受け止める。deleteIfExists は SecurityManager 下の
-                    // SecurityException や、既定以外のファイルシステムプロバイダが投げる
-                    // UnsupportedOperationException のように IOException でない失敗を
-                    // 出しうる。それが finally から抜けると、この try/finally が守るはずの
-                    // 「進行中の例外を差し替えない」という約束を型の隙間から破ってしまう。
-                    // なおこの分岐は外側からのテストで踏めない。削除を失敗させるには
-                    // 含む側のディレクトリを書けなくする必要があるが、そうすると同じ
-                    // ディレクトリへの一時ファイルの作成が先に失敗してここまで来ない
-                    // （seam を足すために本番へ注入点を作るのは割に合わないと判断した）
+                Throwable cleanupFailed = deleteQuietly(tmp);
+                // 消せなかったときは警告に留める（進行中の失敗を差し替えないため）
+                if (cleanupFailed != null) {
                     LOGGER.warning("failed to remove the temporary file '" + tmp + "': "
                             + cleanupFailed + "; it will be left behind in the state directory");
                 }
@@ -283,7 +313,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
             // 検証を通ったので、公開後に残っている確定作業をまとめて行う
-            commitPublishedRecord(target, expectedRealBase, publishedWithoutAtomicity);
+            commitPublishedRecord(target, expectedRealBase, publishedWithoutAtomicity, contentConfirmed);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -568,8 +598,8 @@ public final class JsonExecutionStore implements ExecutionStore {
      * directory, so {@code rename()} never reports {@code EXDEV}), which would
      * otherwise leave "the flag actually turns the re-flush on" unverified.
      */
-    void commitPublishedRecord(Path target, Path expectedRealBase, boolean publishedWithoutAtomicity)
-            throws IOException {
+    void commitPublishedRecord(Path target, Path expectedRealBase,
+            boolean publishedWithoutAtomicity, boolean contentConfirmed) throws IOException {
         // 公開側の同期が失敗したときの例外を覚えておく入れ物（成功なら null のまま）
         IOException publishFailed = null;
         // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
@@ -595,6 +625,17 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 公開側が失敗していても改名だけは確定させる。その場合の報告は「公開済みだが
         // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく
         try {
+            // 中身を確定できていないときは改名も確定させない。ここで改名だけを確定させると
+            // 「ディレクトリエントリは耐久、中身は非耐久」という、このクラスの説明が
+            // 1 つ目に挙げている最悪の組み合わせを自分で作ってしまう（記録は存在するのに
+            // 読むと壊れていて tryRead に飛ばされ、list からは消え --rerun-failed も
+            // 引けない）。両方を確定させないままにしておけば、電源断で失うのは記録
+            // まるごとで、少なくとも「壊れた記録が残る」状態にはならない
+            if (!contentConfirmed) {
+                LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
+                        + "' because its contents were never confirmed durable");
+                return;
+            }
             durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException renameFailed) {
             // 運用者に伝えるべき主因は公開側なので、そちらがあれば添えるに留める
@@ -649,16 +690,11 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 削除したうえで拒否する（fail-closed）
             UncheckedIOException rejection = new UncheckedIOException(new IOException(
                     "refusing to use a symlinked state directory: " + baseDir));
-            try {
-                Files.deleteIfExists(target);
-            } catch (IOException | RuntimeException cleanupFailed) {
-                // 差し替え先は攻撃者の持ち物になりうるので、削除に失敗することは十分あり得る。
-                // その場合でも拒否そのものは必ず伝える。削除の失敗で置き換わってしまうと、
-                // 「state ディレクトリが差し替えられた」という唯一の合図が消える。
-                // 非検査例外まで受けるのは save() の一時ファイル削除と同じ理由で、
-                // deleteIfExists は SecurityManager 下の SecurityException や既定以外の
-                // プロバイダの UnsupportedOperationException など IOException でない
-                // 失敗を出しうるため（型の隙間から合図が消えるのを塞ぐ）
+            Throwable cleanupFailed = deleteQuietly(target);
+            // 差し替え先は攻撃者の持ち物になりうるので、削除に失敗することは十分あり得る。
+            // その場合でも拒否そのものは必ず伝え、削除の失敗は添えるに留める。置き換えて
+            // しまうと「state ディレクトリが差し替えられた」という唯一の合図が消える
+            if (cleanupFailed != null) {
                 rejection.addSuppressed(cleanupFailed);
             }
             throw rejection;

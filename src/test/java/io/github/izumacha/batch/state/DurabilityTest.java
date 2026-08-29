@@ -390,7 +390,7 @@ class DurabilityTest {
 
         // アトミック移動できた場合は、移動先は一時ファイルと同じ実体なので再同期しない。
         // 確定するのは改名だけ
-        store.commitPublishedRecord(target, dir, false);
+        store.commitPublishedRecord(target, dir, false, true);
         assertEquals(afterAtomic, completedSteps());
 
         // 記録を消して次の観測に備える
@@ -398,7 +398,7 @@ class DurabilityTest {
         // コピー→削除で公開された場合は、移動先を同期し直してから改名を確定させる。
         // ここが繋がっていないと、アトミック移動を持たない配備でだけ
         // 「エントリは確定・中身は未確定」の記録が公開される
-        store.commitPublishedRecord(target, dir, true);
+        store.commitPublishedRecord(target, dir, true, true);
         assertEquals(afterFallback, completedSteps());
     }
 
@@ -438,7 +438,7 @@ class DurabilityTest {
         Path viaBaseDir = dir.resolve("other").resolve("run1.json");
 
         // 再同期は検証済みの実体パスから組み立て直した先に対して行われる
-        new JsonExecutionStore(dir).commitPublishedRecord(viaBaseDir, verifiedBase, true);
+        new JsonExecutionStore(dir).commitPublishedRecord(viaBaseDir, verifiedBase, true, true);
 
         // 実在する published が同期されている（存在しない viaBaseDir を開こうとしていない）
         assertEquals(List.of(published, verifiedBase), syncedPaths());
@@ -535,6 +535,47 @@ class DurabilityTest {
         assertEquals(1, warnings().size(), warnings().toString());
         assertTrue(warnings().get(0).contains("RECORD_RENAME"), warnings().get(0));
         // 完了ログは出ない（＝確定していないのに確定したと記録しない）
+        assertEquals(List.of(), completedSteps());
+    }
+
+    @Test
+    void aFifoInTheRecordsPlaceIsRefusedInsteadOfBlockingForever(@TempDir Path dir)
+            throws IOException, InterruptedException {
+        // 記録の名前で名前付きパイプ（FIFO）を作る。同居プロセスが state ディレクトリへ
+        // 置いた場合の再現で、open(2) は相手が現れるまで無期限にブロックする
+        Path fifo = dir.resolve("run1.json");
+        Process mkfifo = new ProcessBuilder("mkfifo", fifo.toString())
+                .redirectErrorStream(true).start();
+        // mkfifo が使えない環境（Windows など）ではこの検査を飛ばす
+        assumeTrue(mkfifo.waitFor() == 0, "mkfifo が使えないので FIFO を用意できない");
+        // 通常ファイルでないと分かった時点で開かずに拒否するので、ここで固まらない。
+        // 固まればテストはタイムアウトで落ちる（＝ブロックの回帰を検出できる）
+        assertDoesNotThrow(() -> durability.sync(fifo, Durability.Step.RECORD_CONTENT));
+        // 握り潰しではなく、理由の分かる警告として残る
+        assertEquals(1, warnings().size(), warnings().toString());
+        assertTrue(warnings().get(0).contains("not a regular file"), warnings().get(0));
+        // 同期していないので完了ログは出ない
+        assertEquals(List.of(), completedSteps());
+    }
+
+    @Test
+    void theRenameIsNotCommittedWhenTheContentsWereNeverConfirmed(@TempDir Path dir)
+            throws IOException {
+        // ディレクトリを同期できる環境でだけ意味のある検査（できない環境では
+        // そもそも RECORD_RENAME の完了ログが出ないため、差が観測できない）
+        assumeTrue(directorySyncSupported(dir), "この環境ではディレクトリを同期できない");
+        Path target = dir.resolve("run1.json");
+        Files.writeString(target, "{}");
+        // 中身を確定できた場合は、これまでどおり改名を確定させる
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.commitPublishedRecord(target, dir, false, true);
+        assertEquals(List.of(Durability.Step.RECORD_RENAME), completedSteps());
+
+        // 記録を取り直して、確定できなかった場合を試す
+        records.clear();
+        // 中身が未確定なら改名も確定させない。ここで改名だけ確定させると
+        // 「エントリは耐久・中身は非耐久」という最悪の組み合わせを自分で作ってしまう
+        new JsonExecutionStore(dir).commitPublishedRecord(target, dir, false, false);
         assertEquals(List.of(), completedSteps());
     }
 

@@ -64,9 +64,15 @@ import java.util.logging.Logger;
  * own, so each completed step is logged at {@code FINE} -- the only way to
  * answer "how far did this save actually get committed?" after the fact, and
  * the seam the tests use to prove {@link JsonExecutionStore#save} really
- * performs every step. Failures are logged at {@code WARNING} instead, at
- * most once per step per {@link JsonExecutionStore} (the budget is held by
- * this instance, and each command builds its own store).
+ * performs every step. A failure that is <em>degraded</em> is logged at
+ * {@code WARNING} instead, at most once per step per {@link JsonExecutionStore}
+ * (the budget is held by this instance, and each command builds its own store).
+ * A failure that <em>propagates</em> is not logged at all: it becomes the
+ * exception the caller reports, so logging it here would state the same
+ * problem twice and spend the step's single warning slot on it. Reading the
+ * logs alone, therefore, a record-content step that is neither {@code FINE}
+ * nor {@code WARNING} is one whose flush failed and failed the save -- the
+ * absence is the signal, not evidence that the flush was fine.
  *
  * <p><b>Platform limits.</b> Directory syncing needs to open a directory as a
  * channel, which POSIX allows and Windows does not; there the sync is skipped
@@ -244,8 +250,16 @@ final class Durability {
      *
      * @throws IOException if the <em>flush</em> failed and the step's failure
      *     should fail the save (see {@link Step#failureFailsTheSave()})
+     * @return {@code true} if the flush completed, {@code false} if it was
+     *     degraded to a warning. Callers use this to keep the two halves of a
+     *     save consistent: committing the rename for contents that were never
+     *     flushed would produce a durable directory entry pointing at
+     *     non-durable bytes -- the first failure mode named in this class's
+     *     documentation, and worse than losing the record outright, because
+     *     the file then exists but reads back garbled and is skipped by
+     *     {@code tryRead}.
      */
-    void sync(Path path, Step step) throws IOException {
+    boolean sync(Path path, Step step) throws IOException {
         // 開いて force(true) するところまでを試す
         try {
             flush(path, step);
@@ -273,8 +287,8 @@ final class Durability {
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
-            // 失敗したので完了は記録しない
-            return;
+            // 失敗したので完了は記録せず、確定しなかったことを呼び出し元へ伝える
+            return false;
         }
         // ここまで来たら open も force も close も通っている。完了ログを try の外へ
         // 出しているのは、ログの失敗を同期の失敗として扱わないため。中に置くと、
@@ -285,6 +299,8 @@ final class Durability {
         // 後から追える唯一の手がかりになる。Supplier 版なので FINE が無効なときは
         // 文字列の組み立て自体が起きない
         LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
+        // ここまで来た＝確定した
+        return true;
     }
 
     /**
@@ -477,6 +493,27 @@ final class Durability {
         // まず開く。ここでの失敗は「この環境では同期を試せない」を意味しうる
         FileChannel opened;
         try {
+            // 開く前に種別を確かめる。open(2) は FIFO を相手にすると読み手／書き手が
+            // 現れるまで無期限にブロックし、Java からタイムアウトも O_NONBLOCK も
+            // 渡せない。state ディレクトリは改変対象として扱う想定（DESIGN.md の
+            // 「State-directory safety」）なので、同居プロセスが記録の名前で
+            // mkfifo すると、バッチが走り終わった後の save() がここで固まり、
+            // 「保存できたのか分からないまま CLI が応答しない」という、この仕組みが
+            // 消そうとしている曖昧さそのものを作る。NOFOLLOW_LINKS は FIFO を
+            // シンボリックリンクではないので弾けない。
+            // 判定と open の間で差し替えられる隙間は残るが（Java から原子的に
+            // 「通常ファイルなら開く」と要求する手段が無い）、置きっぱなしの FIFO は
+            // これで確実に警告へ落ちる。失敗の扱いは他の開けない理由と同じ
+            // 判定はそれぞれの open と同じリンクの扱いで行う。ディレクトリ側は追従して
+            // 開くので追従して確かめ、通常ファイル側は NOFOLLOW で開くので追従せずに確かめる
+            boolean openable = directory
+                    ? Files.isDirectory(path)
+                    : Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS);
+            if (!openable) {
+                throw new IOException("refusing to sync '" + path + "': not a "
+                        + (directory ? "directory" : "regular file")
+                        + " (a pipe or device here would block the open forever)");
+            }
             opened = FileChannel.open(path, options);
         } catch (IOException | RuntimeException e) {
             // 検査例外か否かによらず、開けなかったことが呼び出し元に分かるよう包んで投げ直す

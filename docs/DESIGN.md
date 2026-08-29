@@ -272,7 +272,17 @@ malicious resource exhaustion and against tampering with the state directory:
   (see `ensureBaseDirectory()`, above): an attacker who can rewrite the
   *already-resolved, real* target location itself — as opposed to
   redirecting a symlink the tool follows — is outside this defense's threat
-  model.
+  model. The durability flushes below add the first opens of state files that
+  happen *after* something else created them, and `open(2)` on a FIFO blocks
+  until a peer appears with no timeout or `O_NONBLOCK` reachable from Java —
+  so a pipe left at a record's name by a co-resident process would wedge the
+  CLI after the batch had already run, with no way to tell whether the run was
+  recorded. `Durability` therefore checks the file type before opening and
+  degrades to a warning when the path is not the regular file (or directory)
+  the step expects. `NOFOLLOW_LINKS` does not cover this: a FIFO is not a
+  symlink. The check leaves a narrow swap window between the test and the open
+  — Java offers no atomic "open only if regular" — but a pipe already in place
+  is refused deterministically.
 - **Record durability.** The temp-file-plus-rename above makes a save *atomic*
   (a concurrent reader never sees a half-written file), which is a different
   property from surviving a power loss. The record's contents and the rename
@@ -348,7 +358,15 @@ malicious resource exhaustion and against tampering with the state directory:
   the on-disk copy is not — and a conservative "could not confirm this was
   saved" is recoverable, whereas a false success is not. Deleting the published
   record instead would be worse: the move already overwrote whatever held that
-  name, so removing it loses both copies. The split is by *which half failed*,
+  name, so removing it loses both copies. When a record-content flush is
+  *degraded* rather than propagated (it could not be opened at all), the
+  rename's directory sync is skipped too. Committing it alone would build the
+  worst of the two crash outcomes on purpose — a durable directory entry
+  pointing at contents that were never flushed, which comes back garbled, is
+  skipped by `tryRead`, and so vanishes from `list` while `--rerun-failed`
+  reports it missing. Leaving both halves uncommitted costs at most the whole
+  record, which is the outcome an operator can actually recognise.
+  The split is by *which half failed*,
   never by checked versus unchecked: an unchecked failure raised while opening
   is wrapped and stays best-effort, but one raised by `force`/`close` reached
   the flush and fails a record-content step like any other flush error.
