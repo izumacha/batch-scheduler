@@ -52,8 +52,12 @@ public final class ListCommand implements Callable<Integer> {
             // 状態ディレクトリから最新順で最大 fetchLimit 件の実行記録を読み込む（limit<=0 は全件）
             fetched = new JsonExecutionStore(stateDir).findRecent(fetchLimit);
         } catch (RuntimeException e) {
-            // 読み込みに失敗した場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to read run state: " + CliFormat.safeMessage(e));
+            // 読み込みに失敗した場合はエラーメッセージを標準エラーに出力して終了する。
+            // 原因まで出すのは、ストアが投げる例外の外側は「failed to list execution
+            // results under ...」で共通しており、権限不足なのか消えたのか実 I/O エラーなのかは
+            // 原因側にしか無いため（RunCommand と同じ扱い。§6 DRY）
+            System.err.println("error: failed to read run state: "
+                    + CliFormat.safeMessageWithCause(e));
             return BatchCli.EXIT_CONFIG;
         }
         // 実際に切り詰められた（＝表示されない古い実行が存在し得る）かどうか。

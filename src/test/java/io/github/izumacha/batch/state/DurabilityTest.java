@@ -547,6 +547,29 @@ class DurabilityTest {
     }
 
     @Test
+    void aRecordContentStepRefusesToFollowASymlink(@TempDir Path dir) throws IOException {
+        // state ディレクトリの外に、書き込まれては困るファイルを置く
+        Path outside = dir.resolve("outside.txt");
+        Files.writeString(outside, "untouched");
+        // 記録の名前でそこへのシンボリックリンクを張る（同居プロセスによる差し替えの再現）
+        Path link = dir.resolve("run1.json");
+        try {
+            Files.createSymbolicLink(link, outside);
+        } catch (UnsupportedOperationException | IOException e) {
+            // シンボリックリンクを作れない環境ではこの検査を飛ばす
+            assumeTrue(false, "この環境ではシンボリックリンクを作成できない");
+            return;
+        }
+        // リンクを追従せず開けないので、例外ではなく警告になる（best-effort の対象）
+        assertDoesNotThrow(() -> durability.sync(link, Durability.Step.PUBLISHED_RECORD_CONTENT));
+        // 同期できなかったことは警告として残る
+        assertEquals(1, warnings().size());
+        // 完了ログは出ない＝リンク先を開いて fsync してはいない。ここが追従すると、
+        // state ディレクトリの外のファイルを書き込みモードで開くことになる
+        assertEquals(List.of(), completedSteps());
+    }
+
+    @Test
     void syncFailureWarnsInsteadOfThrowing(@TempDir Path dir) {
         // 存在しないディレクトリを指して、同期が必ず失敗する状況を作る
         Path missingDir = dir.resolve("gone-dir");

@@ -3,6 +3,8 @@ package io.github.izumacha.batch.state;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -399,14 +401,23 @@ final class Durability {
      * @throws IOException if the flush itself failed
      */
     private static void flush(Path path, Step step) throws IOException {
-        // 対象の種別に応じた開き方を選ぶ（ディレクトリは書き込みモードで開けない）
-        StandardOpenOption mode = step.target() == Step.Target.DIRECTORY
-                ? StandardOpenOption.READ
-                : StandardOpenOption.WRITE;
+        // 対象の種別に応じた開き方を選ぶ。ディレクトリは書き込みモードで開けないので
+        // 読み取りで開き、通常ファイルは書き込みで開く
+        boolean directory = step.target() == Step.Target.DIRECTORY;
+        // 開くときのオプション。通常ファイルにはシンボリックリンク非追従を足す。
+        // docs/DESIGN.md の「State-directory safety」は state ディレクトリを改変対象と
+        // して扱っており、このクラス以外の open はすべて NOFOLLOW_LINKS 付きになっている。
+        // ここだけ追従すると、同居プロセスが <runId>.json をリンクへ差し替えた窓で
+        // state ディレクトリの外のファイルを書き込みモードで開いて fsync しうる。
+        // ディレクトリ側に付けないのは、同期対象が directoryHolding() の返す「含む側」で、
+        // /var/run→/run のような正当なリンクを経路に含みうるため
+        OpenOption[] options = directory
+                ? new OpenOption[] {StandardOpenOption.READ}
+                : new OpenOption[] {StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS};
         // まず開く。ここでの失敗は「この環境では同期を試せない」を意味しうる
         FileChannel opened;
         try {
-            opened = FileChannel.open(path, mode);
+            opened = FileChannel.open(path, options);
         } catch (IOException e) {
             // 開けなかったことが呼び出し元に分かるよう包んで投げ直す
             throw new OpenFailure(e);

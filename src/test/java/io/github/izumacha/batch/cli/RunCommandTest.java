@@ -171,6 +171,11 @@ class RunCommandTest {
         assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
         // 保存に失敗した旨のエラーメッセージは標準エラーに出力されているはず
         assertTrue(outcome.stderr().contains("failed to persist"), outcome.stderr());
+        // 原因まで併記されているはず。外側のメッセージは保存失敗の経路すべてで共通で、
+        // 何が起きたのか（保存先の消失・権限不足・「記録は公開済みだが耐久性を
+        // 確認できなかった」）は原因側にしか無い。ここが素の safeMessage に戻ると、
+        // 運用者は残っている記録に対してもバッチ全体の再実行へ誘導される
+        assertTrue(outcome.stderr().contains("Exception"), outcome.stderr());
     }
 
     @Test

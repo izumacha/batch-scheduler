@@ -11,6 +11,9 @@ import java.time.format.DateTimeFormatter;
  */
 final class CliFormat {
 
+    /** 原因の連鎖をたどる上限段数（循環していても止まるようにするための歯止め）。 */
+    private static final int MAX_CAUSE_DEPTH = 5;
+
     // タイムスタンプのフォーマッタ（システムのデフォルトタイムゾーンで「yyyy-MM-dd HH:mm:ss」形式）
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
@@ -124,9 +127,6 @@ final class CliFormat {
      * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      */
-    /** 原因の連鎖をたどる上限段数（循環していても止まるようにするための歯止め）。 */
-    private static final int MAX_CAUSE_DEPTH = 5;
-
     static String safeMessage(Throwable t) {
         // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を返す
         return t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
