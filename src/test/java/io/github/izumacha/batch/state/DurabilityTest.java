@@ -633,6 +633,22 @@ class DurabilityTest {
     }
 
     @Test
+    void aPropagatedFlushFailureSaysWhatFailedAndWhere() {
+        // procfs のファイルは通常ファイルとして開けるが fsync は EINVAL で失敗する
+        // （「開けたのに書き戻しに失敗した」＝保存を失敗させる側の失敗）
+        Path target = Path.of("/proc/self/comm");
+        assumeTrue(Files.isRegularFile(target), "procfs が無いので書き戻しの失敗を再現できない");
+        IOException thrown = assertThrows(IOException.class,
+                () -> durability.sync(target, Durability.Step.RECORD_CONTENT));
+        // 素で投げ直すと「IOException: Invalid argument」だけになり、fsync が失敗した
+        // ことも、どのファイルなのかも分からない。文面と対象を必ず添える
+        assertTrue(thrown.getMessage().contains("could not sync the file"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("comm"), thrown.getMessage());
+        // 元の失敗も原因として残る
+        assertNotNull(thrown.getCause());
+    }
+
+    @Test
     void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
         // 「書き戻しまで到達したか」の 2 通りを用意する（false=開けなかった / true=書き戻しで失敗）
         boolean openFailed = false;

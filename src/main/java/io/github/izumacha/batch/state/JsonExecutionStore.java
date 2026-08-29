@@ -102,23 +102,6 @@ public final class JsonExecutionStore implements ExecutionStore {
     // みで OutputCollector.MAX_LINE_CHARS により 8KiB に上限があるため、ジョブ数が数千規模の
     // バッチでも十分に収まる）であり、現実的な用途を妨げないサーキットブレーカーとして機能する。
     static final long MAX_RECORD_BYTES = 16L * 1024 * 1024; // 16 MiB
-    /**
-     * ログ 1 行に載せる例外表現の最大文字数。
-     *
-     * <p>これらの記録は FINE を有効にしたときだけ出るが、既定の ConsoleHandler は
-     * CLI と同じ stderr へ書く。{@code FileSystemException} は移動元と移動先の
-     * パスを丸ごと本文に持つため（それぞれ PATH_MAX まで）、上限が無いと
-     * 「この保存先ではこの経路が普通なのか」を調べるために FINE を入れた運用者へ
-     * 数キロバイトの 1 行を返すことになる。CLI 側のエラー行を有界にしているのと
-     * 同じ理由（表示経路は 1 つ）。既定のしきい値でも出る WARNING の側にこそ効く
-     * 必要があるので、FINE の 1 件だけでなく、例外の表現を載せる全箇所へ掛ける。
-     *
-     * <p>{@code Durability} も同じ値を使う（同じパッケージ・同じ表示経路・同じ理由）。
-     * 2 か所に書くと、片方だけ広げたときに「同じ保存の失敗を伝える 2 行が、どちらの
-     * クラスが出したかで長さが違う」状態になり、しかも互いを参照していないので
-     * 気付けない（§6 一元管理）。
-     */
-    static final int MAX_LOGGED_DETAIL_CHARS = 500;
 
     // JSON ファイルを保存するベースディレクトリのパスを保持するフィールド
     private final Path baseDir;
@@ -325,8 +308,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 if (cleanupFailed != null) {
                     LOGGER.warning("failed to remove the temporary file '"
                             + SafeText.oneLine(tmp.toString()) + "': "
-                            + SafeText.bounded(SafeText.oneLine(String.valueOf(cleanupFailed)),
-                                    MAX_LOGGED_DETAIL_CHARS)
+                            + SafeText.forLog(cleanupFailed)
                             + "; it will be left behind in the state directory");
                 }
             }
@@ -603,8 +585,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             LOGGER.fine(() -> "atomic move unavailable for '"
                     + SafeText.oneLine(target.getFileName().toString())
                     + "', published with a non-atomic move instead ("
-                    + SafeText.bounded(SafeText.oneLine(String.valueOf(atomicFailed)),
-                            MAX_LOGGED_DETAIL_CHARS) + ")");
+                    + SafeText.forLog(atomicFailed) + ")");
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
         }
@@ -896,7 +877,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 見落としを防いでいる
             LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
                     + "': failed to resolve its real path ("
-                    + SafeText.bounded(SafeText.oneLine(e.getMessage()), MAX_LOGGED_DETAIL_CHARS) + ")");
+                    + SafeText.forLog(e.getMessage()) + ")");
             return Optional.empty();
         }
         // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ
@@ -954,8 +935,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
             // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
             LOGGER.warning("Skipping unreadable execution result file '" + SafeText.oneLine(file.toString())
-                    + "': " + SafeText.bounded(SafeText.oneLine(e.getMessage()),
-                            MAX_LOGGED_DETAIL_CHARS));
+                    + "': " + SafeText.forLog(e.getMessage()));
             return Optional.empty();
         }
     }

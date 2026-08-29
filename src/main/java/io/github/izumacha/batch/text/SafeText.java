@@ -49,8 +49,33 @@ public final class SafeText {
     // 付かなくなるため（DESIGN.md「ASCII-only CLI diagnostics」）
     private static final String ELLIPSIS = "...";
 
+    /**
+     * ログ 1 行に載せる値の最大文字数。
+     *
+     * <p>これらの記録は既定の {@code ConsoleHandler} が CLI と同じ stderr へ書くので、
+     * 表示経路としては CLI のエラー行と同じ扱いにする。{@code FileSystemException} は
+     * 関係するパスを丸ごと本文に持つため、上限が無いと 1 行が数キロバイトになりうる。
+     */
+    private static final int MAX_LOG_CHARS = 500;
+
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private SafeText() {
+    }
+
+    /**
+     * ログ 1 行へ載せる値を、無害化したうえで有界にして返す。
+     *
+     * <p>{@code oneLine} と {@code bounded} を正しい順序で呼ぶ 3 段重ねを、ログを出す
+     * 側が毎回書き写さずに済むようにするためのもの。書き写す形にしていると、新しい
+     * ログ行で 1 段抜けたときに生の ESC/BEL や数メガバイトの 1 行が stderr へ届き、
+     * しかもそれを検出する仕組みが無い — この仕組みが塞ごうとしている穴そのもの。
+     *
+     * @param value 載せる値（{@code null} 可。{@code "null"} として描画される）
+     * @return 1 行に整形し、制御文字を除き、長さを切り詰めた文字列
+     */
+    public static String forLog(Object value) {
+        // 文字列化してから、1 行への整形と長さの上限を順に適用する
+        return bounded(oneLine(String.valueOf(value)), MAX_LOG_CHARS);
     }
 
     /**

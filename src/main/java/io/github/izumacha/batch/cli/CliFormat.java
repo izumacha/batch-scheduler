@@ -228,6 +228,10 @@ final class CliFormat {
             // 根本原因と言い切ると運用者を間違った失敗の調査へ送り出してしまう
             String label = root.getCause() == null ? "root cause: " : "deepest cause reached: ";
             appendDetail(rendered, head, label + root);
+            // 根元に添えられた診断も併記する。ここだけ落とすと、他の段では必ず出る
+            // 「なぜアトミック移動を使えなかったのか」のような判断材料が、印も付かずに
+            // 消える（appendDetail の Javadoc が「あってはならない」と書いている状態）
+            appendSuppressed(rendered, head, root);
         }
         // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が

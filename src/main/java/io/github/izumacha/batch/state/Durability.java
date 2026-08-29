@@ -312,11 +312,17 @@ final class Durability {
             boolean reachedTheFlush = !(e instanceof OpenFailure);
             // 保存そのものを失敗させるべき失敗かどうかを判定する（下の表を参照）
             if (shouldFailTheSave(step, reachedTheFlush)) {
-                // 検査例外はそのまま、非検査例外は IOException に包んで伝える
+                // 検査例外でも必ず包み直す。素で投げ直すと describeFailure の文面も
+                // 対象のパスも落ち、運用者が受け取るのは
+                // 「failed to save execution result 'run1' ... (IOException: Invalid argument)」
+                // だけになる — fsync が失敗したことも、どのファイルなのかも分からない。
+                // このクラスは「文面は describeFailure から出す」と決めているので、
+                // 伝播する側だけ例外にしない
                 // （shouldFailTheSave が true を返すのは reachedTheFlush が true の
                 // ときだけなので、ここで e が OpenFailure であることはない＝
                 // 内部マーカー型が呼び出し元へ出ることもない）
-                throw e instanceof IOException io ? io : new IOException(describeFailure(step, true), e);
+                throw new IOException(describeFailure(step, true)
+                        + " for '" + SafeText.forLog(path) + "'", e);
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
@@ -609,8 +615,7 @@ final class Durability {
                 // どこにも無い状態になる（§6 エラーを握り潰さない）
                 LOGGER.fine(() -> "could not determine the file type of '"
                         + SafeText.oneLine(path.toString())
-                        + "' (" + SafeText.bounded(SafeText.oneLine(String.valueOf(statFailed)),
-                                JsonExecutionStore.MAX_LOGGED_DETAIL_CHARS) + "); letting the open report the reason");
+                        + "' (" + SafeText.forLog(statFailed) + "); letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
                 throw new IOException("refusing to sync '" + path
@@ -691,8 +696,7 @@ final class Durability {
         Throwable shown = cause instanceof OpenFailure ? cause.getCause() : cause;
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
         LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.oneLine(path.toString()) + "': "
-                + reason + " (" + SafeText.bounded(SafeText.oneLine(String.valueOf(shown)),
-                        JsonExecutionStore.MAX_LOGGED_DETAIL_CHARS) + "); " + step.consequence
+                + reason + " (" + SafeText.forLog(shown) + "); " + step.consequence
                 + ". This warning is reported once per step, per store.");
     }
 }

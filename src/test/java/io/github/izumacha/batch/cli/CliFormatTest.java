@@ -602,6 +602,25 @@ class CliFormatTest {
         assertEquals("20260102-030405-abcdef", CliFormat.runId("20260102-030405-abcdef"));
     }
 
+    /**
+     * 打ち切りの先で見つけた根元に添えられた診断も併記されることを確認する。
+     * ここだけ落とすと、他の段では必ず出る判断材料が印も付かずに消える。
+     */
+    @Test
+    void safeMessageWithCause_rendersSuppressedOnTheRootCauseToo() {
+        // 上限を超える深さの連鎖を作り、根元にだけ診断を添える
+        java.io.IOException root = new java.io.IOException("root");
+        root.addSuppressed(new java.io.IOException("atomic move unsupported"));
+        Throwable current = root;
+        for (int i = 0; i < 8; i++) {
+            current = new java.io.IOException("layer" + i, current);
+        }
+        String rendered = CliFormat.safeMessageWithCause(current);
+        // 根元そのものと、そこに添えられた診断の両方が出る
+        assertTrue(rendered.contains("root"), rendered);
+        assertTrue(rendered.contains("atomic move unsupported"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {
