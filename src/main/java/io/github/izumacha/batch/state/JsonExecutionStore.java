@@ -28,11 +28,14 @@ import java.util.stream.Stream;
  * tolerate missing, oversized, or unparseable files by skipping them.
  *
  * <p>Writes are both atomic (temp file plus rename, so a reader never sees a
- * half-written file) and, on a best-effort basis, durable ({@link Durability}
- * flushes the contents, the rename, and any newly created directory level, so
- * a power loss right after {@link #save} returns does not silently drop the
- * record). See {@link Durability} for why atomicity alone is not enough and
- * which platforms limit the durability half.
+ * half-written file) and, on a best-effort basis, durable: the contents, the
+ * rename, and any newly created directory level are flushed to disk, so a
+ * power loss right after {@link #save} returns does not silently drop the
+ * record. Atomicity alone would not give that, because the contents and the
+ * rename are written back from the page cache independently and a crash can
+ * lose either one alone. The package-private {@code Durability} class holds
+ * the mechanism, the reasoning, and the platform limits (directory syncing is
+ * POSIX-only; macOS {@code fsync(2)} does not issue {@code F_FULLFSYNC}).
  */
 public final class JsonExecutionStore implements ExecutionStore {
 
@@ -501,8 +504,10 @@ public final class JsonExecutionStore implements ExecutionStore {
     static void moveWithoutAtomicity(Path tmp, Path target) throws IOException {
         // アトミック性を要求せずに移動する（コピー→削除で実現される可能性がある）
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-        // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ
-        Durability.syncFile(target, Durability.Step.RECORD_CONTENT);
+        // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
+        // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
+        // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）
+        Durability.syncFile(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
     }
 
     /**

@@ -102,17 +102,24 @@ class DurabilityTest {
 
     /** 完了した段階を、記録された順番どおりに取り出す。 */
     private List<Durability.Step> completedSteps() {
-        // FINE で記録された「completed」のログだけを対象に、どの段階かを取り出す
+        // 見つけた段階を記録順に積んでいく入れ物を用意する
         List<Durability.Step> steps = new ArrayList<>();
+        // 捕まえたログを古い順に 1 件ずつ調べる
         for (LogRecord record : records) {
             // 完了ログ以外（警告など）は数えない
             if (!record.getMessage().contains("completed")) {
                 continue;
             }
-            // メッセージに名前が含まれている段階を特定して順番どおりに積む
+            // どの段階の完了ログかを判定する。段階名だけの部分一致にしないのは、
+            // ある段階名が別の段階名を丸ごと含みうるため（PUBLISHED_RECORD_CONTENT は
+            // RECORD_CONTENT を含む）。前後の決まり文句ごと照合すれば取り違えない
             for (Durability.Step step : Durability.Step.values()) {
-                if (record.getMessage().contains(step.name())) {
+                // 「Durability step <名前> completed」という形で一致するかを見る
+                if (record.getMessage().contains("Durability step " + step.name() + " completed")) {
+                    // 見つけた段階を記録順のまま積む
                     steps.add(step);
+                    // 1 件のログが指す段階は 1 つだけなので、残りの候補は見ない
+                    break;
                 }
             }
         }
@@ -122,10 +129,13 @@ class DurabilityTest {
 
     /** WARNING レベルで記録されたログの本文だけを取り出す。 */
     private List<String> warnings() {
-        // 警告レベルのログを本文の文字列として集める
+        // 警告の本文を記録順に集めるための入れ物を用意する
         List<String> messages = new ArrayList<>();
+        // 捕まえたログを古い順に 1 件ずつ調べる
         for (LogRecord record : records) {
+            // WARNING のものだけを対象にする（FINE の完了ログは数えない）
             if (record.getLevel() == Level.WARNING) {
+                // 警告の本文をそのまま積む
                 messages.add(record.getMessage());
             }
         }
@@ -162,13 +172,18 @@ class DurabilityTest {
         if (directorySyncSupported(probeDir)) {
             return List.of(steps);
         }
-        // 同期できない環境ではファイル側の段階（RECORD_CONTENT）だけが残る
+        // 同期できない環境で残る段階だけを詰め直すための入れ物を用意する
         List<Durability.Step> reduced = new ArrayList<>();
+        // 期待していた段階を順番どおりに 1 つずつ見る
         for (Durability.Step step : steps) {
-            if (step == Durability.Step.RECORD_CONTENT) {
+            // ファイルを対象にする段階だけはどの環境でも成功するので残す
+            if (step == Durability.Step.RECORD_CONTENT
+                    || step == Durability.Step.PUBLISHED_RECORD_CONTENT) {
+                // 残す段階を順番のまま積む
                 reduced.add(step);
             }
         }
+        // 変更されない一覧にして返す
         return List.copyOf(reduced);
     }
 
@@ -286,8 +301,24 @@ class DurabilityTest {
         assertTrue(Files.notExists(tmp));
         // 移動「先」に対する同期が行われている。コピー→削除だった場合、同期済みの
         // 一時ファイルは消えて移動先は未同期のページになるため、ここを飛ばすと
-        // 「エントリは確定・中身は未確定」という防ごうとしている状態を自分で作ってしまう
-        assertEquals(List.of(Durability.Step.RECORD_CONTENT), completedSteps());
+        // 「エントリは確定・中身は未確定」という防ごうとしている状態を自分で作ってしまう。
+        // 段階が RECORD_CONTENT と別なのは、警告予算を一時ファイル側と分けるため
+        assertEquals(List.of(Durability.Step.PUBLISHED_RECORD_CONTENT), completedSteps());
+    }
+
+    @Test
+    void publishedContentWarningIsNotSilencedByTheTempFileWarning(@TempDir Path dir) {
+        // 先に一時ファイル側の同期を失敗させ、その段階の警告予算を使い切らせる
+        Durability.syncFile(dir.resolve("gone.tmp"), Durability.Step.RECORD_CONTENT);
+        // ここまでで警告は 1 件出ている
+        assertEquals(1, warnings().size());
+        // 続けて「公開済みの記録」側の同期を失敗させる
+        Durability.syncFile(dir.resolve("gone.json"), Durability.Step.PUBLISHED_RECORD_CONTENT);
+        // 予算が分かれているので、こちらの警告も出る。共有していると、これから捨てられる
+        // 一時ファイル側の失敗が、公開済みの記録が未確定という本当に危険な失敗を黙らせる
+        assertEquals(2, warnings().size());
+        // 2 件目には公開済みの記録に固有の説明が入っている
+        assertTrue(warnings().get(1).contains("published by a non-atomic move"), warnings().get(1));
     }
 
     @Test

@@ -91,6 +91,13 @@ final class Durability {
         // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）
         RECORD_CONTENT("the record may come back empty or garbled after a power loss, "
                 + "and will then be skipped as unreadable"),
+        // 非アトミック移動の移動先を確定させ直す用途。RECORD_CONTENT と分けているのは
+        // 予算を共有すると、これから捨てられる一時ファイル側の失敗が唯一の枠を使い切り、
+        // 「公開済みの記録が未確定」という本当に危険な失敗を黙らせてしまうため
+        // （段階ごとに予算を分ける理由そのものが、この 2 つの間にも当てはまる）
+        PUBLISHED_RECORD_CONTENT("the record was published by a non-atomic move and its bytes "
+                + "may never have reached the disk, so it can come back empty or garbled "
+                + "after a power loss even though the directory entry survived"),
         // 改名（ディレクトリエントリ）を確定させる用途（省略すると保存そのものが巻き戻りうる）
         RECORD_RENAME("the record may vanish or roll back to its previous contents "
                 + "after a power loss");
@@ -227,9 +234,9 @@ final class Durability {
      * failure at most once per {@code step}.
      *
      * @param directory whether {@code path} is a directory, which decides how
-     *     the failure is worded: for a directory an {@link IOException} most
-     *     likely means the platform does not allow opening one as a channel,
-     *     whereas for a regular file it means the sync itself did not happen
+     *     the failure is worded: for a directory a failure most likely means
+     *     the platform does not allow opening one as a channel, whereas for a
+     *     regular file it means the sync itself did not happen
      */
     private static void sync(Path path, StandardOpenOption mode, Step step, boolean directory) {
         // 対象を開いて force(true) でデータとメタデータの両方をディスクへ書き戻す
@@ -240,7 +247,13 @@ final class Durability {
             // 「この保存はどこまで確定したのか」を現場で追う手段がこれ以外に無い。
             // Supplier 版を使うので FINE が無効なときは文字列組み立て自体が起きない
             LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // 非検査例外まで受けるのは、このクラスが「決して落とさない」と約束しているため。
+            // FileChannel.open は UnsupportedOperationException（プロバイダが未対応の
+            // オプション）や SecurityException も投げうる仕様で、IOException だけを
+            // 捕まえていると save() の catch (IOException) も素通りして、記録が
+            // ディスクに載っている実行に対して「保存に失敗しました」と正反対の報告に
+            // なる。捕捉する例外の種類を見積もるのではなく、契約どおり全部受ける
             // 同期の失敗は書き込み自体の失敗ではないため、例外にせず警告だけ残す（段階ごとに 1 回）
             if (step.claimWarningBudget()) {
                 // ディレクトリはこの環境で開けないだけの可能性が高く、通常ファイルとは意味が違う
