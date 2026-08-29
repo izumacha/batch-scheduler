@@ -272,6 +272,33 @@ malicious resource exhaustion and against tampering with the state directory:
   *already-resolved, real* target location itself — as opposed to
   redirecting a symlink the tool follows — is outside this defense's threat
   model.
+- **Record durability.** The temp-file-plus-rename above makes a save *atomic*
+  (a concurrent reader never sees a half-written file), which is a different
+  property from surviving a power loss. The record's contents and the rename
+  that publishes them are written back from the page cache independently, so a
+  crash before write-back can lose either one alone: a durable rename with
+  non-durable contents leaves a `<runId>.json` that reads back empty or garbled
+  (and is then skipped by `tryRead`, so the run silently disappears from
+  `list`), while durable contents with a non-durable rename lets the record
+  vanish or revert to whatever previously held that name. Either outcome costs
+  more than a missing history row, because `run --rerun-failed <runId>` reads
+  that record back to decide which jobs already succeeded — without it the
+  operator must re-run the whole batch, re-executing jobs that had already
+  succeeded, which is precisely what `--rerun-failed` exists to avoid.
+  `Durability` therefore flushes three things: each directory level
+  `ensureBaseDirectory()` newly creates (syncing each level's *parent*, since
+  that is what holds the entry), the temp file's contents before the rename,
+  and the base directory after the rename — the last one only once
+  `verifyWroteUnderExpectedBase` has passed, so a file that the symlink check
+  is about to reject is never made durable first. Every step is best-effort:
+  it logs and returns rather than throwing, because a sync failure arrives
+  *after* the write itself succeeded, and propagating it would report "failed
+  to save execution result" for a run whose record is on disk. Successful steps
+  are logged at `FINE`, since an `fsync` otherwise leaves no evidence that it
+  happened. Two platform gaps remain and are inherent rather than accepted
+  trade-offs: Windows does not allow opening a directory as a channel, so the
+  directory syncs are skipped there, and macOS `fsync(2)` pushes only to the
+  drive's own cache rather than issuing `F_FULLFSYNC`.
 
 ## Future extensions
 

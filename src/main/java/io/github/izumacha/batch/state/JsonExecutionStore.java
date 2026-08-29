@@ -26,6 +26,13 @@ import java.util.stream.Stream;
  *
  * <p>Instants are written as ISO-8601 strings (timestamps disabled) and reads
  * tolerate missing, oversized, or unparseable files by skipping them.
+ *
+ * <p>Writes are both atomic (temp file plus rename, so a reader never sees a
+ * half-written file) and, on a best-effort basis, durable ({@link Durability}
+ * flushes the contents, the rename, and any newly created directory level, so
+ * a power loss right after {@link #save} returns does not silently drop the
+ * record). See {@link Durability} for why atomicity alone is not enough and
+ * which platforms limit the durability half.
  */
 public final class JsonExecutionStore implements ExecutionStore {
 
@@ -164,8 +171,10 @@ public final class JsonExecutionStore implements ExecutionStore {
                     new IOException("refusing to use a symlinked state directory: " + baseDir));
         }
         try {
-            // ベースディレクトリが存在しない場合は再帰的に作成する
-            Files.createDirectories(baseDir);
+            // ベースディレクトリが存在しない場合は再帰的に作成し、新しく作られた各階層の
+            // 存在をディスクへ確定させる。作成直後の電源断でディレクトリごと消えると、
+            // その中へ書き込んだ実行記録も一緒に失われるため（Durability 参照）
+            Durability.createDirectoriesDurably(baseDir);
         } catch (IOException e) {
             // ディレクトリ作成に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -223,6 +232,10 @@ public final class JsonExecutionStore implements ExecutionStore {
             try {
                 // 一時ファイルに JSON として実行結果を書き込む
                 mapper.writeValue(tmp.toFile(), result);
+                // 改名する前に中身をディスクへ確定させる。改名と中身は別々に書き戻されるため、
+                // ここを飛ばすと「改名だけ残って中身が空・破損」という状態で電源断を迎えうる
+                // （その記録は tryRead に読み飛ばされ、実行そのものが無かったことになる）
+                Durability.syncFile(tmp, Durability.Step.RECORD_CONTENT);
                 try {
                     // 一時ファイルを最終ファイルへアトミックに移動する（読者が半端なファイルを読まないようにする）
                     Files.move(tmp, target,
@@ -249,6 +262,14 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
             // 一致するかを検証する（一致しなければ誤って書き込まれたファイルを削除し拒否する）
             verifyWroteUnderExpectedBase(target, expectedRealBase, baseDir);
+            // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる。
+            // 検証より前に確定させると、差し替えを検知して削除するはずの誤配置ファイルを
+            // 先に永続化してしまう。同期先に baseDir ではなく expectedRealBase を使うのは、
+            // 「target が確かにこの中にある」ことを直前の検証が示した実体パスだからで、
+            // ここで baseDir をもう一度たどると差し替え後のディレクトリを同期しかねない。
+            // 直前の finally が一時ファイルを削除しているため、この 1 回で改名と削除の
+            // 両方のエントリ変更がまとめて確定する
+            Durability.syncDirectory(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
