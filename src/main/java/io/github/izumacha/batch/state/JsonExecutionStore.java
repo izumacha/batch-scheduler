@@ -106,6 +106,9 @@ public final class JsonExecutionStore implements ExecutionStore {
     private final Path baseDir;
     // JSON のシリアライズ・デシリアライズに使う Jackson の ObjectMapper インスタンス
     private final ObjectMapper mapper;
+    // ディスクへの書き戻しを担当する。ストアごとに持つことで、警告の「1 回だけ」の
+    // 予算もストア単位になり、JVM 全体で共有される可変状態を持たずに済む
+    private final Durability durability = new Durability();
 
     public JsonExecutionStore(Path baseDir) {
         // baseDir が null の場合は例外を投げる（保存先ディレクトリは必須）
@@ -177,7 +180,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // ベースディレクトリが存在しない場合は再帰的に作成し、新しく作られた各階層の
             // 存在をディスクへ確定させる。作成直後の電源断でディレクトリごと消えると、
             // その中へ書き込んだ実行記録も一緒に失われるため（Durability 参照）
-            Durability.createDirectoriesDurably(baseDir);
+            durability.createDirectoriesDurably(baseDir);
         } catch (IOException e) {
             // ディレクトリ作成に失敗した場合はチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -243,7 +246,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // fsync が ENOSPC / EIO を返してダーティページが捨てられうるため、
                 // ここで握り潰して改名まで進むと「空の記録を公開して成功と報告する」
                 // という、この仕組みが防ごうとしている失敗そのものを作ってしまう
-                Durability.sync(tmp, Durability.Step.RECORD_CONTENT);
+                durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 try {
                     // 一時ファイルを最終ファイルへアトミックに移動する（読者が半端なファイルを読まないようにする）
                     Files.move(tmp, target,
@@ -262,7 +265,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
                     // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
                     try {
-                        moveWithoutAtomicity(tmp, target);
+                        moveWithoutAtomicity(tmp, target, durability);
                     } catch (IOException fallbackFailed) {
                         // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
                         // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
@@ -287,7 +290,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // deleteIfExists は何もしておらず、確定するのは改名 1 件だけである
             // （一時ファイルが実際に残るのは移動が失敗した場合だが、そのときは
             // IOException が伝播してこの行には来ない）
-            Durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -514,13 +517,13 @@ public final class JsonExecutionStore implements ExecutionStore {
      * only other way to reach it would be a fake {@code FileSystemProvider}.
      * Same rationale as {@link #verifyWroteUnderExpectedBase} below.
      */
-    static void moveWithoutAtomicity(Path tmp, Path target) throws IOException {
+    static void moveWithoutAtomicity(Path tmp, Path target, Durability durability) throws IOException {
         // アトミック性を要求せずに移動する（コピー→削除で実現される可能性がある）
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
         // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
         // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）
-        Durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
+        durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
     }
 
     /**

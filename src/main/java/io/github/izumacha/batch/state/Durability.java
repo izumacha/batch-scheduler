@@ -7,8 +7,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -40,20 +41,22 @@ import java.util.logging.Logger;
  * job (an ETL load, a notification) is exactly the outcome
  * {@code --rerun-failed} exists to avoid.
  *
- * <p><b>Best-effort, never fatal -- with one deliberate exception.</b> These
- * methods log and return instead of throwing. A sync failure normally arrives
- * <em>after</em> the write itself succeeded, so propagating it would turn a
- * run whose record is on disk into a reported "failed to save execution
- * result", telling the operator the opposite of what happened. Durability is
- * a hardening measure layered on top of a write that already worked; losing
- * the hardening must not lose the write.
+ * <p><b>What a failure does depends on what failed.</b> Flushing a directory
+ * is the step that legitimately cannot run at all -- Windows does not allow
+ * opening a directory as a channel -- and its failure costs the directory
+ * entry rather than the record's bytes, so it degrades to a warning: failing
+ * a save because the platform cannot {@code fsync} would report a run whose
+ * record is on disk as "failed to save execution result", telling the
+ * operator the opposite of what happened.
  *
- * <p>{@link Step.OnFailure#PROPAGATE} is the exception, carried by the one
- * step that runs before publication. There that justification is simply
- * false, and swallowing the error would manufacture the exact failure this
- * class exists to prevent. The policy rides on the step rather than on the
- * call site so there is no second method a caller could reach for by
- * mistake.
+ * <p>Flushing a regular file is different. A failed {@code fsync} there means
+ * the record's own bytes did not reach the disk -- with delayed allocation
+ * the kernel can report {@code ENOSPC}/{@code EIO} at exactly that point and
+ * drop the dirty pages -- so continuing would publish an empty or truncated
+ * record and report success, manufacturing the exact failure this class
+ * exists to prevent. Those steps propagate. The rule rides on the step (see
+ * {@link Step#failureFailsTheSave()}) rather than on the call site, so there
+ * is no second method a caller could reach for by mistake.
  *
  * <p><b>Observability.</b> A successful {@code fsync} leaves no trace of its
  * own, so each completed step is logged at {@code FINE} -- the only way to
@@ -84,33 +87,32 @@ final class Durability {
      * let the entry be forgotten, and the omission would only surface as a
      * blank or wrong warning at the moment something actually went wrong.
      *
-     * <p>Each step owns a <em>separate</em> "warn once" budget. A single
-     * shared budget would let the step that runs earliest and matters least
-     * ({@link #BASE_DIRECTORY}, which runs on the very first save, before any
-     * record exists to lose) spend the only slot, after which the step whose
-     * failure actually costs data ({@link #RECORD_RENAME}) could never warn
-     * again for the life of the process.
+     * <p>Each step owns a <em>separate</em> "warn once" budget (held by the
+     * {@link Durability} instance, not here). A single shared budget would let
+     * the step that runs earliest and matters least ({@link #BASE_DIRECTORY},
+     * which runs on the very first save, before any record exists to lose)
+     * spend the only slot, after which the step whose failure actually costs
+     * data ({@link #RECORD_RENAME}) could never warn again.
      */
     enum Step {
         // 保存先ディレクトリの作成を確定させる用途（省略すると初回保存でディレクトリごと消えうる）
-        BASE_DIRECTORY(Target.DIRECTORY, OnFailure.WARN,
+        BASE_DIRECTORY(Target.DIRECTORY,
                 "the state directory itself may not survive a power loss, "
                 + "taking every record inside it"),
-        // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）。
-        // この段階だけ失敗を伝播させる理由は OnFailure.PROPAGATE の説明を参照
-        RECORD_CONTENT(Target.FILE, OnFailure.PROPAGATE,
+        // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）
+        RECORD_CONTENT(Target.FILE,
                 "the record may come back empty or garbled after a power loss, "
                 + "and will then be skipped as unreadable"),
         // 非アトミック移動の移動先を確定させ直す用途。RECORD_CONTENT と分けているのは
         // 予算を共有すると、これから捨てられる一時ファイル側の失敗が唯一の枠を使い切り、
         // 「公開済みの記録が未確定」という本当に危険な失敗を黙らせてしまうため
         // （段階ごとに予算を分ける理由そのものが、この 2 つの間にも当てはまる）
-        PUBLISHED_RECORD_CONTENT(Target.FILE, OnFailure.WARN,
+        PUBLISHED_RECORD_CONTENT(Target.FILE,
                 "the record was published by a non-atomic move and "
                 + "its bytes may never have reached the disk, so it can come back empty or garbled "
                 + "after a power loss even though the directory entry survived"),
         // 改名（ディレクトリエントリ）を確定させる用途（省略すると保存そのものが巻き戻りうる）
-        RECORD_RENAME(Target.DIRECTORY, OnFailure.WARN,
+        RECORD_RENAME(Target.DIRECTORY,
                 "the record may vanish or roll back to its previous "
                 + "contents after a power loss");
 
@@ -122,59 +124,39 @@ final class Durability {
             DIRECTORY
         }
 
-        /** What a failed step does to the save in progress. */
-        enum OnFailure {
-            /**
-             * Log once and continue -- the default, and correct wherever the
-             * sync runs after the write is already visible, because reporting
-             * a failure would contradict what is on disk.
-             */
-            WARN,
-            /**
-             * Propagate, failing the save.
-             *
-             * <p>Only correct before publication. There the record is still a
-             * temp file the caller's {@code finally} deletes, and with delayed
-             * allocation an {@code fsync} can report {@code ENOSPC}/{@code EIO}
-             * and drop the dirty pages -- so continuing would rename empty or
-             * truncated bytes into place and report success, manufacturing the
-             * exact failure this class exists to prevent.
-             */
-            PROPAGATE
-        }
-
-        // この段階が何を対象にするか（開き方の決定と、環境差の判定に使う）
+        // この段階が何を対象にするか（開き方・環境差の判定・失敗時の扱いを決める）
         private final Target target;
-        // 失敗したときに保存を失敗させるか、警告に留めるか
-        private final OnFailure onFailure;
         // この段階を飛ばしたときに起こりうることの説明（警告文に埋め込む）
         private final String consequence;
-        // この段階の警告をすでに 1 度出したかどうか（段階ごとに独立した予算）
-        private final AtomicBoolean warned = new AtomicBoolean(false);
 
-        Step(Target target, OnFailure onFailure, String consequence) {
+        Step(Target target, String consequence) {
             // 対象の種別をフィールドへ保存する
             this.target = target;
-            // 失敗時の扱いをフィールドへ保存する
-            this.onFailure = onFailure;
             // 説明文をフィールドへ保存する
             this.consequence = consequence;
         }
 
         /**
-         * Returns what a failure of this step does to the save.
+         * Returns whether a failure of this step should fail the save.
          *
-         * <p>On the constant for the same reason as {@link #consequence} and
-         * {@link #target}, and here it matters most: with the policy attached
-         * to the step there is exactly one way to run a step, so a caller
-         * cannot pick the wrong one. The earlier shape -- a best-effort method
-         * and a fail-closed method, chosen at each call site -- let the
-         * pre-publication call be silently swapped for the best-effort variant
-         * with nothing to catch it.
+         * <p>Derived from {@link #target} rather than declared separately,
+         * because the two are the same fact stated twice. A regular file's
+         * {@code fsync} failing means the record's own bytes did not reach the
+         * disk -- a real write error, on every platform, whether or not a
+         * directory entry already points at them. A directory sync is the one
+         * that legitimately cannot run at all (Windows does not allow opening
+         * a directory as a channel), and its failure costs the entry rather
+         * than the bytes, so it degrades to a warning.
+         *
+         * <p>Deriving it also removes the axis this originally got wrong.
+         * Splitting on "before or after publication" left the non-atomic
+         * fallback's re-sync as best-effort even though that path re-flushes
+         * the record's own bytes into a freshly allocated destination -- the
+         * identical failure, reported as success.
          */
-        OnFailure onFailure() {
-            // 失敗時の扱いをそのまま返す
-            return onFailure;
+        boolean failureFailsTheSave() {
+            // 通常ファイルの同期失敗は「記録のバイト列が書けていない」を意味する
+            return target == Target.FILE;
         }
 
         /**
@@ -193,18 +175,29 @@ final class Durability {
             return target;
         }
 
-        /**
-         * Claims this step's one-shot warning budget, returning {@code true}
-         * only for the first caller.
-         */
-        private boolean claimWarningBudget() {
-            // まだ警告していなければ true を返して予算を消費する（2 回目以降は false）
-            return warned.compareAndSet(false, true);
-        }
     }
 
-    private Durability() {
-        // ユーティリティクラスなのでインスタンス化させない
+    /**
+     * The steps that have already spent their one warning, one entry per step.
+     *
+     * <p>Instance state rather than static, so a {@link JsonExecutionStore}
+     * gets its own budgets and nothing has to reach in and reset them. The
+     * earlier shape put an {@code AtomicBoolean} on each enum constant, which
+     * made the budgets per-JVM and forced a test-only reset method into this
+     * class -- along with the trap that a test which forgot to call it would
+     * observe zero warnings and pass without checking anything.
+     */
+    private final Set<Step> warned = EnumSet.noneOf(Step.class);
+
+    /**
+     * Claims {@code step}'s one-shot warning budget, returning {@code true}
+     * only for the first caller.
+     */
+    private boolean claimWarningBudget(Step step) {
+        // 追加できたときだけ true（既に入っていれば消費済みなので false）
+        synchronized (warned) {
+            return warned.add(step);
+        }
     }
 
     /**
@@ -227,16 +220,16 @@ final class Durability {
      * types is deliberate: this class promises not to be the thing that fails
      * a completed write, and guessing the list is how such promises break.
      *
-     * @throws IOException if the sync failed and the step's policy is
-     *     {@link Step.OnFailure#PROPAGATE}
+     * @throws IOException if the sync failed and the step's failure should
+     *     fail the save (see {@link Step#failureFailsTheSave()})
      */
-    static void sync(Path path, Step step) throws IOException {
+    void sync(Path path, Step step) throws IOException {
         // 開いて force(true) するところまでを試す
         try {
             flush(path, step);
         } catch (IOException e) {
-            // この段階の方針が「伝播」なら、呼び出し元へそのまま投げて保存を失敗させる
-            if (step.onFailure() == Step.OnFailure.PROPAGATE) {
+            // 記録のバイト列を対象にする段階なら、呼び出し元へそのまま投げて保存を失敗させる
+            if (step.failureFailsTheSave()) {
                 throw e;
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
@@ -273,7 +266,7 @@ final class Durability {
      *
      * @throws IOException if the directories could not be created
      */
-    static void createDirectoriesDurably(Path dir) throws IOException {
+    void createDirectoriesDurably(Path dir) throws IOException {
         // 作成前の時点でまだ存在しない階層を、深い方から浅い方へたどって集める。
         // 渡されたパスの形（相対・絶対）はここでは変えない。相対パスの解決は
         // directoryHolding() 1 箇所に寄せてあり、ここでも絶対化すると
@@ -368,11 +361,13 @@ final class Durability {
         try (FileChannel channel = opened) {
             // true を渡すことで中身だけでなくメタデータの書き戻しも要求する
             channel.force(true);
-            // 成功した段階を FINE で記録する。fsync は成功しても何の痕跡も残らないため、
-            // 「この保存はどこまで確定したのか」を現場で追う手段がこれ以外に無い。
-            // Supplier 版を使うので FINE が無効なときは文字列組み立て自体が起きない
-            LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
         }
+        // 完了ログは close() まで通ってから出す。NFS などでは書き込みエラーが遅れて
+        // close() で報告されるため、try の中で記録すると「完了した」と書き残した直後に
+        // 失敗が投げられ、ログと結果が食い違う。fsync は成功しても痕跡を残さないので、
+        // このログが「どこまで確定したか」を後から追える唯一の手がかりになる。
+        // Supplier 版を使うので FINE が無効なときは文字列組み立て自体が起きない
+        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
     }
 
     /**
@@ -409,37 +404,14 @@ final class Durability {
      * Reports a skipped step at most once per step, explaining what could not
      * be committed and what that risks.
      */
-    private static void warnOnce(Path path, Step step, Exception cause, String reason) {
+    private void warnOnce(Path path, Step step, Exception cause, String reason) {
         // 予算を使えたときだけ記録する（同じ段階で何度も鳴らさない）
-        if (!step.claimWarningBudget()) {
+        if (!claimWarningBudget(step)) {
             return;
         }
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
         LOGGER.warning("Durability step " + step.name() + " skipped for '" + path + "': "
                 + reason + " (" + cause + "); " + step.consequence
                 + ". This warning is reported once per step.");
-    }
-
-    /**
-     * Clears every step's one-shot warning budget.
-     *
-     * <p>The budgets live on the enum constants and are therefore per-JVM,
-     * matching {@code JobRunner.KILL_UNAVAILABLE_LOGGED}, the existing
-     * warn-once in this codebase. The cost of that choice is this method:
-     * Surefire reuses forks, so a test that provokes a warning would otherwise
-     * silence that step for every later test in the same fork.
-     *
-     * <p><b>Any test that asserts on a durability warning must call this
-     * first</b> (see {@code DurabilityTest}'s {@code @BeforeEach}). A test that
-     * forgets will observe zero warnings and pass without checking anything,
-     * which is the one way this global state can hide a regression rather than
-     * merely annoy.
-     */
-    static void resetWarningBudgetsForTest() {
-        // すべての段階の「1 回だけ」予算を未使用の状態へ戻す
-        for (Step step : Step.values()) {
-            // この段階の「1 回だけ」の枠を未使用へ戻す
-            step.warned.set(false);
-        }
     }
 }

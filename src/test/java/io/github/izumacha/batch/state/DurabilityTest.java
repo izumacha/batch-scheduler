@@ -59,6 +59,8 @@ class DurabilityTest {
     private Level originalLevel;
     // 差し替える前の親ロガーへの伝播設定（同上）
     private boolean originalUseParentHandlers;
+    // テストごとに新しく作る同期担当（予算がインスタンス単位なので自然に独立する）
+    private Durability durability;
 
     @BeforeEach
     void attachLogCapture() {
@@ -93,8 +95,8 @@ class DurabilityTest {
         DURABILITY_LOGGER.setUseParentHandlers(false);
         // 組み立てたハンドラを取り付ける
         DURABILITY_LOGGER.addHandler(handler);
-        // 「1 回だけ」の警告予算は JVM 全体で共有されるため、テストごとに未使用へ戻す
-        Durability.resetWarningBudgetsForTest();
+        // 予算はインスタンスが持つので、新しく作るだけでテストごとに独立する
+        durability = new Durability();
     }
 
     @AfterEach
@@ -104,8 +106,6 @@ class DurabilityTest {
         // ログレベルと伝播設定を元に戻し、他のテストへ影響を残さない
         DURABILITY_LOGGER.setLevel(originalLevel);
         DURABILITY_LOGGER.setUseParentHandlers(originalUseParentHandlers);
-        // 予算も未使用へ戻して、後続テストが警告を観測できる状態にする
-        Durability.resetWarningBudgetsForTest();
     }
 
     /** 完了した段階を、記録された順番どおりに取り出す。 */
@@ -184,18 +184,18 @@ class DurabilityTest {
         // 本番の仕組みそのものを呼んで判定する。開き方をテスト側へ書き写すと、
         // 本番が変わったときに「もう試験対象ではないコードの可否」を報告しかねない。
         // 借りる段階は WARN 方針なので、この呼び出しが例外になることはない
+        // 判定には使い捨てのインスタンスを使う。検査対象のインスタンスの予算を
+        // 消費してしまうと、その段階の警告を後から観測できなくなるため
         try {
-            Durability.sync(probeDir, PROBE_STEP);
+            new Durability().sync(probeDir, PROBE_STEP);
         } catch (IOException e) {
-            // 到達しない（PROBE_STEP は WARN 方針）。万一届いたら「同期できない環境」とみなす
+            // 到達しない（ディレクトリ対象の段階は保存を失敗させない）。届いたら未対応とみなす
             return false;
         }
         // 完了ログが出ていればこの環境でディレクトリを同期できたということ
         boolean supported = completedSteps().contains(PROBE_STEP);
         // 判定のために出したログは、この後の検査が数える対象から取り除く
         records.clear();
-        // 予算を使っていた場合に備えて未使用へ戻す（後続の検査が警告を観測できるように）
-        Durability.resetWarningBudgetsForTest();
         // 判定結果を返す
         return supported;
     }
@@ -278,7 +278,7 @@ class DurabilityTest {
         // 3 階層ぶん存在しないパスを用意する
         Path deep = dir.resolve("x").resolve("y").resolve("z");
         // ディレクトリを作成する
-        Durability.createDirectoriesDurably(deep);
+        durability.createDirectoriesDurably(deep);
         // 実際に確定させたディレクトリを、浅い方から深い方への順で確認する。
         // 「作成したと主張する一覧」ではなく「実際に同期した対象」を見ているので、
         // 同期先を取り違える退行もこの 1 件で捕まえられる
@@ -290,7 +290,7 @@ class DurabilityTest {
     @Test
     void createDirectoriesDurablySyncsNothingWhenDirectoryAlreadyExists(@TempDir Path dir) throws IOException {
         // 既に存在するディレクトリを渡す
-        Durability.createDirectoriesDurably(dir);
+        durability.createDirectoriesDurably(dir);
         // 何も作成していない以上、確定させるべき階層も無い
         assertEquals(List.of(), completedSteps());
     }
@@ -316,7 +316,7 @@ class DurabilityTest {
         assumeTrue(directorySyncSupported(workingDirectory), "この環境ではディレクトリを同期できない");
         try {
             // 相対パスのまま作成する（本番の既定設定と同じ経路を通す）
-            Durability.createDirectoriesDurably(relative);
+            durability.createDirectoriesDurably(relative);
             // 単一要素の相対パスでも、含む側（カレントディレクトリ）が同期される。
             // ここが抜けると「既定設定のときだけ同期が丸ごと無くなる」状態になる
             assertEquals(List.of(workingDirectory), syncedPaths());
@@ -340,7 +340,7 @@ class DurabilityTest {
         Path target = dir.resolve("run1.json");
         Files.writeString(tmp, "{}");
         // アトミック移動が使えない環境で通る経路を直接呼ぶ
-        JsonExecutionStore.moveWithoutAtomicity(tmp, target);
+        JsonExecutionStore.moveWithoutAtomicity(tmp, target, durability);
         // 中身は移動先へ移っている
         assertEquals("{}", Files.readString(target));
         assertTrue(Files.notExists(tmp));
@@ -352,26 +352,25 @@ class DurabilityTest {
     }
 
     @Test
-    void eachStepDeclaresWhetherItsFailureShouldFailTheSave() {
-        // 方針は段階自身が持つ。どの段階がどちらかを、ここで 1 か所に固定しておく。
-        // 公開前の 1 段階だけが「失敗させる」で、残りは「警告に留める」
-        assertEquals(Durability.Step.OnFailure.PROPAGATE,
-                Durability.Step.RECORD_CONTENT.onFailure());
-        // 公開後の再同期は、すでに記録が見えているので保存を失敗させない
-        assertEquals(Durability.Step.OnFailure.WARN,
-                Durability.Step.PUBLISHED_RECORD_CONTENT.onFailure());
-        // ディレクトリ側の 2 段階も、環境によっては実行できないので警告に留める
-        assertEquals(Durability.Step.OnFailure.WARN, Durability.Step.BASE_DIRECTORY.onFailure());
-        assertEquals(Durability.Step.OnFailure.WARN, Durability.Step.RECORD_RENAME.onFailure());
-        // 「失敗させる」のは公開前の 1 段階だけ、という全体像も固定する。
-        // ここを増やすと、記録がディスクに載っている実行を失敗として報告しはじめる
-        assertEquals(1, Arrays.stream(Durability.Step.values())
-                .filter(step -> step.onFailure() == Durability.Step.OnFailure.PROPAGATE)
-                .count());
+    void everyFileStepFailsTheSaveAndEveryDirectoryStepOnlyWarns() {
+        // 記録のバイト列を対象にする段階は、失敗したら保存を失敗させる。
+        // ここが緩むと、fsync が「書けていない」と言った後でも成功と報告してしまう
+        for (Durability.Step step : Durability.Step.values()) {
+            // 対象がファイルかどうかで、期待する扱いが決まる
+            boolean expected = step.target() == Durability.Step.Target.FILE;
+            // 段階ごとに、規則どおりの扱いになっていることを確かめる
+            assertEquals(expected, step.failureFailsTheSave(), step.name());
+        }
+        // 規則が空回りしないよう、両方の側に段階が実在することも確かめる
+        // （全段階がディレクトリ対象になれば、上のループは何も検証しなくなる）
+        assertTrue(Arrays.stream(Durability.Step.values())
+                .anyMatch(Durability.Step::failureFailsTheSave));
+        assertTrue(Arrays.stream(Durability.Step.values())
+                .anyMatch(step -> !step.failureFailsTheSave()));
     }
 
     @Test
-    void directoryFailureWordingSeparatesAPlatformGapFromARealError(@TempDir Path dir) {
+    void directoryFailureWordingSeparatesAPlatformGapFromARealError() {
         // 開けなかった場合は「この環境では開けない」という説明になる
         assertTrue(Durability.describeFailure(Durability.Step.RECORD_RENAME,
                         new Durability.OpenFailure(new IOException("boom")))
@@ -414,12 +413,16 @@ class DurabilityTest {
     }
 
     @Test
-    void theStepThatRunsBeforePublishingPropagatesItsFailure(@TempDir Path dir) {
-        // 公開前の中身の同期だけは握り潰さない。存在しないファイルを渡すと開けずに失敗する
+    void bothRecordContentStepsPropagateTheirFailure(@TempDir Path dir) {
+        // 一時ファイルの同期。ここを握り潰すと、fsync が ENOSPC を返して
+        // ダーティページが捨てられた後でも改名まで進み、空の記録を公開してしまう
         assertThrows(IOException.class,
-                () -> Durability.sync(dir.resolve("gone.tmp"), Durability.Step.RECORD_CONTENT));
-        // ここを握り潰すと、fsync が ENOSPC を返してダーティページが捨てられた後でも
-        // 改名まで進み、空の記録を公開して「保存できました」と報告してしまう
+                () -> durability.sync(dir.resolve("gone.tmp"), Durability.Step.RECORD_CONTENT));
+        // 非アトミック移動の移動先の同期も同じ。こちらはコピー→削除で移動先が
+        // 新しく確保されるため、一時ファイル側の同期はこの経路の役に立っていない
+        assertThrows(IOException.class,
+                () -> durability.sync(dir.resolve("gone.json"),
+                        Durability.Step.PUBLISHED_RECORD_CONTENT));
     }
 
     @Test
@@ -427,27 +430,29 @@ class DurabilityTest {
         // 存在しないファイルとディレクトリを指して、同期が必ず失敗する状況を作る
         Path missingFile = dir.resolve("gone.json");
         Path missingDir = dir.resolve("gone-dir");
-        // どちらも例外を投げずに戻ることを確認する（書き込み成功を失敗へ変えない契約）
-        assertDoesNotThrow(() ->
-                Durability.sync(missingFile, Durability.Step.PUBLISHED_RECORD_CONTENT));
-        assertDoesNotThrow(() -> Durability.sync(missingDir, Durability.Step.RECORD_RENAME));
+        // ディレクトリ対象の 2 段階は、失敗しても例外を投げずに戻る
+        // （環境によっては実行できないため。保存の成功を失敗へ変えない契約）
+        assertDoesNotThrow(() -> durability.sync(missingDir, Durability.Step.BASE_DIRECTORY));
+        assertDoesNotThrow(() -> durability.sync(missingDir, Durability.Step.RECORD_RENAME));
         // 失敗は握り潰さず警告として残る
         assertEquals(2, warnings().size());
         // 警告には「省略すると何が起こりうるか」が含まれ、読んだ人が影響を判断できる
-        assertTrue(warnings().get(0).contains("published by a non-atomic move"), warnings().get(0));
+        assertTrue(warnings().get(0).contains("taking every record inside it"), warnings().get(0));
         assertTrue(warnings().get(1).contains("vanish or roll back"), warnings().get(1));
+        // 使っていない変数を残さないよう、ファイル側は別の検査で扱う
+        assertTrue(Files.notExists(missingFile));
     }
 
     @Test
     void warningBudgetIsPerStepAndSpentOnlyOnce(@TempDir Path dir) throws IOException {
-        // 同じ段階で 2 回失敗させる
-        Path missing = dir.resolve("gone.json");
-        Durability.sync(missing, Durability.Step.PUBLISHED_RECORD_CONTENT);
-        Durability.sync(missing, Durability.Step.PUBLISHED_RECORD_CONTENT);
+        // 同じ段階で 2 回失敗させる（ディレクトリ対象なので例外にはならない）
+        Path missing = dir.resolve("gone-dir");
+        durability.sync(missing, Durability.Step.BASE_DIRECTORY);
+        durability.sync(missing, Durability.Step.BASE_DIRECTORY);
         // 予算は 1 回きりなので、警告は 1 件しか出ない
         assertEquals(1, warnings().size());
         // 別の段階の予算は使われていないため、そちらは今からでも警告できる
-        Durability.sync(dir.resolve("gone-dir"), Durability.Step.RECORD_RENAME);
+        durability.sync(dir.resolve("gone-dir-2"), Durability.Step.RECORD_RENAME);
         // 段階ごとに独立していることを、2 件目が出ることで確認する
         // （予算を共有すると、先に失敗した段階が唯一の枠を使い切り、
         //   実際にデータが危うい段階の警告が二度と出なくなる）
@@ -463,8 +468,8 @@ class DurabilityTest {
         Path file = dir.resolve("real.json");
         Files.writeString(file, "{}");
         // ファイルとディレクトリの両方を同期する
-        Durability.sync(file, Durability.Step.RECORD_CONTENT);
-        Durability.sync(dir, Durability.Step.RECORD_RENAME);
+        durability.sync(file, Durability.Step.RECORD_CONTENT);
+        durability.sync(dir, Durability.Step.RECORD_RENAME);
         // 正常系では警告が出ない（＝この環境では両方とも実際に同期できている）
         assertEquals(List.of(), warnings());
         // 完了ログが 2 件そろっていることを確認する

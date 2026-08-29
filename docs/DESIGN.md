@@ -302,28 +302,35 @@ malicious resource exhaustion and against tampering with the state directory:
   copy-and-delete, in which case the synced temp file is unlinked and the
   destination holds fresh, unflushed pages — syncing only the directory there
   would recreate the exact "durable entry, non-durable contents" failure this
-  section exists to prevent. Steps are best-effort — they log and return rather
-  than throwing — **except the one that runs before publication**. The
-  best-effort rule rests on the sync happening *after* the write is already
-  visible, so that failing the save would contradict what is on disk; that
-  reasoning does not apply to the temp file's own flush, which happens while
-  the record is still a temp file the `finally` will delete. With delayed
-  allocation the kernel can report `ENOSPC`/`EIO` at exactly that `fsync` and
-  drop the dirty pages, so swallowing it and renaming anyway would publish an
-  empty or truncated record and report the save as successful — the very
-  failure this section describes, produced by the mechanism meant to prevent
-  it. That one step therefore propagates its `IOException`, `save()` wraps it
-  as it already does for any other write failure, and `RunCommand` reports it
-  (its handler already names a full disk as the expected cause). Only an
-  *unchecked* failure stays best-effort there, because that means the sync
-  could not be attempted at all rather than that a write was lost — failing a
-  save because the platform cannot `fsync` would be the same inversion in the
-  other direction. Successful steps are logged at `FINE`, since an `fsync`
-  otherwise leaves no evidence that it happened, and a skipped step warns once
-  per step. For directories the warning distinguishes a failure to *open* (a
-  platform gap) from a failure of the *flush* on a directory that opened fine
-  (a real error), because the warn-once budget means that sentence is the only
-  notice the operator will get, and wording a genuine failure as a platform
+  section exists to prevent. **What a failure does depends on what failed.**
+  A directory flush is the step that legitimately cannot run at all (Windows
+  does not allow opening a directory as a channel) and its failure costs the
+  directory entry rather than the record's bytes, so it logs once and
+  continues: failing a save because the platform cannot `fsync` would report a
+  run whose record is on disk as "failed to save execution result", telling
+  the operator the opposite of what happened. A regular-file flush is
+  different — a failed `fsync` there means the record's own bytes did not
+  reach the disk, because with delayed allocation the kernel can report
+  `ENOSPC`/`EIO` at exactly that point and drop the dirty pages — so those
+  steps propagate, `save()` wraps the error as it already does for any other
+  write failure, and `RunCommand` reports it (its handler already names a full
+  disk as the expected cause). That rule covers the non-atomic fallback too:
+  when `Files.move` copies rather than renames, the destination is a freshly
+  allocated file whose bytes the earlier temp-file flush never touched, so its
+  re-sync is a record-content flush like any other and fails the save the same
+  way. Deriving the rule from *what is being flushed*, rather than from
+  "before or after publication", is what makes that case fall out correctly
+  instead of needing to be remembered. Only an *unchecked* failure stays
+  best-effort everywhere, because that means the sync could not be attempted
+  at all rather than that a write was lost. Successful steps are logged at
+  `FINE` — after the channel is closed, since deferred write errors on
+  networked filesystems surface from `close()` and a record logged before that
+  would claim a flush that then failed — since an `fsync` otherwise leaves no
+  evidence that it happened. A skipped step warns once per step, per store.
+  For directories that warning distinguishes a failure to *open* (a platform
+  gap) from a failure of the *flush* on a directory that opened fine (a real
+  error), because the warn-once budget means that sentence is the only notice
+  the operator will get, and wording a genuine failure as a platform
   limitation would tell them to ignore it. Two platform gaps remain and are
   inherent rather than accepted trade-offs: Windows does not allow opening a
   directory as a channel, so the directory syncs are skipped there, and macOS
