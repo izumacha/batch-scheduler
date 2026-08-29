@@ -1,5 +1,7 @@
 package io.github.izumacha.batch.cli;
 
+import io.github.izumacha.batch.text.SafeText;
+
 // アサーション（assertEquals 等）を静的インポートする
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -194,6 +196,21 @@ class CliFormatTest {
         // 空白のみのメッセージも同じ
         assertEquals("IllegalStateException",
                 CliFormat.safeMessage(new IllegalStateException("   ")));
+    }
+
+    /**
+     * 必ず値があるはずの列では、値が無いときに空白ではなくプレースホルダを返すことを
+     * 確認する。空白だけのセルは「表示バグ」と区別が付かず、runId の Javadoc が
+     * 挙げているのと同じ行き止まりになる。
+     */
+    @Test
+    void requiredCell_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.requiredCell(null, 20));
+        assertEquals("-", CliFormat.requiredCell("   ", 20));
+        // 空白ではないが整形すると消える値もプレースホルダになる
+        assertEquals("-", CliFormat.requiredCell("\u202E", 20));
+        // 値があるときは通常どおり切り詰めて返す
+        assertEquals("etl", CliFormat.requiredCell("etl", 20));
     }
 
     /** ステータスが無い記録では "null" ではなくプレースホルダ "-" を返すことを確認する */
@@ -567,9 +584,9 @@ class CliFormatTest {
     void stripControlChars_stripsBidiAndFormatCharacters() {
         // runId 風の文字列に RLO（U+202E）と別種の Cf 文字（ソフトハイフン U+00AD）を混ぜる
         assertEquals("run-01-abc",
-                CliFormat.stripControlChars("run\u202E-01\u00AD-abc"));
+                SafeText.stripControlChars("run\u202E-01\u00AD-abc"));
         // isolate 制御（U+2066）も除去されることを確認する
-        assertEquals("xy", CliFormat.stripControlChars("x\u2066y"));
+        assertEquals("xy", SafeText.stripControlChars("x\u2066y"));
     }
 
     /**
@@ -580,10 +597,10 @@ class CliFormatTest {
     void stripControlChars_removesControlsWithoutTruncating() {
         // UUID 風の runId に ESC シーケンスを混ぜても制御文字だけが消える
         assertEquals("0123456789abcdef-0123-0123[31m-esc",
-                CliFormat.stripControlChars("0123456789abcdef-0123-0123\u001B[31m-esc"));
+                SafeText.stripControlChars("0123456789abcdef-0123-0123\u001B[31m-esc"));
         // 長い文字列でも切り詰めは発生しない（65 文字がそのまま返る）
-        assertEquals(65, CliFormat.stripControlChars("y".repeat(65)).length());
+        assertEquals(65, SafeText.stripControlChars("y".repeat(65)).length());
         // null は null のまま返す
-        assertEquals(null, CliFormat.stripControlChars(null));
+        assertEquals(null, SafeText.stripControlChars(null));
     }
 }

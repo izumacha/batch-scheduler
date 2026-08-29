@@ -289,6 +289,25 @@ final class CliFormat {
     }
 
     /**
+     * 表のセル用に、切り詰めたうえで「値が無い」ことをプレースホルダで示す。
+     *
+     * <p>{@link #shortMessage(String, int)} は値が無いとき空文字を返す。ジョブの
+     * メッセージ欄のように「無いのが普通」の列ではそれでよいが、一覧表のように
+     * 必ず値があるはずの列では、空白だけのセルが「表示バグ」と区別が付かない
+     * （{@link #runId(String)} の Javadoc と同じ理由）。「値が無い」ことを表す表記は
+     * このクラスで 1 つに揃える（§6 一元管理）。
+     */
+    static String requiredCell(String value, int max) {
+        // まずは通常の切り詰め整形を行う
+        String shortened = shortMessage(value, max);
+        // 何も残らなければプレースホルダへ落とす
+        if (shortened.isEmpty()) {
+            return PLACEHOLDER;
+        }
+        return shortened;
+    }
+
+    /**
      * 表示用に実行ステータスを整形する。値が無い場合は {@link #instant(Instant)} /
      * {@link #duration(Duration)} / {@link #runId(String)} と同じプレースホルダ
      * {@code "-"} を返す。
@@ -329,18 +348,21 @@ final class CliFormat {
     /**
      * テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める。
      * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
-     * {@link #stripControlChars(String)} で端末制御文字も除去する（唯一のチョークポイント）。
+     * {@link #sanitizeOneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
      *
      * <p>切り詰めマーカーは {@link #TRUNCATION_MARK}（ASCII）で、戻り値の長さは
      * 必ず {@code max} 以下に収まる（表の桁ずれを防ぐため）。
      */
     static String shortMessage(String message, int max) {
-        // null または空白のみの場合は空文字を返す
-        if (message == null || message.isBlank()) {
+        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は sanitizeOneLine を参照）。
+        // 空判定は整形の「後」に行う。前に置くと、空白ではないが整形すると消える文字
+        // だけの値（bidi 制御の U+202E など）が isBlank() をすり抜けて空文字になり、
+        // 呼び出し側は「値がある」と思ったまま空のセルを描くことになる
+        String oneLine = sanitizeOneLine(message);
+        // 値が無い（null・空白のみ・整形すると消える）場合は空文字を返す
+        if (oneLine == null || oneLine.isEmpty()) {
             return "";
         }
-        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は sanitizeOneLine を参照）
-        String oneLine = sanitizeOneLine(message);
         // 最大文字数以内であればそのまま返す
         if (oneLine.length() <= max) {
             return oneLine;
@@ -355,13 +377,4 @@ final class CliFormat {
         return oneLine.substring(0, max - TRUNCATION_MARK.length()) + TRUNCATION_MARK;
     }
 
-    /**
-     * 端末をあやつる制御文字（ESC・BEL・CSI・DEL など）を文字列から取り除く。
-     * ジョブ出力や state ファイル由来の信頼できない値（runId 等）を端末へ表示する
-     * 直前のサニタイズとして使う（§9: 出力もエスケープする）。null は null のまま返す。
-     */
-    static String stripControlChars(String value) {
-        // 実装は text パッケージの共有ユーティリティへ委譲する（唯一の実装を保つ）
-        return SafeText.stripControlChars(value);
-    }
 }

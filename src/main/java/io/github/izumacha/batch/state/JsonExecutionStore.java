@@ -306,8 +306,10 @@ public final class JsonExecutionStore implements ExecutionStore {
                 Throwable cleanupFailed = deleteQuietly(tmp);
                 // 消せなかったときは警告に留める（進行中の失敗を差し替えないため）
                 if (cleanupFailed != null) {
-                    LOGGER.warning("failed to remove the temporary file '" + SafeText.oneLine(tmp.toString()) + "': "
-                            + cleanupFailed + "; it will be left behind in the state directory");
+                    LOGGER.warning("failed to remove the temporary file '"
+                            + SafeText.oneLine(tmp.toString()) + "': "
+                            + SafeText.oneLine(String.valueOf(cleanupFailed))
+                            + "; it will be left behind in the state directory");
                 }
             }
             // 実際に書き込んだ場所が、書き込み開始時に確認した実体ディレクトリと
@@ -858,8 +860,14 @@ public final class JsonExecutionStore implements ExecutionStore {
         try {
             realFile = file.toRealPath();
         } catch (IOException e) {
+            // パスも例外本文も SafeText を通す。NoSuchFile / AccessDenied はオフェンディング
+            // パスをそのまま本文にするため、片方だけ無害化しても素通りする経路が残る。
+            // 注: この分岐はテストで踏めない（列挙から読み取りまでの間にファイルが
+            // 消えるなどの競合が要る）。同じファイル内の他のログと同じ形に揃えることで
+            // 見落としを防いでいる
             LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
-                    + "': failed to resolve its real path (" + e.getMessage() + ")");
+                    + "': failed to resolve its real path ("
+                    + SafeText.oneLine(e.getMessage()) + ")");
             return Optional.empty();
         }
         // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ

@@ -94,7 +94,7 @@ public final class ListCommand implements Callable<Integer> {
             // --rerun-failed に貼ると「見つからない」になっていた（切り詰めはしない）
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
                     CliFormat.runId(run.runId()),
-                    CliFormat.shortMessage(run.batchName(), 20),
+                    CliFormat.requiredCell(run.batchName(), 20),
                     CliFormat.status(run.status()),
                     CliFormat.instant(run.startedAt()),
                     CliFormat.duration(run.duration()));
