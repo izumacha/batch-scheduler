@@ -178,6 +178,11 @@ class CliFormatTest {
         // 区別が付かず、--rerun-failed へ貼るものも得られない
         assertEquals("-", CliFormat.runId("\u202E"));
         assertEquals("-", CliFormat.runId("\u0007"));
+        // 制御文字が空白を挟んでいる形も同じ。除去の「前」には空白が端に無いので
+        // trim をすり抜け、除去後に空白だけが残る — 空でないと見なされて
+        // 空白セルになっていた
+        assertEquals("-", CliFormat.runId("\u2060 \u2060"));
+        assertEquals("-", CliFormat.runId("\u0007\t\u0007"));
         // 値があるときは 1 行へ整形して返す（切り詰めはしない）
         assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
     }
@@ -619,6 +624,17 @@ class CliFormatTest {
         // 根元そのものと、そこに添えられた診断の両方が出る
         assertTrue(rendered.contains("root"), rendered);
         assertTrue(rendered.contains("atomic move unsupported"), rendered);
+    }
+
+    /**
+     * 制御文字が空白を挟んでいるメッセージでも、クラス名へ落ちて「error: 」だけの
+     * 行にならないことを確認する。除去の前後どちらか一方でしか端を落とさないと、
+     * 除去後に残った空白が「値がある」と見なされてすり抜ける。
+     */
+    @Test
+    void safeMessage_messageOfOnlyFormatCharsAndSpaces_fallsBackToClassName() {
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("\u2060 \u2060")));
     }
 
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */

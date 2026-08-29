@@ -343,7 +343,7 @@ final class Durability {
         // fsync は成功しても痕跡を残さないので、このログが「どこまで確定したか」を
         // 後から追える唯一の手がかりになる。Supplier 版なので FINE が無効なときは
         // 文字列の組み立て自体が起きない
-        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + SafeText.oneLine(path.toString()) + "'");
+        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + SafeText.forLog(path) + "'");
         // ここまで来た＝確定した
         return true;
     }
@@ -493,7 +493,7 @@ final class Durability {
             // 手がかりを何も渡さないメッセージになってしまう
             LOGGER.warning(() -> total + " directory levels created for the state directory "
                     + "could not be confirmed durable, starting with '"
-                    + SafeText.oneLine(String.valueOf(first))
+                    + SafeText.forLog(first)
                     + "'; each may not survive a power loss, taking every record in it");
         }
     }
@@ -614,7 +614,7 @@ final class Durability {
                 // 後から追えず、FIFO でぶら下がったときに「なぜ守れなかったのか」が
                 // どこにも無い状態になる（§6 エラーを握り潰さない）
                 LOGGER.fine(() -> "could not determine the file type of '"
-                        + SafeText.oneLine(path.toString())
+                        + SafeText.forLog(path)
                         + "' (" + SafeText.forLog(statFailed) + "); letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
@@ -695,7 +695,7 @@ final class Durability {
         // 警告に内部クラス名を混ぜても運用者の役に立たないので、中身へ置き換える
         Throwable shown = cause instanceof OpenFailure ? cause.getCause() : cause;
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
-        LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.oneLine(path.toString()) + "': "
+        LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.forLog(path) + "': "
                 + reason + " (" + SafeText.forLog(shown) + "); " + step.consequence
                 + ". This warning is reported once per step, per store.");
     }

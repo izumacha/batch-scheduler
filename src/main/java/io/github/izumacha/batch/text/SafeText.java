@@ -195,9 +195,17 @@ public final class SafeText {
             return null;
         }
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
-        String collapsed = WHITESPACE.matcher(text).replaceAll(" ").trim();
+        String collapsed = WHITESPACE.matcher(text).replaceAll(" ");
         // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
-        return stripControlChars(collapsed);
+        String stripped = stripControlChars(collapsed);
+        // 除去した「後」にもう一度圧縮して端を落とす。制御文字を挟んだ空白
+        // （"\u2060 \u2060" のような、改変された state ファイルから来うる値）は
+        // 除去の前には空白として端に無いため trim ですり抜け、除去後に空白だけが残る。
+        // それを返すと、呼び出し側の「空ならプレースホルダ」という判定
+        // （runId / requiredCell / safeMessage）が空でないと見なして通し、
+        // 36 桁の空白セルや "error: " だけの行になる — どれも、それらの判定が
+        // 防ぐために存在する行き止まりそのもの
+        return WHITESPACE.matcher(stripped).replaceAll(" ").trim();
     }
 
     /**

@@ -1,6 +1,5 @@
 package io.github.izumacha.batch.cli;
 
-import io.github.izumacha.batch.text.SafeText;
 
 import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
@@ -106,16 +105,19 @@ public final class RunCommand implements Callable<Integer> {
                 // runId は state ファイル由来の値が `list` 経由で渡ってくる想定
                 // （DESIGN.md は state ディレクトリを改変対象として扱う）。同じ式の
                 // safeMessage 側だけが整形されていると、同じ値が「1 回は無害化され、
-                // 1 回は生のまま」端末へ出て、制御文字の注入が素通りする
+                // 1 回は生のまま」端末へ出て、制御文字の注入が素通りする。
+                // 整形は list の RUN ID 列と同じ CliFormat.runId を通す — 手順を
+                // 書き写すと、表示の規則（上限・中略の向き・プレースホルダ）を
+                // 変えたときに同じ値が 2 通りに描画されるようになる
                 System.err.println("error: invalid --rerun-failed run id '"
-                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), CliFormat.MAX_RUN_ID_CHARS)
+                        + CliFormat.runId(rerunFailedRunId)
                         + "': " + CliFormat.safeMessage(e));
                 return BatchCli.EXIT_CONFIG;
             }
             if (priorResult == null) {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '"
-                        + SafeText.bounded(SafeText.oneLine(rerunFailedRunId), CliFormat.MAX_RUN_ID_CHARS)
+                        + CliFormat.runId(rerunFailedRunId)
                         + "' under " + stateDir.toAbsolutePath());
                 // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
                 // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では

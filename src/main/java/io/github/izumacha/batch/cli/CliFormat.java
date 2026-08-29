@@ -56,7 +56,7 @@ final class CliFormat {
      * 上限を置くのは、改変された記録の runId が 16MiB まで許される（記録サイズの
      * 上限しか効かない）ため。
      */
-    static final int MAX_RUN_ID_CHARS = 256;
+    private static final int MAX_RUN_ID_CHARS = 256;
 
     /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので

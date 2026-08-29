@@ -67,8 +67,9 @@
                     <!--
                       フォーク全体の上限。JUnit の既定タイムアウト
                       (src/test/resources/junit-platform.properties) は
-                      Thread.interrupt() で止めにいくため、open(2) の中で
-                      ブロックしたスレッドには効かない。Durability の FIFO 検査は
+                      既定の SAME_THREAD モードではテストを中断せず、戻ってきた
+                      後に超過を報告するだけなので、open(2) の中でブロックした
+                      スレッドには効かない。Durability の FIFO 検査は
                       まさにその状態を検出するためのものなので、ガードが外れると
                       JUnit 側の上限をすり抜けてフォークが永久に残る。
                       その場合でも CI が 6 時間上限まで走らないよう、外側から切る。
