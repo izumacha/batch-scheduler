@@ -102,6 +102,17 @@ public final class JsonExecutionStore implements ExecutionStore {
     // みで OutputCollector.MAX_LINE_CHARS により 8KiB に上限があるため、ジョブ数が数千規模の
     // バッチでも十分に収まる）であり、現実的な用途を妨げないサーキットブレーカーとして機能する。
     static final long MAX_RECORD_BYTES = 16L * 1024 * 1024; // 16 MiB
+    /**
+     * ログ 1 行に載せる例外表現の最大文字数。
+     *
+     * <p>これらの記録は FINE を有効にしたときだけ出るが、既定の ConsoleHandler は
+     * CLI と同じ stderr へ書く。{@code FileSystemException} は移動元と移動先の
+     * パスを丸ごと本文に持つため（それぞれ PATH_MAX まで）、上限が無いと
+     * 「この保存先ではこの経路が普通なのか」を調べるために FINE を入れた運用者へ
+     * 数キロバイトの 1 行を返すことになる。CLI 側のエラー行を有界にしているのと
+     * 同じ理由（表示経路は 1 つ）。
+     */
+    private static final int MAX_LOGGED_DETAIL_CHARS = 500;
 
     // JSON ファイルを保存するベースディレクトリのパスを保持するフィールド
     private final Path baseDir;
@@ -585,7 +596,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             LOGGER.fine(() -> "atomic move unavailable for '"
                     + SafeText.oneLine(target.getFileName().toString())
                     + "', published with a non-atomic move instead ("
-                    + SafeText.oneLine(String.valueOf(atomicFailed)) + ")");
+                    + SafeText.bounded(SafeText.oneLine(String.valueOf(atomicFailed)),
+                            MAX_LOGGED_DETAIL_CHARS) + ")");
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
         }

@@ -27,11 +27,28 @@ final class CliFormat {
      * このツールは他のあらゆる外部由来の出力を有界にしている（表のセルの切り詰め・
      * 記録サイズの上限・一覧件数の上限）ので、ここだけ例外にしない。
      *
-     * <p>断片ごとに切るのは、全体を切ると末尾に付く根本原因が落ちるため。段数にも
-     * 上限があるので、断片を有界にすれば全体も有界になる。500 文字は、実際の
-     * IOException のメッセージ（パス＋errno の説明）が収まる十分な余裕がある値。
+     * <p>断片ごとに切るのは、全体を切ると末尾に付く根本原因が落ちるため。段数と
+     * 添えられた診断の件数にも上限があるので、断片を有界にすれば全体も有界になる。
+     *
+     * <p>切り方は末尾からではなく中略（{@link SafeText#bounded(String, int)}）。
+     * 外部由来の値はメッセージの途中に埋め込まれ、対処に必要な説明はその後ろに来る
+     * （Jackson の {@code line:}/{@code column:}、BatchExecutor の「流用を拒否した」という
+     * 結び、errno の説明）。末尾から切ると、攻撃者が長さを選べる値を通しただけで
+     * その説明を消せてしまう。
+     *
+     * <p>1000 文字は、実際に出るメッセージ（Jackson の参照チェーン付きで 450〜600 文字）が
+     * そのまま収まり、中略が起きるのは異常な長さのときだけになる値。
      */
-    private static final int MAX_MESSAGE_CHARS = 500;
+    private static final int MAX_MESSAGE_CHARS = 1000;
+
+    /**
+     * 1 段あたりに描画する「添えられた診断」({@code addSuppressed}) の上限。
+     *
+     * <p>断片ごとの長さを有界にしても、件数が無制限なら全体は有界にならない。
+     * 現状はどの経路も 1 件しか添えないが、将来「階層ごと」「リトライごと」に
+     * 添える実装が入った時点で、上限が無ければ黙って無界へ戻る。
+     */
+    private static final int MAX_SUPPRESSED_PER_LEVEL = 3;
 
     /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
@@ -136,7 +153,12 @@ final class CliFormat {
 
     /**
      * 例外のメッセージを取得する。メッセージが null の場合は代わりに例外クラス名を返し、
-     * 診断価値の無い「error: null」表示を防ぐ。BatchCli の最終防波堤ハンドラでのみ適用されて
+     * 診断価値の無い「error: null」表示を防ぐ。
+     *
+     * <p>戻り値は 1 行へ整形され、制御文字を除かれ、{@link #MAX_MESSAGE_CHARS} 文字に
+     * 中略される。例外のメッセージには state ファイル由来の値がそのまま入りうるため
+     * （記録 1 件の上限は 16MiB）、無害化と長さの上限をこのメソッド自身が保証する。
+     * 中略は末尾ではなく中央で行うので、メッセージ末尾の説明は残る。BatchCli の最終防波堤ハンドラでのみ適用されて
      * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      */
@@ -146,12 +168,12 @@ final class CliFormat {
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        String message = shortMessage(t.getMessage(), MAX_MESSAGE_CHARS);
+        String message = SafeText.bounded(SafeText.oneLine(t.getMessage()), MAX_MESSAGE_CHARS);
         // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
         // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
         // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
         // 診断価値の無い表示を防ぐという、このメソッドが存在する理由そのものが消える
-        if (message.isEmpty()) {
+        if (message == null || message.isEmpty()) {
             return t.getClass().getSimpleName();
         }
         return message;
@@ -229,9 +251,18 @@ final class CliFormat {
      */
     private static void appendSuppressed(StringBuilder rendered, String head, Throwable throwable) {
         // 添えられた失敗を順に併記する（無ければ何もしない）
-        for (Throwable suppressed : throwable.getSuppressed()) {
+        Throwable[] suppressed = throwable.getSuppressed();
+        // 件数にも上限を置く。断片の長さだけ有界にしても、件数が無制限なら全体は
+        // 有界にならない（理由は MAX_SUPPRESSED_PER_LEVEL を参照）
+        int shownCount = Math.min(suppressed.length, MAX_SUPPRESSED_PER_LEVEL);
+        for (int i = 0; i < shownCount; i++) {
             // 主因と区別できるよう "also:" を付ける
-            appendDetail(rendered, head, "also: " + suppressed);
+            appendDetail(rendered, head, "also: " + suppressed[i]);
+        }
+        // 打ち切ったなら、その事実も残す（黙って落とさない）
+        if (suppressed.length > shownCount) {
+            rendered.append(" (...").append(suppressed.length - shownCount)
+                    .append(" more suppressed)");
         }
     }
 
@@ -256,8 +287,8 @@ final class CliFormat {
      * そのまま detailMessage にする）と分かっている 1 ケースなので抑止してよい。
      */
     private static void appendDetail(StringBuilder rendered, String head, String rawDetail) {
-        // 断片ごとに長さを切る（理由は MAX_MESSAGE_CHARS を参照）
-        String detail = shortMessage(rawDetail, MAX_MESSAGE_CHARS);
+        // 断片ごとに長さを切る（末尾ではなく中略。理由は MAX_MESSAGE_CHARS を参照）
+        String detail = SafeText.bounded(SafeText.oneLine(rawDetail), MAX_MESSAGE_CHARS);
         // 比較は両方とも整形した形で行う。head は safeMessage が整形済みで返す一方
         // detail は生の toString() なので、片方だけを整形した状態で比べると、
         // 原因のメッセージに前後の空白や改行が含まれるだけで一致しなくなり、

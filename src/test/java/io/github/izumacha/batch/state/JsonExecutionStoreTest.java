@@ -585,44 +585,49 @@ class JsonExecutionStoreTest {
 
     @Test
     void skippedRecordWarningsStripTerminalControlCharacters(@TempDir Path dir) throws IOException {
-        // 読み取り側のログを拾えるようにする（Durability ではなくストア側のロガー）
-        Logger storeLogger = Logger.getLogger(JsonExecutionStore.class.getName());
-        List<LogRecord> captured = new ArrayList<>();
-        Handler capture = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                captured.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        capture.setLevel(Level.ALL);
-        boolean originalParents = storeLogger.getUseParentHandlers();
-        storeLogger.setUseParentHandlers(false);
-        storeLogger.addHandler(capture);
-        try {
+        try (LogCapture logs = LogCapture.of(JsonExecutionStore.class)) {
             // ファイル名に端末制御文字（ESC・BEL）を仕込んだ壊れた記録を置く。
             // state ディレクトリは改変対象として扱う前提（DESIGN.md）
             Files.createDirectories(dir);
             Files.writeString(dir.resolve("run-\u001b]0;pwned\u0007evil.json"), "{not json");
             // 読み飛ばしの警告が出る（＝この経路を通る）
             new JsonExecutionStore(dir).findAll();
-            assertFalse(captured.isEmpty(), "読み飛ばしの警告が出ていない");
+            assertFalse(logs.messages().isEmpty(), "読み飛ばしの警告が出ていない");
             // 既定の ConsoleHandler は CLI と同じ stderr へ出すので、ここも
             // 表示経路と同じ規則で無害化されていなければならない
-            for (LogRecord record : captured) {
-                assertFalse(record.getMessage().contains("\u001b"), record.getMessage());
-                assertFalse(record.getMessage().contains("\u0007"), record.getMessage());
+            for (String message : logs.messages()) {
+                assertFalse(message.contains("\u001b"), message);
+                assertFalse(message.contains("\u0007"), message);
             }
-        } finally {
-            storeLogger.removeHandler(capture);
-            storeLogger.setUseParentHandlers(originalParents);
+        }
+    }
+
+    @Test
+    void aNonAtomicPublishRecordsWhyTheAtomicMoveWasUnavailable(@TempDir Path dir)
+            throws IOException {
+        try (LogCapture logs = LogCapture.of(JsonExecutionStore.class)) {
+            // 記録の名前を空ディレクトリが占有していると、アトミック移動が失敗して
+            // フォールバックが走る（続く通常の move がそれを消して改名し直す）。
+            // runId に端末制御文字を仕込み、この診断も無害化されることを同時に確かめる
+            // （fileFor は "/" "\\" ".." NUL しか弾かず、制御文字は通る）
+            String runId = "run\u001b]0;pwned\u00071";
+            Files.createDirectories(dir);
+            Files.createDirectory(dir.resolve(runId + ".json"));
+            new JsonExecutionStore(dir).save(new ExecutionResult(
+                    runId, "etl", JobStatus.SUCCEEDED,
+                    Instant.parse("2026-01-02T03:04:05Z"),
+                    Instant.parse("2026-01-02T03:04:06Z"), List.of()));
+            // フォールバックが成功しても、なぜアトミック移動を使えなかったのかは残る。
+            // ここを握り潰すと「この保存先ではこの経路が普通なのか」を判断する材料が
+            // どこにも無くなる
+            String diagnostic = logs.messages().stream()
+                    .filter(m -> m.contains("atomic move unavailable"))
+                    .findFirst()
+                    .orElse(null);
+            assertTrue(diagnostic != null, logs.messages().toString());
+            // 記録名は無害化されている（FINE を入れた運用者の端末を乗っ取らせない）
+            assertFalse(diagnostic.contains("\u001b"), diagnostic);
+            assertFalse(diagnostic.contains("\u0007"), diagnostic);
         }
     }
 }

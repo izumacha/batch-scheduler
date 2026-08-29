@@ -44,8 +44,52 @@ public final class SafeText {
     private static final Pattern WHITESPACE =
             Pattern.compile("[\\s\\u0085\\u2028\\u2029]+");
 
+    // 中略したことを示すマーカー。ASCII なのは、LANG 未設定の C/POSIX ロケールでは
+    // stdout が US-ASCII になり「…」(U+2026) が "?" へ潰れて壊れた出力と区別が
+    // 付かなくなるため（DESIGN.md「ASCII-only CLI diagnostics」）
+    private static final String ELLIPSIS = "...";
+
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private SafeText() {
+    }
+
+    /**
+     * 長すぎる文字列を、先頭と末尾の両方を残して中略する。
+     *
+     * <p>末尾を切り落とす単純な切り詰めでは駄目な場面がある。外部由来の値は
+     * メッセージの<em>途中</em>に埋め込まれ、対処に必要な説明はその<em>後ろ</em>に
+     * 来ることが多いため（Jackson の {@code at [Source: ...; line: 4, column: 14]}、
+     * {@code BatchExecutor} の「別のバッチのものなので流用を拒否した」という結び、
+     * {@code FileSystemException} の errno の説明）。末尾から切ると、攻撃者が長さを
+     * 選べる値を通しただけで、その説明を丸ごと消せてしまう。
+     *
+     * <p>両端を残せば、どの値が問題だったか（先頭）と、なぜ駄目だったか（末尾）の
+     * 両方が残る。中略した事実は {@code "..."} で示す。
+     *
+     * @param text 対象の文字列（{@code null} 可）
+     * @param max 戻り値の最大文字数（マーカーを含む）
+     * @return {@code max} 以下に収めた文字列。{@code null} は {@code null} のまま
+     */
+    public static String bounded(String text, int max) {
+        // null はそのまま返す（呼び出し元の null 扱いを変えないため）
+        if (text == null) {
+            return null;
+        }
+        // 収まっているならそのまま返す
+        if (text.length() <= max) {
+            return text;
+        }
+        // マーカーすら入らない極端な max では、マーカー無しで単純に切る
+        // （足すと戻り値が max を超えて桁が崩れるため）
+        if (max <= ELLIPSIS.length()) {
+            return text.substring(0, Math.max(0, max));
+        }
+        // マーカー分を除いた残りを、先頭側と末尾側へ分ける
+        int budget = max - ELLIPSIS.length();
+        int tail = budget / 2;
+        int head = budget - tail;
+        // 先頭 + マーカー + 末尾 で組み立てる（全長はちょうど max）
+        return text.substring(0, head) + ELLIPSIS + text.substring(text.length() - tail);
     }
 
     /**

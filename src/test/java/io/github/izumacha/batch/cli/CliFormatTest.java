@@ -486,8 +486,48 @@ class CliFormatTest {
         Exception outer = new java.io.UncheckedIOException(huge, (java.io.IOException) cause);
         String rendered = CliFormat.safeMessageWithCause(outer);
         // 断片ごとに切られているので、全体も現実的な長さに収まる
-        assertTrue(rendered.length() < 5_000, "rendered length was " + rendered.length());
+        assertTrue(rendered.length() < 10_000, "rendered length was " + rendered.length());
         // 切り詰めたことが分かる印が付いている（黙って落とさない）
+        assertTrue(rendered.contains("..."), rendered);
+    }
+
+    /**
+     * 「断片ごとに切る」ことを実際に固定する。全体を 1 回切る実装に置き換えても
+     * 長さの検査だけなら通ってしまうが、それは MAX_MESSAGE_CHARS の Javadoc が
+     * 禁じている形（末尾に付く根本原因が落ちる）。外側が極端に長くても、
+     * 根本原因の見分けが付く文字列が出力に残ることを確かめる。
+     */
+    @Test
+    void safeMessageWithCause_keepsTheRootCauseEvenWhenTheHeadIsHuge() {
+        // どの段も長い連鎖を作り、それぞれに見分けの付く目印を置く。
+        // 全体を 1 回だけ中略する実装だと、両端（外側の先頭と根本原因の末尾）は
+        // 残るが「途中の段」がまるごと消えるので、中段の目印で見分けが付く
+        java.io.IOException root = new java.io.IOException("c".repeat(5_000) + "ROOT-MARKER");
+        java.io.IOException middle = new java.io.IOException("MIDDLE-MARKER" + "b".repeat(5_000), root);
+        Exception outer = new java.io.UncheckedIOException("OUTER" + "a".repeat(5_000), middle);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 断片ごとに切っていれば、どの段の目印も残る
+        assertTrue(rendered.contains("OUTER"), "head lost");
+        assertTrue(rendered.contains("MIDDLE-MARKER"), "middle segment lost");
+        assertTrue(rendered.contains("ROOT-MARKER"), "root cause lost");
+    }
+
+    /**
+     * 中略が末尾ではなく中央で行われることを確かめる。末尾から切ると、外部由来の値の
+     * 長さを選ぶだけで、その後ろに付く「なぜ駄目だったか」の説明を消せてしまう
+     * （Jackson の line:/column:、BatchExecutor の「流用を拒否した」という結び）。
+     */
+    @Test
+    void safeMessage_elidesTheMiddleSoTheTrailingExplanationSurvives() {
+        // 途中に長い外部由来の値、末尾に対処に必要な説明、という実際の形を作る
+        String message = "invalid batch config ('" + "x".repeat(5_000)
+                + "') at [Source: bad.yaml; line: 4, column: 14]";
+        String rendered = CliFormat.safeMessage(new IllegalArgumentException(message));
+        // 先頭（どの値が問題か）が残る
+        assertTrue(rendered.startsWith("invalid batch config"), rendered);
+        // 末尾（なぜ駄目か）も残る
+        assertTrue(rendered.endsWith("line: 4, column: 14]"), rendered);
+        // 中略した印が付いている
         assertTrue(rendered.contains("..."), rendered);
     }
 

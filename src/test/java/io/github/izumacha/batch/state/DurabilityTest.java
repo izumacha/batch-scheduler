@@ -670,50 +670,6 @@ class DurabilityTest {
     }
 
     @Test
-    void aNonAtomicPublishRecordsWhyTheAtomicMoveWasUnavailable(@TempDir Path dir)
-            throws IOException {
-        // ストア側のロガーを拾う（この診断は Durability ではなくストアが出す）
-        Logger storeLogger = Logger.getLogger(JsonExecutionStore.class.getName());
-        List<LogRecord> captured = new ArrayList<>();
-        Handler capture = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                captured.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        capture.setLevel(Level.ALL);
-        Level originalLevel = storeLogger.getLevel();
-        boolean originalParents = storeLogger.getUseParentHandlers();
-        storeLogger.setLevel(Level.ALL);
-        storeLogger.setUseParentHandlers(false);
-        storeLogger.addHandler(capture);
-        try {
-            // 記録の名前を空ディレクトリが占有していると、アトミック移動が失敗して
-            // フォールバックが走る（続く通常の move がそれを消して改名し直す）
-            Files.createDirectories(dir);
-            Files.createDirectory(dir.resolve("run1.json"));
-            new JsonExecutionStore(dir).save(sampleRun("run1"));
-            // フォールバックが成功しても、なぜアトミック移動を使えなかったのかは残る。
-            // ここを握り潰すと「この保存先ではこの経路が普通なのか」を判断する材料が
-            // どこにも無くなる
-            assertTrue(captured.stream().anyMatch(r -> r.getMessage().contains("atomic move unavailable")),
-                    captured.stream().map(LogRecord::getMessage).toList().toString());
-        } finally {
-            storeLogger.removeHandler(capture);
-            storeLogger.setLevel(originalLevel);
-            storeLogger.setUseParentHandlers(originalParents);
-        }
-    }
-
-    @Test
     void onlyAFlushFailureOnARecordContentStepFailsTheSave() {
         // 「書き戻しまで到達したか」の 2 通りを用意する（false=開けなかった / true=書き戻しで失敗）
         boolean openFailed = false;

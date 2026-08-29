@@ -88,7 +88,7 @@ public final class ListCommand implements Callable<Integer> {
         for (ExecutionResult run : runs) {
             // 実行 ID・バッチ名・ステータス・開始時刻・実行時間を整形して出力する。
             // runId は state ファイル由来の信頼できない値のため、他の列と同じ
-            // sanitizeOneLine（空白を圧縮してから制御文字を除去）を通す。
+            // SafeText.oneLine（空白を圧縮してから制御文字を除去）を通す。
             // stripControlChars だけを掛けていた頃は、改行が「削除」されて
             // "run1\nbbb" が "run1bbb" という実在しない ID に見え、それを
             // --rerun-failed に貼ると「見つからない」になっていた（切り詰めはしない）
