@@ -1,5 +1,7 @@
 package io.github.izumacha.batch.cli;
 
+import io.github.izumacha.batch.text.SafeText;
+
 import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
 import io.github.izumacha.batch.config.ValidationException;
@@ -106,14 +108,14 @@ public final class RunCommand implements Callable<Integer> {
                 // safeMessage 側だけが整形されていると、同じ値が「1 回は無害化され、
                 // 1 回は生のまま」端末へ出て、制御文字の注入が素通りする
                 System.err.println("error: invalid --rerun-failed run id '"
-                        + CliFormat.sanitizeOneLine(rerunFailedRunId)
+                        + SafeText.oneLine(rerunFailedRunId)
                         + "': " + CliFormat.safeMessage(e));
                 return BatchCli.EXIT_CONFIG;
             }
             if (priorResult == null) {
                 // 指定された runId の記録が無い場合は設定・IO エラーとして終了する
                 System.err.println("error: no prior run found with id '"
-                        + CliFormat.sanitizeOneLine(rerunFailedRunId)
+                        + SafeText.oneLine(rerunFailedRunId)
                         + "' under " + stateDir.toAbsolutePath());
                 // findById は state ディレクトリがシンボリックリンクや通常ファイルの場合も
                 // fail-closed で「結果なし」を返すため、記録が実在してもリンク経由では

@@ -670,8 +670,9 @@ class DurabilityTest {
     }
 
     @Test
-    void skippedRecordWarningsStripTerminalControlCharacters(@TempDir Path dir) throws IOException {
-        // 読み取り側のログを拾えるようにする（Durability ではなくストア側のロガー）
+    void aNonAtomicPublishRecordsWhyTheAtomicMoveWasUnavailable(@TempDir Path dir)
+            throws IOException {
+        // ストア側のロガーを拾う（この診断は Durability ではなくストアが出す）
         Logger storeLogger = Logger.getLogger(JsonExecutionStore.class.getName());
         List<LogRecord> captured = new ArrayList<>();
         Handler capture = new Handler() {
@@ -689,25 +690,25 @@ class DurabilityTest {
             }
         };
         capture.setLevel(Level.ALL);
+        Level originalLevel = storeLogger.getLevel();
         boolean originalParents = storeLogger.getUseParentHandlers();
+        storeLogger.setLevel(Level.ALL);
         storeLogger.setUseParentHandlers(false);
         storeLogger.addHandler(capture);
         try {
-            // ファイル名に端末制御文字（ESC・BEL）を仕込んだ壊れた記録を置く。
-            // state ディレクトリは改変対象として扱う前提（DESIGN.md）
+            // 記録の名前を空ディレクトリが占有していると、アトミック移動が失敗して
+            // フォールバックが走る（続く通常の move がそれを消して改名し直す）
             Files.createDirectories(dir);
-            Files.writeString(dir.resolve("run-\u001b]0;pwned\u0007evil.json"), "{not json");
-            // 読み飛ばしの警告が出る（＝この経路を通る）
-            new JsonExecutionStore(dir).findAll();
-            assertFalse(captured.isEmpty(), "読み飛ばしの警告が出ていない");
-            // 既定の ConsoleHandler は CLI と同じ stderr へ出すので、ここも
-            // 表示経路と同じ規則で無害化されていなければならない
-            for (LogRecord record : captured) {
-                assertFalse(record.getMessage().contains("\u001b"), record.getMessage());
-                assertFalse(record.getMessage().contains("\u0007"), record.getMessage());
-            }
+            Files.createDirectory(dir.resolve("run1.json"));
+            new JsonExecutionStore(dir).save(sampleRun("run1"));
+            // フォールバックが成功しても、なぜアトミック移動を使えなかったのかは残る。
+            // ここを握り潰すと「この保存先ではこの経路が普通なのか」を判断する材料が
+            // どこにも無くなる
+            assertTrue(captured.stream().anyMatch(r -> r.getMessage().contains("atomic move unavailable")),
+                    captured.stream().map(LogRecord::getMessage).toList().toString());
         } finally {
             storeLogger.removeHandler(capture);
+            storeLogger.setLevel(originalLevel);
             storeLogger.setUseParentHandlers(originalParents);
         }
     }

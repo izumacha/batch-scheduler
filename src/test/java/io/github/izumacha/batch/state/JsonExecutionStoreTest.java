@@ -3,6 +3,11 @@ package io.github.izumacha.batch.state;
 import io.github.izumacha.batch.model.ExecutionResult;
 import io.github.izumacha.batch.model.JobResult;
 import io.github.izumacha.batch.model.JobStatus;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.util.ArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -576,5 +581,48 @@ class JsonExecutionStoreTest {
         }
 
         assertEquals(5, store.findAll().size());
+    }
+
+    @Test
+    void skippedRecordWarningsStripTerminalControlCharacters(@TempDir Path dir) throws IOException {
+        // 読み取り側のログを拾えるようにする（Durability ではなくストア側のロガー）
+        Logger storeLogger = Logger.getLogger(JsonExecutionStore.class.getName());
+        List<LogRecord> captured = new ArrayList<>();
+        Handler capture = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                captured.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        capture.setLevel(Level.ALL);
+        boolean originalParents = storeLogger.getUseParentHandlers();
+        storeLogger.setUseParentHandlers(false);
+        storeLogger.addHandler(capture);
+        try {
+            // ファイル名に端末制御文字（ESC・BEL）を仕込んだ壊れた記録を置く。
+            // state ディレクトリは改変対象として扱う前提（DESIGN.md）
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve("run-\u001b]0;pwned\u0007evil.json"), "{not json");
+            // 読み飛ばしの警告が出る（＝この経路を通る）
+            new JsonExecutionStore(dir).findAll();
+            assertFalse(captured.isEmpty(), "読み飛ばしの警告が出ていない");
+            // 既定の ConsoleHandler は CLI と同じ stderr へ出すので、ここも
+            // 表示経路と同じ規則で無害化されていなければならない
+            for (LogRecord record : captured) {
+                assertFalse(record.getMessage().contains("\u001b"), record.getMessage());
+                assertFalse(record.getMessage().contains("\u0007"), record.getMessage());
+            }
+        } finally {
+            storeLogger.removeHandler(capture);
+            storeLogger.setUseParentHandlers(originalParents);
+        }
     }
 }

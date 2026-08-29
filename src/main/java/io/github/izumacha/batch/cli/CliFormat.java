@@ -18,6 +18,22 @@ final class CliFormat {
     private static final int MAX_CAUSE_DEPTH = 5;
 
     /**
+     * エラー行に載せる 1 断片（外側のメッセージ・原因 1 段・添えられた診断 1 件）の
+     * 最大文字数。
+     *
+     * <p>例外のメッセージには state ファイル由来の値がそのまま入る
+     * （{@code --rerun-failed} のバッチ名不一致は記録の {@code batchName} を本文にする）。
+     * 記録 1 件の上限は 16MiB なので、それを丸ごと 1 行で stderr へ吐けてしまう。
+     * このツールは他のあらゆる外部由来の出力を有界にしている（表のセルの切り詰め・
+     * 記録サイズの上限・一覧件数の上限）ので、ここだけ例外にしない。
+     *
+     * <p>断片ごとに切るのは、全体を切ると末尾に付く根本原因が落ちるため。段数にも
+     * 上限があるので、断片を有界にすれば全体も有界になる。500 文字は、実際の
+     * IOException のメッセージ（パス＋errno の説明）が収まる十分な余裕がある値。
+     */
+    private static final int MAX_MESSAGE_CHARS = 500;
+
+    /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
      * 出力量は増えず、循環した連鎖でも必ず止まる。
      */
@@ -130,12 +146,12 @@ final class CliFormat {
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        String message = sanitizeOneLine(t.getMessage());
+        String message = shortMessage(t.getMessage(), MAX_MESSAGE_CHARS);
         // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
         // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
         // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
         // 診断価値の無い表示を防ぐという、このメソッドが存在する理由そのものが消える
-        if (message == null || message.isEmpty()) {
+        if (message.isEmpty()) {
             return t.getClass().getSimpleName();
         }
         return message;
@@ -198,7 +214,8 @@ final class CliFormat {
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が
         // 生で入り、それが端末へ出る。長さは切り詰めない — 表のセルと違って桁を揃える
         // 必要が無く、このメソッドが存在する理由そのものである根本原因が末尾にあるため
-        return sanitizeOneLine(rendered.toString());
+        // 断片ごとに切ってあるので全体も有界。ここでは 1 行へ整形するだけ
+        return SafeText.oneLine(rendered.toString());
     }
 
     /**
@@ -238,12 +255,14 @@ final class CliFormat {
      * （{@code new UncheckedIOException(cause)} は原因の {@code toString()} を
      * そのまま detailMessage にする）と分かっている 1 ケースなので抑止してよい。
      */
-    private static void appendDetail(StringBuilder rendered, String head, String detail) {
+    private static void appendDetail(StringBuilder rendered, String head, String rawDetail) {
+        // 断片ごとに長さを切る（理由は MAX_MESSAGE_CHARS を参照）
+        String detail = shortMessage(rawDetail, MAX_MESSAGE_CHARS);
         // 比較は両方とも整形した形で行う。head は safeMessage が整形済みで返す一方
         // detail は生の toString() なので、片方だけを整形した状態で比べると、
         // 原因のメッセージに前後の空白や改行が含まれるだけで一致しなくなり、
         // まったく同じ文が 2 回並ぶ（この抑止が存在する唯一の理由が消える）
-        if (!sanitizeOneLine(detail).equals(head)) {
+        if (!detail.equals(head)) {
             rendered.append(" (").append(detail).append(')');
         }
     }
@@ -268,7 +287,7 @@ final class CliFormat {
      * {@code -.json} という記録が作られることは（生成される runId の形式が
      * {@code yyyyMMdd-HHmmss-XXXXXX} である以上）まず無いこと、の 2 点による。
      *
-     * <p>値がある場合は他の列と同じ {@link #sanitizeOneLine(String)} を通す。
+     * <p>値がある場合は他の列と同じ {@link SafeText#oneLine(String)} を通す。
      * runId は state ファイル由来の信頼できない値で、切り詰めはしない。
      */
     static String runId(String runId) {
@@ -281,7 +300,7 @@ final class CliFormat {
         // 改変された state ファイルから来うる）が整形後に空文字となり、
         // 36 桁の空白として描画される。運用者には「表示バグ」と区別が付かず、
         // --rerun-failed へ貼るものも得られない — このメソッドが防ぐはずの行き止まり
-        String rendered = sanitizeOneLine(runId);
+        String rendered = SafeText.oneLine(runId);
         if (rendered.isEmpty()) {
             return PLACEHOLDER;
         }
@@ -328,37 +347,19 @@ final class CliFormat {
     }
 
     /**
-     * 端末へ出す文字列を 1 行へ整形し、制御文字を取り除く。
-     *
-     * <p>順序が肝で、必ず「空白の圧縮 → 制御文字の除去」で行う。逆にすると改行・タブは
-     * {@code \p{Cntrl}} に含まれるため「削除」され、前後の単語が
-     * {@code "line onefile not found"} のように繋がって別語へ化ける。
-     *
-     * <p>この 2 手をメソッドに切り出しているのは、順序の不変条件を 1 か所へ集めるため
-     * （§6 DRY）。両方の呼び出し元に書き写すと、片方だけ順序を入れ替えても
-     * もう片方のテストが緑のまま通ってしまう。
-     */
-    static String sanitizeOneLine(String text) {
-        // 実装は text パッケージの共有ユーティリティへ委譲する。state パッケージの
-        // ログ出力も同じ規則を通す必要があり（既定の ConsoleHandler は CLI と同じ
-        // stderr へ出す）、そちらから cli を参照させると層が逆転するため
-        return SafeText.oneLine(text);
-    }
-
-    /**
      * テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める。
      * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
-     * {@link #sanitizeOneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
+     * {@link SafeText#oneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
      *
      * <p>切り詰めマーカーは {@link #TRUNCATION_MARK}（ASCII）で、戻り値の長さは
      * 必ず {@code max} 以下に収まる（表の桁ずれを防ぐため）。
      */
     static String shortMessage(String message, int max) {
-        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は sanitizeOneLine を参照）。
+        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は SafeText.oneLine を参照）。
         // 空判定は整形の「後」に行う。前に置くと、空白ではないが整形すると消える文字
         // だけの値（bidi 制御の U+202E など）が isBlank() をすり抜けて空文字になり、
         // 呼び出し側は「値がある」と思ったまま空のセルを描くことになる
-        String oneLine = sanitizeOneLine(message);
+        String oneLine = SafeText.oneLine(message);
         // 値が無い（null・空白のみ・整形すると消える）場合は空文字を返す
         if (oneLine == null || oneLine.isEmpty()) {
             return "";

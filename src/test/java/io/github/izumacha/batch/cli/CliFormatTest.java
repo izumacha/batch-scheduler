@@ -472,6 +472,25 @@ class CliFormatTest {
         assertTrue(rendered.indexOf("also:", first + 1) > first, rendered);
     }
 
+    /**
+     * エラー行が有界であることを確認する。例外のメッセージには state ファイル由来の
+     * 値がそのまま入り（--rerun-failed のバッチ名不一致は記録の batchName を本文にする）、
+     * 記録 1 件の上限は 16MiB なので、切らないとそれを丸ごと 1 行で stderr へ吐ける。
+     * このツールは他のあらゆる外部由来の出力を有界にしているので、ここも揃える。
+     */
+    @Test
+    void safeMessageWithCause_boundsEachSegmentSoATamperedRecordCannotFloodStderr() {
+        // 極端に長いメッセージを持つ例外を、原因付きで組み立てる
+        String huge = "x".repeat(100_000);
+        Exception cause = new java.io.IOException(huge);
+        Exception outer = new java.io.UncheckedIOException(huge, (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 断片ごとに切られているので、全体も現実的な長さに収まる
+        assertTrue(rendered.length() < 5_000, "rendered length was " + rendered.length());
+        // 切り詰めたことが分かる印が付いている（黙って落とさない）
+        assertTrue(rendered.contains("..."), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

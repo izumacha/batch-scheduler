@@ -577,6 +577,15 @@ public final class JsonExecutionStore implements ExecutionStore {
                 throw fallbackFailed instanceof IOException io
                         ? io : new IOException(fallbackFailed);
             }
+            // フォールバックが成功した場合、アトミック移動が失敗した理由はどこにも
+            // 残らない。この経路を「この保存先では普通のことなのか」を判断する材料は
+            // それしかないので、握り潰さず FINE に残す（§6 エラーを握り潰さない）。
+            // WARNING にしないのは、対応していないファイルシステムでは毎回通る
+            // 正常な経路であり、保存は成功しているため
+            LOGGER.fine(() -> "atomic move unavailable for '"
+                    + SafeText.oneLine(target.getFileName().toString())
+                    + "', published with a non-atomic move instead ("
+                    + SafeText.oneLine(String.valueOf(atomicFailed)) + ")");
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
         }
@@ -681,7 +690,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             }
         } else {
             // 抑止したこと自体は追えるようにしておく（同期の完了ログと同じ FINE）
-            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
+            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '"
+                    + SafeText.oneLine(target.getFileName().toString())
                     + "' because its contents were never confirmed durable");
         }
         // どちらかが失敗していれば、案内の文面を持つ方をそのまま伝える
