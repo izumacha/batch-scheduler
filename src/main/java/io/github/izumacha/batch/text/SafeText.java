@@ -35,9 +35,9 @@ public final class SafeText {
     // 1 行へ圧縮するときに「区切り」として扱う空白の集合。
     // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
     // 含まない。3 文字とも、圧縮側に足さないと別々の壊れ方をする:
-    //   - U+0085 (NEL) は CONTROL_CHARS の 〜 に当たるため「削除」され、
+    //   - U+0085 (NEL) は CONTROL_CHARS の U+0080〜U+009F に当たるため「削除」され、
     //     前後の単語が "line onefile not found" のように繋がって別語へ化ける。
-    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも 〜 にも
+    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも U+0080〜U+009F にも
     //     \p{Cf} にも当たらない。つまり圧縮も除去もされず、生の行区切りとして端末へ届き、
     //     1 記録 1 行という表の前提を壊す。
     // ここから外すと、CONTROL_CHARS は Zl/Zp を拾わないので後者は素通りに戻る
