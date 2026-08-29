@@ -43,6 +43,16 @@ final class CliFormat {
     // 先にスペースへ圧縮するため、ここでは「空白圧縮後に残る非表示文字」をまとめて削除する
     private static final String CONTROL_CHARS_PATTERN = "[\\p{Cntrl}\\u0080-\\u009F\\p{Cf}]";
 
+    // 1 行へ圧縮するときに「区切り」として扱う空白の集合（§6: 意図のある値は名前付き定数に置く）。
+    // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
+    // 含まない。一方 CONTROL_CHARS_PATTERN は U+0080〜U+009F と \p{Cf} でそれらを拾って
+    // 「削除」するため、この 3 文字だけが圧縮ではなく除去に回り、前後の単語が
+    // "line onefile not found" のように繋がってしまう。外部由来の文字列（OS のエラー文や
+    // 非 UTF-8 ロケールのデコード結果）は実際にこれらを含みうるので、区切りとして
+    // 扱う側へ明示的に足しておく
+    private static final String WHITESPACE_PATTERN = "[\\s\\u0085\\u2028\\u2029]+";
+
+
     // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
     // ASCII の "..." にしているのは DESIGN.md「ASCII-only CLI diagnostics」の不変条件のため。
     // System.out は JVM の stdout.encoding（＝プラットフォームのネイティブ文字集合）で符号化し、
@@ -186,8 +196,11 @@ final class CliFormat {
             for (int steps = 0; root.getCause() != null && steps < MAX_ROOT_SEARCH_DEPTH; steps++) {
                 root = root.getCause();
             }
-            // 見つけた根元を「根本原因」と分かる印つきで併記する
-            appendDetail(rendered, emitted, "root cause: " + root);
+            // 本当に根元まで下りられたときだけ「根本原因」と名乗る。歩数上限で止まった
+            // （循環している・異常に深い）場合に着いた先はただの途中の包みで、それを
+            // 根本原因と言い切ると運用者を間違った失敗の調査へ送り出してしまう
+            String label = root.getCause() == null ? "root cause: " : "deepest cause reached: ";
+            appendDetail(rendered, emitted, label + root);
         }
         // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が
@@ -247,7 +260,7 @@ final class CliFormat {
      */
     private static String sanitizeOneLine(String text) {
         // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
-        String oneLine = text.replaceAll("\\s+", " ").trim();
+        String oneLine = text.replaceAll(WHITESPACE_PATTERN, " ").trim();
         // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
         return stripControlChars(oneLine);
     }

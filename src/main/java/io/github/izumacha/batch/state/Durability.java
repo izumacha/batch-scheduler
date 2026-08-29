@@ -418,6 +418,8 @@ final class Durability {
     private void syncCreatedLevels(List<Path> created) throws IOException {
         // 確定できなかった階層の数を数える（警告予算との噛み合わせを説明するため）
         int unconfirmed = 0;
+        // 最初に確定できなかった「含む側」のパス（集約メッセージ自体を行動可能にするため）
+        Path firstUnconfirmed = null;
         // 浅い方から順に、その階層を含むディレクトリを同期して存在を確定させる
         for (Path level : created) {
             // createDirectories は浅い方から作るので、無い階層に当たったらそこから先も無い
@@ -431,6 +433,10 @@ final class Durability {
                 if (!sync(container, Step.BASE_DIRECTORY)) {
                     // 確定できなかった階層を数えておく
                     unconfirmed++;
+                    // 最初の 1 件は集約メッセージで名指しできるよう控えておく
+                    if (firstUnconfirmed == null) {
+                        firstUnconfirmed = container;
+                    }
                 }
             }
         }
@@ -442,8 +448,12 @@ final class Durability {
         if (unconfirmed > 1) {
             // 実効値をラムダの外へ写す（ラムダは実質 final な変数しか捕まえられない）
             int total = unconfirmed;
+            Path first = firstUnconfirmed;
+            // 自分でパスを名指しする。「上の警告」に頼ると、予算が別の呼び出しで
+            // 既に使われていたときに存在しない行を指すことになり、件数だけ告げて
+            // 手がかりを何も渡さないメッセージになってしまう
             LOGGER.warning(() -> total + " directory levels created for the state directory "
-                    + "could not be confirmed durable; the warning above names only the first");
+                    + "could not be confirmed durable, starting at '" + first + "'");
         }
     }
 
@@ -550,8 +560,12 @@ final class Durability {
                 // ここで拒否せず、下の open に本当の失敗（NoSuchFile / AccessDenied 等）を
                 // 語らせる — 自前の文面で上書きすると、段階につき 1 回きりの警告が
                 // 実際の原因ではなく「パイプを探せ」になってしまう
+                // 捕まえた例外そのものも残す。握り潰すと、この判定が黙って無効化された
+                // 理由（NOFOLLOW_LINKS 非対応のプロバイダ・親ディレクトリの EACCES 等）を
+                // 後から追えず、FIFO でぶら下がったときに「なぜ守れなかったのか」が
+                // どこにも無い状態になる（§6 エラーを握り潰さない）
                 LOGGER.fine(() -> "could not determine the file type of '" + path
-                        + "'; letting the open report the reason");
+                        + "' (" + statFailed + "); letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
                 throw new IOException("refusing to sync '" + path

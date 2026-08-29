@@ -222,6 +222,23 @@ class CliFormatTest {
                 rendered);
     }
 
+    /**
+     * Java の {@code \s} が拾わない改行文字（U+0085 NEL）も区切りとして圧縮され、
+     * 単語が繋がらないことを確認する。これらは制御文字パターン側では「削除」対象
+     * なので、圧縮側に足しておかないと 3 文字だけが除去へ回って
+     * "line onefile not found" のような化けを起こす。
+     */
+    @Test
+    void safeMessageWithCause_collapsesUnicodeLineSeparatorsToo() {
+        // \s に含まれない改行（NEL・行区切り・段落区切り）を挟んだメッセージを作る
+        Exception cause = new java.io.IOException("line oneline two line three end");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // どれもスペースへ圧縮され、単語が繋がっていない
+        assertTrue(rendered.contains("line one line two line three end"), rendered);
+    }
+
     /** 循環した原因の連鎖でも、根元の探索が止まって戻ってくることを確認する */
     @Test
     void safeMessageWithCause_terminatesOnACyclicCauseChain() {
@@ -238,6 +255,10 @@ class CliFormatTest {
         // 上限で必ず止まるので、呼び出しは有限時間で戻る
         String rendered = CliFormat.safeMessageWithCause(cyclic);
         assertTrue(rendered.contains("further causes omitted"), rendered);
+        // 根元まで下りられていないので「根本原因」とは名乗らない。途中の包みを
+        // 根本原因と言い切ると、運用者を間違った失敗の調査へ送り出してしまう
+        assertFalse(rendered.contains("root cause:"), rendered);
+        assertTrue(rendered.contains("deepest cause reached:"), rendered);
     }
 
     /**

@@ -277,10 +277,15 @@ malicious resource exhaustion and against tampering with the state directory:
   until a peer appears with no timeout or `O_NONBLOCK` reachable from Java —
   so a pipe left at a record's name by a co-resident process would wedge the
   CLI after the batch had already run, with no way to tell whether the run was
-  recorded. `Durability` therefore checks the file type before opening and
-  degrades to a warning when the path is not the regular file (or directory)
-  the step expects. `NOFOLLOW_LINKS` does not cover this: a FIFO is not a
-  symlink. The check leaves a narrow swap window between the test and the open
+  recorded. `Durability` therefore stats the path before opening and degrades
+  to a warning when it is *other* than a regular file, directory, or symlink —
+  i.e. a FIFO, socket, or device, the types whose `open(2)` can block.
+  Deliberately not "anything that is not a regular file": a path that is merely
+  missing or cannot be stat'ed must keep the open's own `NoSuchFileException` /
+  `AccessDeniedException` as its reported cause, because the warn-once budget
+  makes that sentence the only notice the operator gets and "look for a pipe"
+  would spend it on the wrong thing. `NOFOLLOW_LINKS` does not cover this: a
+  FIFO is not a symlink. The check leaves a narrow swap window between the test and the open
   — Java offers no atomic "open only if regular" — but a pipe already in place
   is refused deterministically.
 - **Record durability.** The temp-file-plus-rename above makes a save *atomic*

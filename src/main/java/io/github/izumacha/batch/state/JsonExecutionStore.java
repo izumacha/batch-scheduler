@@ -561,12 +561,18 @@ public final class JsonExecutionStore implements ExecutionStore {
             try {
                 // アトミック移動に対応していないファイルシステムでは通常の移動にフォールバックする
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
-            } catch (IOException fallbackFailed) {
+            } catch (IOException | RuntimeException fallbackFailed) {
                 // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
                 // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
                 // 通るのが普通なのか」を判断する材料になるため、握り潰さず添える
                 fallbackFailed.addSuppressed(atomicFailed);
-                throw fallbackFailed;
+                // 外側と同じ理由で非検査例外も受ける。ここで素通しすると
+                // (1) アトミック移動の失敗が addSuppressed されず、この経路を通った
+                //     ことが診断から消え、(2) save() の catch (IOException) を抜けて
+                //     runId も baseDir も付かない裸の例外だけが運用者に届く。
+                // 検査例外はそのまま、非検査例外は包んで save() の文脈付けに乗せる
+                throw fallbackFailed instanceof IOException io
+                        ? io : new IOException(fallbackFailed);
             }
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
