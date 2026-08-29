@@ -237,8 +237,13 @@ public final class JsonExecutionStore implements ExecutionStore {
                 mapper.writeValue(tmp.toFile(), result);
                 // 改名する前に中身をディスクへ確定させる。改名と中身は別々に書き戻されるため、
                 // ここを飛ばすと「改名だけ残って中身が空・破損」という状態で電源断を迎えうる
-                // （その記録は tryRead に読み飛ばされ、実行そのものが無かったことになる）
-                Durability.syncFile(tmp, Durability.Step.RECORD_CONTENT);
+                // （その記録は tryRead に読み飛ばされ、実行そのものが無かったことになる）。
+                // この 1 段階だけは失敗を握り潰さない。まだ公開していないので、下の finally が
+                // 一時ファイルを消して保存は失敗として報告される。遅延割り当てのもとでは
+                // fsync が ENOSPC / EIO を返してダーティページが捨てられうるため、
+                // ここで握り潰して改名まで進むと「空の記録を公開して成功と報告する」
+                // という、この仕組みが防ごうとしている失敗そのものを作ってしまう
+                Durability.sync(tmp, Durability.Step.RECORD_CONTENT);
                 try {
                     // 一時ファイルを最終ファイルへアトミックに移動する（読者が半端なファイルを読まないようにする）
                     Files.move(tmp, target,
@@ -256,7 +261,15 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // 上記の「読者が半端なファイルを読まない」保証はこの経路には及ばない。ただし
                     // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
                     // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
-                    moveWithoutAtomicity(tmp, target);
+                    try {
+                        moveWithoutAtomicity(tmp, target);
+                    } catch (IOException fallbackFailed) {
+                        // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
+                        // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
+                        // 通るのが普通なのか」を判断する材料になるため、握り潰さず添える
+                        fallbackFailed.addSuppressed(atomicFailed);
+                        throw fallbackFailed;
+                    }
                 }
             } finally {
                 // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
@@ -274,7 +287,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // deleteIfExists は何もしておらず、確定するのは改名 1 件だけである
             // （一時ファイルが実際に残るのは移動が失敗した場合だが、そのときは
             // IOException が伝播してこの行には来ない）
-            Durability.syncDirectory(expectedRealBase, Durability.Step.RECORD_RENAME);
+            Durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -507,7 +520,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
         // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
         // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）
-        Durability.syncFile(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
+        Durability.sync(target, Durability.Step.PUBLISHED_RECORD_CONTENT);
     }
 
     /**

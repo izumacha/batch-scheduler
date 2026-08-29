@@ -302,15 +302,33 @@ malicious resource exhaustion and against tampering with the state directory:
   copy-and-delete, in which case the synced temp file is unlinked and the
   destination holds fresh, unflushed pages — syncing only the directory there
   would recreate the exact "durable entry, non-durable contents" failure this
-  section exists to prevent. Every step is best-effort:
-  it logs and returns rather than throwing, because a sync failure arrives
-  *after* the write itself succeeded, and propagating it would report "failed
-  to save execution result" for a run whose record is on disk. Successful steps
-  are logged at `FINE`, since an `fsync` otherwise leaves no evidence that it
-  happened. Two platform gaps remain and are inherent rather than accepted
-  trade-offs: Windows does not allow opening a directory as a channel, so the
-  directory syncs are skipped there, and macOS `fsync(2)` pushes only to the
-  drive's own cache rather than issuing `F_FULLFSYNC`.
+  section exists to prevent. Steps are best-effort — they log and return rather
+  than throwing — **except the one that runs before publication**. The
+  best-effort rule rests on the sync happening *after* the write is already
+  visible, so that failing the save would contradict what is on disk; that
+  reasoning does not apply to the temp file's own flush, which happens while
+  the record is still a temp file the `finally` will delete. With delayed
+  allocation the kernel can report `ENOSPC`/`EIO` at exactly that `fsync` and
+  drop the dirty pages, so swallowing it and renaming anyway would publish an
+  empty or truncated record and report the save as successful — the very
+  failure this section describes, produced by the mechanism meant to prevent
+  it. That one step therefore propagates its `IOException`, `save()` wraps it
+  as it already does for any other write failure, and `RunCommand` reports it
+  (its handler already names a full disk as the expected cause). Only an
+  *unchecked* failure stays best-effort there, because that means the sync
+  could not be attempted at all rather than that a write was lost — failing a
+  save because the platform cannot `fsync` would be the same inversion in the
+  other direction. Successful steps are logged at `FINE`, since an `fsync`
+  otherwise leaves no evidence that it happened, and a skipped step warns once
+  per step. For directories the warning distinguishes a failure to *open* (a
+  platform gap) from a failure of the *flush* on a directory that opened fine
+  (a real error), because the warn-once budget means that sentence is the only
+  notice the operator will get, and wording a genuine failure as a platform
+  limitation would tell them to ignore it. Two platform gaps remain and are
+  inherent rather than accepted trade-offs: Windows does not allow opening a
+  directory as a channel, so the directory syncs are skipped there, and macOS
+  `fsync(2)` pushes only to the drive's own cache rather than issuing
+  `F_FULLFSYNC`.
 
 ## Future extensions
 

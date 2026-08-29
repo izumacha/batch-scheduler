@@ -40,13 +40,20 @@ import java.util.logging.Logger;
  * job (an ETL load, a notification) is exactly the outcome
  * {@code --rerun-failed} exists to avoid.
  *
- * <p><b>Best-effort, never fatal.</b> Every method here logs and returns
- * instead of throwing. A sync failure arrives <em>after</em> the write itself
- * succeeded, so propagating it would turn a run whose record is on disk into
- * a reported "failed to save execution result", telling the operator the
- * opposite of what happened. Durability is a hardening measure layered on top
- * of a write that already worked; losing the hardening must not lose the
- * write.
+ * <p><b>Best-effort, never fatal -- with one deliberate exception.</b> These
+ * methods log and return instead of throwing. A sync failure normally arrives
+ * <em>after</em> the write itself succeeded, so propagating it would turn a
+ * run whose record is on disk into a reported "failed to save execution
+ * result", telling the operator the opposite of what happened. Durability is
+ * a hardening measure layered on top of a write that already worked; losing
+ * the hardening must not lose the write.
+ *
+ * <p>{@link Step.OnFailure#PROPAGATE} is the exception, carried by the one
+ * step that runs before publication. There that justification is simply
+ * false, and swallowing the error would manufacture the exact failure this
+ * class exists to prevent. The policy rides on the step rather than on the
+ * call site so there is no second method a caller could reach for by
+ * mistake.
  *
  * <p><b>Observability.</b> A successful {@code fsync} leaves no trace of its
  * own, so each completed step is logged at {@code FINE} -- the only way to
@@ -86,30 +93,104 @@ final class Durability {
      */
     enum Step {
         // 保存先ディレクトリの作成を確定させる用途（省略すると初回保存でディレクトリごと消えうる）
-        BASE_DIRECTORY("the state directory itself may not survive a power loss, "
+        BASE_DIRECTORY(Target.DIRECTORY, OnFailure.WARN,
+                "the state directory itself may not survive a power loss, "
                 + "taking every record inside it"),
-        // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）
-        RECORD_CONTENT("the record may come back empty or garbled after a power loss, "
+        // 一時ファイルの中身を確定させる用途（省略すると改名だけ残り中身が空・破損になりうる）。
+        // この段階だけ失敗を伝播させる理由は OnFailure.PROPAGATE の説明を参照
+        RECORD_CONTENT(Target.FILE, OnFailure.PROPAGATE,
+                "the record may come back empty or garbled after a power loss, "
                 + "and will then be skipped as unreadable"),
         // 非アトミック移動の移動先を確定させ直す用途。RECORD_CONTENT と分けているのは
         // 予算を共有すると、これから捨てられる一時ファイル側の失敗が唯一の枠を使い切り、
         // 「公開済みの記録が未確定」という本当に危険な失敗を黙らせてしまうため
         // （段階ごとに予算を分ける理由そのものが、この 2 つの間にも当てはまる）
-        PUBLISHED_RECORD_CONTENT("the record was published by a non-atomic move and its bytes "
-                + "may never have reached the disk, so it can come back empty or garbled "
+        PUBLISHED_RECORD_CONTENT(Target.FILE, OnFailure.WARN,
+                "the record was published by a non-atomic move and "
+                + "its bytes may never have reached the disk, so it can come back empty or garbled "
                 + "after a power loss even though the directory entry survived"),
         // 改名（ディレクトリエントリ）を確定させる用途（省略すると保存そのものが巻き戻りうる）
-        RECORD_RENAME("the record may vanish or roll back to its previous contents "
-                + "after a power loss");
+        RECORD_RENAME(Target.DIRECTORY, OnFailure.WARN,
+                "the record may vanish or roll back to its previous "
+                + "contents after a power loss");
 
+        /** What a step flushes, which decides how it is opened and where it can be skipped. */
+        enum Target {
+            // 通常ファイルを対象にする段階（どのプラットフォームでも同期できる）
+            FILE,
+            // ディレクトリを対象にする段階（開けるのは POSIX だけ）
+            DIRECTORY
+        }
+
+        /** What a failed step does to the save in progress. */
+        enum OnFailure {
+            /**
+             * Log once and continue -- the default, and correct wherever the
+             * sync runs after the write is already visible, because reporting
+             * a failure would contradict what is on disk.
+             */
+            WARN,
+            /**
+             * Propagate, failing the save.
+             *
+             * <p>Only correct before publication. There the record is still a
+             * temp file the caller's {@code finally} deletes, and with delayed
+             * allocation an {@code fsync} can report {@code ENOSPC}/{@code EIO}
+             * and drop the dirty pages -- so continuing would rename empty or
+             * truncated bytes into place and report success, manufacturing the
+             * exact failure this class exists to prevent.
+             */
+            PROPAGATE
+        }
+
+        // この段階が何を対象にするか（開き方の決定と、環境差の判定に使う）
+        private final Target target;
+        // 失敗したときに保存を失敗させるか、警告に留めるか
+        private final OnFailure onFailure;
         // この段階を飛ばしたときに起こりうることの説明（警告文に埋め込む）
         private final String consequence;
         // この段階の警告をすでに 1 度出したかどうか（段階ごとに独立した予算）
         private final AtomicBoolean warned = new AtomicBoolean(false);
 
-        Step(String consequence) {
+        Step(Target target, OnFailure onFailure, String consequence) {
+            // 対象の種別をフィールドへ保存する
+            this.target = target;
+            // 失敗時の扱いをフィールドへ保存する
+            this.onFailure = onFailure;
             // 説明文をフィールドへ保存する
             this.consequence = consequence;
+        }
+
+        /**
+         * Returns what a failure of this step does to the save.
+         *
+         * <p>On the constant for the same reason as {@link #consequence} and
+         * {@link #target}, and here it matters most: with the policy attached
+         * to the step there is exactly one way to run a step, so a caller
+         * cannot pick the wrong one. The earlier shape -- a best-effort method
+         * and a fail-closed method, chosen at each call site -- let the
+         * pre-publication call be silently swapped for the best-effort variant
+         * with nothing to catch it.
+         */
+        OnFailure onFailure() {
+            // 失敗時の扱いをそのまま返す
+            return onFailure;
+        }
+
+        /**
+         * Returns what this step flushes.
+         *
+         * <p>On the constant rather than at the call sites for the same reason
+         * as {@link #consequence}: a new step cannot be added without
+         * classifying it. The tests need this fact too -- a directory step
+         * produces no completion record on a platform that cannot open
+         * directories -- and reading it from here keeps their expectations
+         * exhaustive by construction instead of relying on a hand-maintained
+         * list that a new constant could quietly fall out of.
+         */
+        Target target() {
+            // 対象の種別をそのまま返す
+            return target;
         }
 
         /**
@@ -127,32 +208,43 @@ final class Durability {
     }
 
     /**
-     * Flushes an already-written regular file's contents to disk.
+     * Runs one durability step against {@code path}: opens it the way the
+     * step's target requires, flushes it, and reacts to a failure the way the
+     * step's policy says.
      *
-     * <p>Opening the file again rather than syncing the handle Jackson wrote
-     * through keeps the serialization call untouched: Jackson closes the
-     * stream it is handed, and a closed descriptor can no longer be synced.
-     * Reopening costs one {@code open}/{@code close} pair and syncs exactly
-     * the same file.
-     */
-    static void syncFile(Path file, Step step) {
-        // 書き込みモードで開き直してから force(true) で中身とメタデータをディスクへ押し出す
-        sync(file, StandardOpenOption.WRITE, step, false);
-    }
-
-    /**
-     * Flushes a directory's entries -- creations, renames, deletions -- to
-     * disk, so a rename into it cannot roll back.
+     * <p>This is the only way to run a step. Opening the file again rather
+     * than syncing the handle Jackson wrote through keeps the serialization
+     * call untouched: Jackson closes the stream it is handed, and a closed
+     * descriptor can no longer be synced. Reopening costs one
+     * {@code open}/{@code close} pair and syncs exactly the same file.
      *
-     * <p>Opening a directory as a channel is a POSIX capability that Windows
-     * does not offer, so a failure here is treated as "this platform cannot
-     * do it" rather than as an error: the open is attempted and any
-     * {@link IOException} is reported at most once per step. This is the same
-     * approach Apache Lucene takes in its {@code IOUtils.fsync}.
+     * <p>An <em>unchecked</em> failure never propagates, whatever the step's
+     * policy. It means the sync could not be <em>attempted</em> (an option the
+     * provider rejects, a security manager) rather than that a write was lost,
+     * and failing a save because the platform cannot {@code fsync} would be
+     * the same inversion as swallowing a real write error, in the other
+     * direction. Catching {@link RuntimeException} rather than naming the
+     * types is deliberate: this class promises not to be the thing that fails
+     * a completed write, and guessing the list is how such promises break.
+     *
+     * @throws IOException if the sync failed and the step's policy is
+     *     {@link Step.OnFailure#PROPAGATE}
      */
-    static void syncDirectory(Path dir, Step step) {
-        // ディレクトリは書き込みモードで開けないため読み取りモードで開いて force(true) を呼ぶ
-        sync(dir, StandardOpenOption.READ, step, true);
+    static void sync(Path path, Step step) throws IOException {
+        // 開いて force(true) するところまでを試す
+        try {
+            flush(path, step);
+        } catch (IOException e) {
+            // この段階の方針が「伝播」なら、呼び出し元へそのまま投げて保存を失敗させる
+            if (step.onFailure() == Step.OnFailure.PROPAGATE) {
+                throw e;
+            }
+            // そうでなければ、確定できなかったことを警告として残すだけにする
+            warnOnce(path, step, e, describeFailure(step, e));
+        } catch (RuntimeException e) {
+            // 「同期を試せなかった」は方針によらず警告どまり（上記 Javadoc 参照）
+            warnOnce(path, step, e, "could not attempt the sync on this platform");
+        }
     }
 
     /**
@@ -168,19 +260,20 @@ final class Durability {
      * <p>A directory entry is made durable by syncing the directory that
      * <em>contains</em> it, so the loop syncs each new level's parent,
      * shallowest first. The deepest level ({@code dir} itself) is deliberately
-     * not synced here: it holds no entries yet, and {@link #syncDirectory} is
-     * called on it after the record rename, which is when it first has
+     * not synced here: it holds no entries yet, and {@link #sync} is called
+     * on it with {@link Step#RECORD_RENAME} after the record rename, which is
+     * when it first has
      * something to lose.
      *
-     * <p>Package-private and returning the levels it created so a test can
-     * assert which parents were synced without racing an actual power loss.
+     * <p>Which directories were synced, and in what order, is observable from
+     * the {@code FINE} records {@link #sync} emits (each names its path), so
+     * this returns nothing: a return value would exist only for tests to
+     * assert on, and would assert what this method believes it created rather
+     * than what was actually flushed.
      *
-     * @return the directories this call created, shallowest first, in the same
-     *     relative-or-absolute form as {@code dir}; empty if {@code dir}
-     *     already existed
      * @throws IOException if the directories could not be created
      */
-    static List<Path> createDirectoriesDurably(Path dir) throws IOException {
+    static void createDirectoriesDurably(Path dir) throws IOException {
         // 作成前の時点でまだ存在しない階層を、深い方から浅い方へたどって集める。
         // 渡されたパスの形（相対・絶対）はここでは変えない。相対パスの解決は
         // directoryHolding() 1 箇所に寄せてあり、ここでも絶対化すると
@@ -194,19 +287,15 @@ final class Durability {
         Files.createDirectories(dir);
         // 収集順は深い→浅いなので、浅い→深いの順（親が先に確定する順）へ反転する
         Collections.reverse(missing);
-        // 呼び出し元へ返す一覧は変更不可にして、内部リストと共有されないようにする
-        List<Path> created = List.copyOf(missing);
         // 新しく作られた各階層について、その階層を含むディレクトリを同期し存在を確定させる
-        for (Path level : created) {
+        for (Path level : missing) {
             // ファイルシステムのルートには含まれる側のディレクトリが無いので飛ばす
             Path container = directoryHolding(level);
             if (container != null) {
                 // 含む側を同期して、その中の level というエントリを確定させる
-                syncDirectory(container, Step.BASE_DIRECTORY);
+                sync(container, Step.BASE_DIRECTORY);
             }
         }
-        // どの階層を作成したかを呼び出し元（とテスト）へ返す
-        return created;
     }
 
     /**
@@ -230,42 +319,105 @@ final class Durability {
     }
 
     /**
-     * Opens {@code path} with {@code mode} and forces it to disk, reporting a
-     * failure at most once per {@code step}.
-     *
-     * @param directory whether {@code path} is a directory, which decides how
-     *     the failure is worded: for a directory a failure most likely means
-     *     the platform does not allow opening one as a channel, whereas for a
-     *     regular file it means the sync itself did not happen
+     * Marks a failure as having happened while opening the target, so callers
+     * can tell "this platform cannot open a directory as a channel" apart from
+     * "the flush itself reported an error".
      */
-    private static void sync(Path path, StandardOpenOption mode, Step step, boolean directory) {
-        // 対象を開いて force(true) でデータとメタデータの両方をディスクへ書き戻す
-        try (FileChannel channel = FileChannel.open(path, mode)) {
+    static final class OpenFailure extends IOException {
+        // 直列化 ID（例外クラスに付けるのが慣例。この例外を直列化する用途は無い）
+        private static final long serialVersionUID = 1L;
+
+        OpenFailure(IOException cause) {
+            // 元の例外を原因として保持する（文面の組み立てで参照する）
+            super(cause);
+        }
+    }
+
+    /**
+     * Opens {@code path} according to its step's target and forces it to disk.
+     *
+     * <p>The open and the {@code force} are attempted in separate blocks so
+     * the caller can tell them apart. Which one failed is the whole difference
+     * between a benign platform gap (a directory cannot be opened on Windows)
+     * and a real loss of durability (the flush reported an error on a
+     * directory that opened fine) -- and those two deserve opposite reactions
+     * from whoever reads the warning.
+     *
+     * <p>Unchecked exceptions are deliberately not caught here. They mean the
+     * sync could not be attempted at all, and each caller decides what that is
+     * worth; letting them pass keeps this method's job to "open, flush, say
+     * which part failed".
+     *
+     * @throws OpenFailure if {@code path} could not be opened
+     * @throws IOException if the flush itself failed
+     */
+    private static void flush(Path path, Step step) throws IOException {
+        // 対象の種別に応じた開き方を選ぶ（ディレクトリは書き込みモードで開けない）
+        StandardOpenOption mode = step.target() == Step.Target.DIRECTORY
+                ? StandardOpenOption.READ
+                : StandardOpenOption.WRITE;
+        // まず開く。ここでの失敗は「この環境では同期を試せない」を意味しうる
+        FileChannel opened;
+        try {
+            opened = FileChannel.open(path, mode);
+        } catch (IOException e) {
+            // 開けなかったことが呼び出し元に分かるよう包んで投げ直す
+            throw new OpenFailure(e);
+        }
+        // 開けたので、閉じる責任を持ちつつ書き戻しを要求する
+        try (FileChannel channel = opened) {
             // true を渡すことで中身だけでなくメタデータの書き戻しも要求する
             channel.force(true);
             // 成功した段階を FINE で記録する。fsync は成功しても何の痕跡も残らないため、
             // 「この保存はどこまで確定したのか」を現場で追う手段がこれ以外に無い。
             // Supplier 版を使うので FINE が無効なときは文字列組み立て自体が起きない
             LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + path + "'");
-        } catch (IOException | RuntimeException e) {
-            // 非検査例外まで受けるのは、このクラスが「決して落とさない」と約束しているため。
-            // FileChannel.open は UnsupportedOperationException（プロバイダが未対応の
-            // オプション）や SecurityException も投げうる仕様で、IOException だけを
-            // 捕まえていると save() の catch (IOException) も素通りして、記録が
-            // ディスクに載っている実行に対して「保存に失敗しました」と正反対の報告に
-            // なる。捕捉する例外の種類を見積もるのではなく、契約どおり全部受ける
-            // 同期の失敗は書き込み自体の失敗ではないため、例外にせず警告だけ残す（段階ごとに 1 回）
-            if (step.claimWarningBudget()) {
-                // ディレクトリはこの環境で開けないだけの可能性が高く、通常ファイルとは意味が違う
-                String cause = directory
-                        ? "could not open the directory to sync it (this platform may not allow it)"
-                        : "could not sync the file";
-                // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
-                LOGGER.warning("Durability step " + step.name() + " skipped for '" + path + "': "
-                        + cause + " (" + e + "); " + step.consequence
-                        + ". This warning is reported once per step.");
-            }
         }
+    }
+
+    /**
+     * Words a failure according to what was being synced and which half of
+     * {@link #flush} failed.
+     *
+     * <p>Getting this wrong is not cosmetic. The warning is emitted once per
+     * step for the life of the process, so it is the only notice the operator
+     * will ever get. Only a directory can plausibly fail to open because of
+     * the platform, so wording a genuine flush error that way -- or wording a
+     * regular file's failure that way at all -- tells the operator to ignore
+     * the one signal saying their records are not reaching the disk.
+     *
+     * <p>Package-private so both wordings can be pinned by a test: the
+     * "opened but the flush failed" branch needs a disk that reports an error
+     * from {@code fsync}, which no test environment can arrange on demand.
+     */
+    static String describeFailure(Step step, IOException e) {
+        // 通常ファイルは開けないこと自体が異常なので、環境差の言い訳をしない
+        if (step.target() == Step.Target.FILE) {
+            return "could not sync the file";
+        }
+        // 開く段階で失敗したのなら、この環境がディレクトリを開けないという説明が妥当
+        if (e instanceof OpenFailure) {
+            return "could not open the directory to sync it "
+                    + "(a platform such as Windows does not allow this)";
+        }
+        // 開けたうえで失敗したのなら、環境差ではなく本物の同期エラーである
+        return "the directory opened but the sync itself failed, "
+                + "so this is a real error rather than a platform limitation";
+    }
+
+    /**
+     * Reports a skipped step at most once per step, explaining what could not
+     * be committed and what that risks.
+     */
+    private static void warnOnce(Path path, Step step, Exception cause, String reason) {
+        // 予算を使えたときだけ記録する（同じ段階で何度も鳴らさない）
+        if (!step.claimWarningBudget()) {
+            return;
+        }
+        // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
+        LOGGER.warning("Durability step " + step.name() + " skipped for '" + path + "': "
+                + reason + " (" + cause + "); " + step.consequence
+                + ". This warning is reported once per step.");
     }
 
     /**
@@ -286,6 +438,7 @@ final class Durability {
     static void resetWarningBudgetsForTest() {
         // すべての段階の「1 回だけ」予算を未使用の状態へ戻す
         for (Step step : Step.values()) {
+            // この段階の「1 回だけ」の枠を未使用へ戻す
             step.warned.set(false);
         }
     }
