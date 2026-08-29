@@ -7,6 +7,13 @@ dependency-reduced-pom.xml
 .batch-state/
 runs/
 
+# DurabilityTest creates one of these in the working directory to exercise a
+# bare relative state dir (a single-element path is the only kind whose
+# getParent() is null, and such a path can only be created next to the working
+# directory). The name carries the JVM's pid so concurrent runs cannot collide.
+# The test removes it in a finally; this entry only covers an aborted run.
+.batch-state-durability-test-*/
+
 # IDE
 .idea/
 *.iml

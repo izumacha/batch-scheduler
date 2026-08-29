@@ -35,9 +35,9 @@ public final class SafeText {
     // 1 行へ圧縮するときに「区切り」として扱う空白の集合。
     // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
     // 含まない。3 文字とも、圧縮側に足さないと別々の壊れ方をする:
-    //   - U+0085 (NEL) は CONTROL_CHARS の 〜 に当たるため「削除」され、
+    //   - U+0085 (NEL) は CONTROL_CHARS の U+0080〜U+009F に当たるため「削除」され、
     //     前後の単語が "line onefile not found" のように繋がって別語へ化ける。
-    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも 〜 にも
+    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも U+0080〜U+009F にも
     //     \p{Cf} にも当たらない。つまり圧縮も除去もされず、生の行区切りとして端末へ届き、
     //     1 記録 1 行という表の前提を壊す。
     // ここから外すと、CONTROL_CHARS は Zl/Zp を拾わないので後者は素通りに戻る
@@ -57,6 +57,23 @@ public final class SafeText {
      * 関係するパスを丸ごと本文に持つため、上限が無いと 1 行が数キロバイトになりうる。
      */
     private static final int MAX_LOG_CHARS = 500;
+
+    // 行の区切りとして扱う並び。Java の \R は改行の総称で、CRLF をひとかたまりに
+    // 扱いつつ LF・CR・VT・FF・NEL・LS・PS のいずれにも当たる。多様な綴りの改行を
+    // まず LF 1 種類へ揃えておくことで、この下の除去パターンが「残すのは LF だけ」と
+    // 単純に書ける（CR や NEL を残すかどうかを別途決めずに済む）
+    private static final Pattern LINE_SEPARATORS = Pattern.compile("\\R");
+
+    // 行の構造を保ったまま取り除く制御文字のパターン。CONTROL_CHARS との違いは
+    // 改行（LF）とタブを残す点だけ。
+    // [\p{Cntrl}&&[^\n\t]] は「C0 制御文字と DEL のうち、LF とタブ以外」という意味
+    // （&& は文字クラスの共通部分、[^...] は否定）。
+    // 残す 2 文字は端末をあやつる力を持たない — LF は行を進めるだけ、タブは次の
+    // タブ位置へ動かすだけで、カーソルの絶対移動・画面消去・タイトル変更はできない。
+    // 一方 ESC・BEL・CSI・bidi 制御はここでも取り除くので、注入に対する強度は
+    // CONTROL_CHARS と変わらない
+    private static final Pattern CONTROL_CHARS_KEEPING_LINES =
+            Pattern.compile("[\\p{Cntrl}&&[^\\n\\t]]|[\\u0080-\\u009F\\p{Cf}]");
 
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private SafeText() {
@@ -228,6 +245,49 @@ public final class SafeText {
         // 36 桁の空白セルや "error: " だけの行になる — どれも、それらの判定が
         // 防ぐために存在する行き止まりそのもの
         return WHITESPACE.matcher(stripped).replaceAll(" ").strip();
+    }
+
+    /**
+     * 行の構造を保ったまま、端末をあやつる制御文字を取り除く。
+     *
+     * <p>{@link #oneLine(String)} は空白をすべて 1 つのスペースへ潰すので、表のセルの
+     * ように「1 件 1 行」が前提の場所には向くが、<em>行と桁の配置そのものが情報である</em>
+     * 診断には使えない。代表例が SnakeYAML の構文エラーで、次のように該当行を引用して
+     * 桁位置を {@code ^} で指す:
+     *
+     * <pre>
+     * while parsing a flow sequence
+     *  in 'reader', line 4, column 14:
+     *         command: ["x"
+     *                  ^
+     * </pre>
+     *
+     * <p>これを 1 行へ潰すと {@code ^} は何も指さなくなり、引用行の字下げも消える。
+     * バッチ定義ファイルの構文エラーはこのツールでもっとも普通に踏むエラーなので、
+     * ここだけは行の構造を残す。
+     *
+     * <p>安全性は落とさない。取り除く対象から外すのは改行とタブだけで、どちらも
+     * 端末をあやつる力を持たない（{@link #CONTROL_CHARS_KEEPING_LINES} のコメント参照）。
+     * ESC・BEL・CSI・bidi 制御は {@link #oneLine(String)} と同じように取り除く。
+     * 改行の綴りは先に LF へ揃えるので、CR だけを送り込んで行頭へ戻し、直前の行を
+     * 上書きするような小細工も通らない。
+     *
+     * @param text 整形する文字列（{@code null} 可）
+     * @return 行の区切りを LF に揃え、制御文字を除き、前後の空白を落とした文字列。
+     *     {@code null} は {@code null} のまま
+     */
+    public static String multiLine(String text) {
+        // null はそのまま返す（呼び出し元の null 扱いを変えないため）
+        if (text == null) {
+            return null;
+        }
+        // 多様な綴りの改行をまず LF 1 種類へ揃える
+        String normalized = LINE_SEPARATORS.matcher(text).replaceAll("\n");
+        // 改行とタブ以外の制御文字を取り除き、前後の余白を落として返す。
+        // strip() を掛けるのは oneLine() と揃えるため。これが無いと、空白だけの
+        // メッセージが「空ではない」まま呼び出し元へ返り、safeMessage の
+        // 「空ならクラス名へ落とす」判定を素通りしてしまう
+        return CONTROL_CHARS_KEEPING_LINES.matcher(normalized).replaceAll("").strip();
     }
 
     /**
