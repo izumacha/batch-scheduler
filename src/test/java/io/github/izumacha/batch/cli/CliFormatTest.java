@@ -257,6 +257,27 @@ class CliFormatTest {
         assertTrue(rendered.contains("also:"), rendered);
     }
 
+    /**
+     * 改行やタブが「削除」されて前後の単語が繋がらないことを確認する。
+     * 改行・タブは stripControlChars の \p{Cntrl} に含まれるため、空白の圧縮を
+     * 先に済ませておかないと "line one" と "line two" が "line oneline two" のように
+     * 別語へ化ける。原因のメッセージは外部由来（ジョブ出力・OS のエラー文）で
+     * 改行を含みうるので、診断が読めなくなる実害がある。
+     */
+    @Test
+    void safeMessageWithCause_collapsesWhitespaceInsteadOfFusingWords() {
+        // 改行とタブを含むメッセージを持つ原因を組み立てる
+        Exception cause = new java.io.IOException("line one\nline two\tline three");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 単語の境界がスペースとして残っている（＝繋がっていない）
+        assertTrue(rendered.contains("line one line two line three"), rendered);
+        // 生の改行・タブは出力へ漏れていない（1 行であることの担保）
+        assertFalse(rendered.contains("\n"), rendered);
+        assertFalse(rendered.contains("\t"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

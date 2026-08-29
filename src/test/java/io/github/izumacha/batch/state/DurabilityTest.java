@@ -350,6 +350,10 @@ class DurabilityTest {
         Path relative = Path.of(".batch-state-test-" + UUID.randomUUID());
         // カレントディレクトリの絶対パス（＝同期されるべき相手）を控えておく
         Path workingDirectory = Path.of("").toAbsolutePath();
+        // 相対パスの解決先はカレントディレクトリなので、そこへ書ける環境でしか実行できない。
+        // 読み取り専用のチェックアウト（コンテナで作業ツリーを ro マウントする CI など）では
+        // 検査対象と無関係な理由で落ちてしまうため、書けないときは静かにスキップする
+        assumeTrue(Files.isWritable(workingDirectory), "カレントディレクトリへ書き込めない");
         // ディレクトリを同期できる環境かどうかを、作成先を含むカレントディレクトリで確かめる
         assumeTrue(directorySyncSupported(workingDirectory), "この環境ではディレクトリを同期できない");
         try {
@@ -579,7 +583,12 @@ class DurabilityTest {
     void anUncheckedFailureWarnsWithTheSameWordingAsAnyOtherFileFailure() {
         // JDK 自身のランタイムイメージ（jrt:/）は読み取り専用のファイルシステムで、
         // 書き込みモードで開こうとすると検査例外ではない UnsupportedOperationException に
-        // なる。「同期を試せなかった」側の失敗を、モックを使わず実物で再現できる唯一の経路
+        // なる。既定以外のプロバイダが非検査例外を投げる状況を、モックを使わず実物で
+        // 再現できる唯一の経路。
+        // 固定しているのは「flush() が open 時の非検査例外も OpenFailure に包むので、
+        // sync() から見れば検査例外と同じ扱いになり、保存を失敗させず警告に留まる」こと。
+        // sync() 側の catch (RuntimeException) はさらに内側（force/close が宣言に反して
+        // 非検査例外を投げる場合）に備えた保険で、この経路では踏まない
         Path readOnly;
         try {
             FileSystem jrt = FileSystems.getFileSystem(URI.create("jrt:/"));

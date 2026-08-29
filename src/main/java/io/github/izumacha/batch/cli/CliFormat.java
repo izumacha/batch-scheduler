@@ -164,11 +164,16 @@ final class CliFormat {
         if (cause != null) {
             rendered.append(" (...further causes omitted)");
         }
+        // 改行や連続する空白を 1 つのスペースに圧縮してから制御文字を落とす。順序が逆だと
+        // 改行・タブは \p{Cntrl} に含まれるため「削除」され、前後の単語が
+        // "line onefile not found" のように繋がって別語に化ける（shortMessage が
+        // 圧縮してから除去しているのと同じ理由・同じ順序に揃えている）
+        String oneLine = rendered.toString().replaceAll("\\s+", " ").trim();
         // 端末制御文字を取り除いてから返す。原因のメッセージにはパス（NoSuchFile /
         // AccessDenied はオフェンディングパスをそのままメッセージにする）が生で入り、
         // それが端末へ出る。このクラスは stripControlChars を「唯一のチョークポイント」と
         // 位置づけているので、端末へ向かう新しい経路もそこを通す
-        return stripControlChars(rendered.toString());
+        return stripControlChars(oneLine);
     }
 
     /**

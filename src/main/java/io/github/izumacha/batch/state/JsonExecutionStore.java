@@ -261,7 +261,12 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 受け止めて警告に留める
                 try {
                     Files.deleteIfExists(tmp);
-                } catch (IOException cleanupFailed) {
+                } catch (IOException | RuntimeException cleanupFailed) {
+                    // 非検査例外も受け止める。deleteIfExists は SecurityManager 下の
+                    // SecurityException や、既定以外のファイルシステムプロバイダが投げる
+                    // UnsupportedOperationException のように IOException でない失敗を
+                    // 出しうる。それが finally から抜けると、この try/finally が守るはずの
+                    // 「進行中の例外を差し替えない」という約束を型の隙間から破ってしまう
                     LOGGER.warning("failed to remove the temporary file '" + tmp + "': "
                             + cleanupFailed + "; it will be left behind in the state directory");
                 }
