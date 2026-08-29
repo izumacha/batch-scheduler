@@ -3,6 +3,7 @@ package io.github.izumacha.batch.state;
 import io.github.izumacha.batch.model.ExecutionResult;
 import io.github.izumacha.batch.model.JobResult;
 import io.github.izumacha.batch.model.JobStatus;
+import java.util.ArrayList;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -576,5 +577,53 @@ class JsonExecutionStoreTest {
         }
 
         assertEquals(5, store.findAll().size());
+    }
+
+    @Test
+    void skippedRecordWarningsStripTerminalControlCharacters(@TempDir Path dir) throws IOException {
+        try (LogCapture logs = LogCapture.of(JsonExecutionStore.class)) {
+            // ファイル名に端末制御文字（ESC・BEL）を仕込んだ壊れた記録を置く。
+            // state ディレクトリは改変対象として扱う前提（DESIGN.md）
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve("run-\u001b]0;pwned\u0007evil.json"), "{not json");
+            // 読み飛ばしの警告が出る（＝この経路を通る）
+            new JsonExecutionStore(dir).findAll();
+            assertFalse(logs.messages().isEmpty(), "読み飛ばしの警告が出ていない");
+            // 既定の ConsoleHandler は CLI と同じ stderr へ出すので、ここも
+            // 表示経路と同じ規則で無害化されていなければならない
+            for (String message : logs.messages()) {
+                assertFalse(message.contains("\u001b"), message);
+                assertFalse(message.contains("\u0007"), message);
+            }
+        }
+    }
+
+    @Test
+    void aNonAtomicPublishRecordsWhyTheAtomicMoveWasUnavailable(@TempDir Path dir)
+            throws IOException {
+        try (LogCapture logs = LogCapture.of(JsonExecutionStore.class)) {
+            // 記録の名前を空ディレクトリが占有していると、アトミック移動が失敗して
+            // フォールバックが走る（続く通常の move がそれを消して改名し直す）。
+            // runId に端末制御文字を仕込み、この診断も無害化されることを同時に確かめる
+            // （fileFor は "/" "\\" ".." NUL しか弾かず、制御文字は通る）
+            String runId = "run\u001b]0;pwned\u00071";
+            Files.createDirectories(dir);
+            Files.createDirectory(dir.resolve(runId + ".json"));
+            new JsonExecutionStore(dir).save(new ExecutionResult(
+                    runId, "etl", JobStatus.SUCCEEDED,
+                    Instant.parse("2026-01-02T03:04:05Z"),
+                    Instant.parse("2026-01-02T03:04:06Z"), List.of()));
+            // フォールバックが成功しても、なぜアトミック移動を使えなかったのかは残る。
+            // ここを握り潰すと「この保存先ではこの経路が普通なのか」を判断する材料が
+            // どこにも無くなる
+            String diagnostic = logs.messages().stream()
+                    .filter(m -> m.contains("atomic move unavailable"))
+                    .findFirst()
+                    .orElse(null);
+            assertTrue(diagnostic != null, logs.messages().toString());
+            // 記録名は無害化されている（FINE を入れた運用者の端末を乗っ取らせない）
+            assertFalse(diagnostic.contains("\u001b"), diagnostic);
+            assertFalse(diagnostic.contains("\u0007"), diagnostic);
+        }
     }
 }

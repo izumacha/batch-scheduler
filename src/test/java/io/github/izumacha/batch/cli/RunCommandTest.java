@@ -319,6 +319,32 @@ class RunCommandTest {
         assertFalse(outcome.stderr().contains("\u0007"), outcome.stderr());
     }
 
+    /**
+     * 表示だけの値が残らない run ID でも、list の RUN ID 列と同じプレースホルダで
+     * 表示されることを確認する。整形の手順を書き写すと、同じ値が list では "-"、
+     * run --rerun-failed では空文字（"id ''"）と 2 通りに描画されるようになる。
+     */
+    @Test
+    void rerunFailedRendersAnUndisplayableRunIdTheSameWayListDoes(@TempDir Path dir)
+            throws IOException {
+        Path config = dir.resolve("batch.yaml");
+        Files.writeString(config, """
+                name: etl
+                jobs:
+                  - id: a
+                    command: ["sh", "-c", "true"]
+                """);
+        Path stateDir = dir.resolve("state");
+        // 整形すると何も残らない run ID（改変された state ファイルから来うる形）
+        RunOutcome outcome = runCapturingStderr(
+                "run", config.toString(), "--state-dir", stateDir.toString(),
+                "--rerun-failed", "\u2060 \u2060", "-q");
+
+        assertEquals(BatchCli.EXIT_CONFIG, outcome.code());
+        // 空文字ではなくプレースホルダで表示される
+        assertTrue(outcome.stderr().contains("id '-'"), outcome.stderr());
+    }
+
     @Test
     void rerunFailedRejectsRunIdFromADifferentBatchName(@TempDir Path dir) throws IOException {
         // 「other」という名前のバッチを一度実行して記録を作る。

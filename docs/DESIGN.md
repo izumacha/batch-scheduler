@@ -22,7 +22,7 @@ the main decisions behind it.
 
 ## Architecture
 
-The code is organized into five packages, each with a single responsibility:
+The code is organized into six packages, each with a single responsibility:
 
 - `model` — immutable data records: `Job`, `Batch`, `JobResult`,
   `ExecutionResult`, and the `JobStatus` enum.

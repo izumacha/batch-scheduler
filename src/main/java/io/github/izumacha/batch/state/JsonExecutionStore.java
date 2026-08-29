@@ -307,8 +307,8 @@ public final class JsonExecutionStore implements ExecutionStore {
                 // 消せなかったときは警告に留める（進行中の失敗を差し替えないため）
                 if (cleanupFailed != null) {
                     LOGGER.warning("failed to remove the temporary file '"
-                            + SafeText.oneLine(tmp.toString()) + "': "
-                            + SafeText.oneLine(String.valueOf(cleanupFailed))
+                            + SafeText.forLog(tmp) + "': "
+                            + SafeText.forLog(cleanupFailed)
                             + "; it will be left behind in the state directory");
                 }
             }
@@ -378,7 +378,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 候補が安全上限を超えている場合は、ファイル名（=時系列）の新しい順に絞り込んでから
         // パースする（全件の内容パースによる資源枯渇を避ける。MAX_UNBOUNDED_RESULTS 参照）
         if (candidates.size() > MAX_UNBOUNDED_RESULTS) {
-            LOGGER.warning("State directory " + SafeText.oneLine(baseDir.toString()) + " has " + candidates.size()
+            LOGGER.warning("State directory " + SafeText.forLog(baseDir) + " has " + candidates.size()
                     + " execution results, exceeding the unbounded-list safety ceiling ("
                     + MAX_UNBOUNDED_RESULTS + "); returning only the " + MAX_UNBOUNDED_RESULTS
                     + " most recent by filename. Use 'list --limit N' for a bounded view.");
@@ -577,6 +577,15 @@ public final class JsonExecutionStore implements ExecutionStore {
                 throw fallbackFailed instanceof IOException io
                         ? io : new IOException(fallbackFailed);
             }
+            // フォールバックが成功した場合、アトミック移動が失敗した理由はどこにも
+            // 残らない。この経路を「この保存先では普通のことなのか」を判断する材料は
+            // それしかないので、握り潰さず FINE に残す（§6 エラーを握り潰さない）。
+            // WARNING にしないのは、対応していないファイルシステムでは毎回通る
+            // 正常な経路であり、保存は成功しているため
+            LOGGER.fine(() -> "atomic move unavailable for '"
+                    + SafeText.forLog(target.getFileName())
+                    + "', published with a non-atomic move instead ("
+                    + SafeText.forLog(atomicFailed) + ")");
             // コピー→削除で公開された可能性があるので、呼び出し元に再同期を促す
             return true;
         }
@@ -681,7 +690,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             }
         } else {
             // 抑止したこと自体は追えるようにしておく（同期の完了ログと同じ FINE）
-            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '" + target.getFileName()
+            LOGGER.fine(() -> "skipping the RECORD_RENAME sync for '"
+                    + SafeText.forLog(target.getFileName())
                     + "' because its contents were never confirmed durable");
         }
         // どちらかが失敗していれば、案内の文面を持つ方をそのまま伝える
@@ -865,9 +875,9 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 注: この分岐はテストで踏めない（列挙から読み取りまでの間にファイルが
             // 消えるなどの競合が要る）。同じファイル内の他のログと同じ形に揃えることで
             // 見落としを防いでいる
-            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
+            LOGGER.warning("Skipping execution result file '" + SafeText.forLog(file)
                     + "': failed to resolve its real path ("
-                    + SafeText.oneLine(e.getMessage()) + ")");
+                    + SafeText.forLog(e.getMessage()) + ")");
             return Optional.empty();
         }
         // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ
@@ -875,7 +885,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 読み込みは baseDir の差し替えに一切影響されない実体パスを直接使うことになる
         // （このメソッドの Javadoc 参照）
         if (!expectedRealBase.equals(realFile.getParent())) {
-            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
+            LOGGER.warning("Skipping execution result file '" + SafeText.forLog(file)
                     + "': resolved outside the expected state directory "
                     + "(baseDir may have been swapped to a symlink)");
             return Optional.empty();
@@ -913,7 +923,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 byte[] bytes = in.readNBytes((int) MAX_RECORD_BYTES + 1);
                 // 読み込めたバイト数が上限を超えていれば、壊れたファイルと同様に読み飛ばす
                 if (bytes.length > MAX_RECORD_BYTES) {
-                    LOGGER.warning("Skipping oversized execution result file '" + SafeText.oneLine(file.toString()) + "' (>"
+                    LOGGER.warning("Skipping oversized execution result file '" + SafeText.forLog(file) + "' (>"
                             + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
                     return Optional.empty();
                 }
@@ -924,8 +934,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
             // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
             // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
-            LOGGER.warning("Skipping unreadable execution result file '" + SafeText.oneLine(file.toString())
-                    + "': " + SafeText.oneLine(e.getMessage()));
+            LOGGER.warning("Skipping unreadable execution result file '" + SafeText.forLog(file)
+                    + "': " + SafeText.forLog(e.getMessage()));
             return Optional.empty();
         }
     }

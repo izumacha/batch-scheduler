@@ -91,6 +91,13 @@ class BatchCliTest {
                 "stack trace must not leak to stderr, got: " + stderr);
     }
 
+    // 注: 最終防波堤のハンドラは safeMessage（行の構造を残す）を使い、原因は併記しない。
+    // 併記する safeMessageWithCause は 1 行へ潰すため、該当行を引用して桁位置を "^" で
+    // 指す SnakeYAML の構文エラーが読めなくなる。バッチ定義の構文エラーはこのツールで
+    // もっとも普通に踏むエラーなので、そちらの可読性を優先している。
+    // 代償として、外側が「何をしようとしたか」しか語らない例外
+    // （new UncheckedIOException("failed to list ...", e) など）では理由が落ちる。
+
     // メッセージを持たない例外（getMessage() が null）でも「error: null」ではなく
     // 例外クラス名が表示され、最低限の診断情報が残ることを検証する
     @Test

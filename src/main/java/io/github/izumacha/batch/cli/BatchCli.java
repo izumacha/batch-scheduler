@@ -94,7 +94,12 @@ public final class BatchCli implements Callable<Integer> {
             String message = CliFormat.safeMessage(ex);
             // サニタイズ済みのメッセージだけを標準エラーへ出力する（スタックトレースは出さない）。
             // safeMessage は行の構造を残すので、複数行の診断（YAML の構文エラーなど）は
-            // 複数行のまま出る。取り除かれるのは端末をあやつる制御文字だけ
+            // 複数行のまま出る。取り除かれるのは端末をあやつる制御文字だけ。
+            // 原因を併記する safeMessageWithCause は使わない — あちらは 1 行へ潰すので、
+            // 該当行を引用して桁位置を "^" で指す SnakeYAML の診断が読めなくなる。
+            // 代償として、外側が「何をしようとしたか」しか語らない例外
+            // （new UncheckedIOException("failed to list ...", e) など）では理由が
+            // 落ちる。頻度で見て、構文エラーの可読性を優先している
             System.err.println("error: " + message);
             // 個々のコマンドが自前で catch していた場合と同じ EXIT_CONFIG を返す
             return EXIT_CONFIG;

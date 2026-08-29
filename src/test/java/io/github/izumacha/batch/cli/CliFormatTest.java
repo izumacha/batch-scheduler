@@ -243,6 +243,17 @@ class CliFormatTest {
         // 区別が付かず、--rerun-failed へ貼るものも得られない
         assertEquals("-", CliFormat.runId("\u202E"));
         assertEquals("-", CliFormat.runId("\u0007"));
+        // 制御文字が空白を挟んでいる形も同じ。除去の「前」には空白が端に無いので
+        // trim をすり抜け、除去後に空白だけが残る — 空でないと見なされて
+        // 空白セルになっていた
+        assertEquals("-", CliFormat.runId("\u2060 \u2060"));
+        assertEquals("-", CliFormat.runId("\u0007\t\u0007"));
+        // Unicode の空白（全角空白・NBSP など）だけの値も同じ。Java の \s は ASCII
+        // しか拾わず、制御文字のパターンもカテゴリ Z を拾わないため、圧縮側で
+        // 明示的に \p{Z} を含めないと「空ではない空白」として素通りする
+        assertEquals("-", CliFormat.runId("\u3000\u3000\u3000"));
+        assertEquals("-", CliFormat.runId("\u00A0"));
+        assertEquals("-", CliFormat.runId("\u2003\u1680"));
         // 値があるときは 1 行へ整形して返す（切り詰めはしない）
         assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
     }
@@ -535,6 +546,179 @@ class CliFormatTest {
         int first = rendered.indexOf("also:");
         assertTrue(first >= 0, rendered);
         assertTrue(rendered.indexOf("also:", first + 1) > first, rendered);
+    }
+
+    /**
+     * エラー行が有界であることを確認する。例外のメッセージには state ファイル由来の
+     * 値がそのまま入り（--rerun-failed のバッチ名不一致は記録の batchName を本文にする）、
+     * 記録 1 件の上限は 16MiB なので、切らないとそれを丸ごと 1 行で stderr へ吐ける。
+     * このツールは他のあらゆる外部由来の出力を有界にしているので、ここも揃える。
+     */
+    @Test
+    void safeMessageWithCause_boundsEachSegmentSoATamperedRecordCannotFloodStderr() {
+        // 極端に長いメッセージを持つ例外を、原因付きで組み立てる
+        String huge = "x".repeat(100_000);
+        Exception cause = new java.io.IOException(huge);
+        Exception outer = new java.io.UncheckedIOException(huge, (java.io.IOException) cause);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 断片ごとに切られているので、全体も現実的な長さに収まる
+        assertTrue(rendered.length() < 10_000, "rendered length was " + rendered.length());
+        // 切り詰めたことが分かる印が付いている（黙って落とさない）
+        assertTrue(rendered.contains("..."), rendered);
+    }
+
+    /**
+     * 「断片ごとに切る」ことを実際に固定する。全体を 1 回切る実装に置き換えても
+     * 長さの検査だけなら通ってしまうが、それは MAX_MESSAGE_CHARS の Javadoc が
+     * 禁じている形（末尾に付く根本原因が落ちる）。外側が極端に長くても、
+     * 根本原因の見分けが付く文字列が出力に残ることを確かめる。
+     */
+    @Test
+    void safeMessageWithCause_keepsTheRootCauseEvenWhenTheHeadIsHuge() {
+        // どの段も長い連鎖を作り、それぞれに見分けの付く目印を置く。
+        // 全体を 1 回だけ中略する実装だと、両端（外側の先頭と根本原因の末尾）は
+        // 残るが「途中の段」がまるごと消えるので、中段の目印で見分けが付く
+        java.io.IOException root = new java.io.IOException("c".repeat(5_000) + "ROOT-MARKER");
+        java.io.IOException middle = new java.io.IOException("MIDDLE-MARKER" + "b".repeat(5_000), root);
+        Exception outer = new java.io.UncheckedIOException("OUTER" + "a".repeat(5_000), middle);
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 断片ごとに切っていれば、どの段の目印も残る
+        assertTrue(rendered.contains("OUTER"), "head lost");
+        assertTrue(rendered.contains("MIDDLE-MARKER"), "middle segment lost");
+        assertTrue(rendered.contains("ROOT-MARKER"), "root cause lost");
+    }
+
+    /**
+     * 中略が末尾ではなく中央で行われることを確かめる。末尾から切ると、外部由来の値の
+     * 長さを選ぶだけで、その後ろに付く「なぜ駄目だったか」の説明を消せてしまう
+     * （Jackson の line:/column:、BatchExecutor の「流用を拒否した」という結び）。
+     */
+    @Test
+    void safeMessage_elidesTheMiddleSoTheTrailingExplanationSurvives() {
+        // 途中に長い外部由来の値、末尾に対処に必要な説明、という実際の形を作る
+        String message = "invalid batch config ('" + "x".repeat(5_000)
+                + "') at [Source: bad.yaml; line: 4, column: 14]";
+        String rendered = CliFormat.safeMessage(new IllegalArgumentException(message));
+        // 先頭（どの値が問題か）が残る
+        assertTrue(rendered.startsWith("invalid batch config"), rendered);
+        // 末尾（なぜ駄目か）も残る
+        assertTrue(rendered.endsWith("line: 4, column: 14]"), rendered);
+        // 中略した印が付いている
+        assertTrue(rendered.contains("..."), rendered);
+    }
+
+    /**
+     * 中略がサロゲートペアの途中で切らないことを確認する。片割れのサロゲートは
+     * Unicode カテゴリ Cs で制御文字の除去でも落ちないため、端末で "?" や U+FFFD に
+     * なり、ASCII のマーカーをわざわざ選んで避けた「壊れた出力に見える」状態を
+     * 自分で作ってしまう。
+     */
+    @Test
+    void bounded_neverSplitsASurrogatePair() {
+        // 補助文字（絵文字）だけを並べ、どこで切ってもペアの境界に当たりうる形にする
+        String emoji = "\uD83D\uDE00";
+        // 切る位置が 1 文字ずつずれるよう、いろいろな上限で試す。0〜3 も含めるのは、
+        // マーカーすら入らない極端な上限の分岐にだけ穴が残るのを防ぐため
+        for (int max = 0; max <= 40; max++) {
+            String bounded = SafeText.bounded(emoji.repeat(50), max);
+            // 片割れのサロゲートが残っていない
+            for (int i = 0; i < bounded.length(); i++) {
+                char c = bounded.charAt(i);
+                if (Character.isHighSurrogate(c)) {
+                    assertTrue(i + 1 < bounded.length()
+                            && Character.isLowSurrogate(bounded.charAt(i + 1)),
+                            "lone high surrogate at " + i + " for max=" + max);
+                } else if (Character.isLowSurrogate(c)) {
+                    assertTrue(i > 0 && Character.isHighSurrogate(bounded.charAt(i - 1)),
+                            "lone low surrogate at " + i + " for max=" + max);
+                }
+            }
+            // 上限は超えない
+            assertTrue(bounded.length() <= max, "max=" + max + " got " + bounded.length());
+        }
+    }
+
+    /**
+     * 表のセル向けの切り詰め（末尾を落とす方）でもサロゲートを分断しないことを
+     * 確認する。run のサマリ表はジョブ出力を、list の BATCH 列は state ファイル由来の
+     * 値をここへ流すので、桁を揃えるために壊れた文字を作ってはいけない。
+     */
+    @Test
+    void shortMessage_neverSplitsASurrogatePair() {
+        String emoji = "\uD83D\uDE00";
+        for (int max = 0; max <= 40; max++) {
+            String shortened = CliFormat.shortMessage("x".repeat(10) + emoji.repeat(20), max);
+            for (int i = 0; i < shortened.length(); i++) {
+                char c = shortened.charAt(i);
+                if (Character.isHighSurrogate(c)) {
+                    assertTrue(i + 1 < shortened.length()
+                            && Character.isLowSurrogate(shortened.charAt(i + 1)),
+                            "lone high surrogate at " + i + " for max=" + max);
+                } else if (Character.isLowSurrogate(c)) {
+                    assertTrue(i > 0 && Character.isHighSurrogate(shortened.charAt(i - 1)),
+                            "lone low surrogate at " + i + " for max=" + max);
+                }
+            }
+            // 表の桁を崩さない（上限は超えない）
+            assertTrue(shortened.length() <= max, "max=" + max + " got " + shortened.length());
+        }
+    }
+
+    /**
+     * RUN ID 列にも長さの上限があることを確認する。ExecutionResult は runId の長さを
+     * 検証せず、記録 1 件は 16MiB まで許されるので、上限が無いと改変された記録 1 件で
+     * list の 1 行が数メガバイトになる。
+     */
+    @Test
+    void runId_isBounded() {
+        String rendered = CliFormat.runId("a".repeat(100_000));
+        assertTrue(rendered.length() <= 256, "length was " + rendered.length());
+        assertTrue(rendered.contains("..."), rendered);
+        // 生成される runId（22 文字）はそのまま通る
+        assertEquals("20260102-030405-abcdef", CliFormat.runId("20260102-030405-abcdef"));
+    }
+
+    /**
+     * 打ち切りの先で見つけた根元に添えられた診断も併記されることを確認する。
+     * ここだけ落とすと、他の段では必ず出る判断材料が印も付かずに消える。
+     */
+    @Test
+    void safeMessageWithCause_rendersSuppressedOnTheRootCauseToo() {
+        // 上限を超える深さの連鎖を作り、根元にだけ診断を添える
+        java.io.IOException root = new java.io.IOException("root");
+        root.addSuppressed(new java.io.IOException("atomic move unsupported"));
+        Throwable current = root;
+        for (int i = 0; i < 8; i++) {
+            current = new java.io.IOException("layer" + i, current);
+        }
+        String rendered = CliFormat.safeMessageWithCause(current);
+        // 根元そのものと、そこに添えられた診断の両方が出る
+        assertTrue(rendered.contains("root"), rendered);
+        assertTrue(rendered.contains("atomic move unsupported"), rendered);
+    }
+
+    /**
+     * 制御文字が空白を挟んでいるメッセージでも、クラス名へ落ちて「error: 」だけの
+     * 行にならないことを確認する。除去の前後どちらか一方でしか端を落とさないと、
+     * 除去後に残った空白が「値がある」と見なされてすり抜ける。
+     */
+    @Test
+    void safeMessage_messageOfOnlyFormatCharsAndSpaces_fallsBackToClassName() {
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("\u2060 \u2060")));
+    }
+
+    /**
+     * 表のセル向けの切り詰めでも、Unicode の空白だけの値が空白セルにならないことを
+     * 確認する。以前は isBlank() で弾いていたので通っていた経路で、圧縮側が
+     * ASCII の空白しか見ないと退行する。
+     */
+    @Test
+    void shortMessage_unicodeSpacesOnly_returnsEmpty() {
+        assertEquals("", CliFormat.shortMessage("\u3000\u3000", 20));
+        assertEquals("", CliFormat.shortMessage("\u2003", 20));
+        // 必須の列ではプレースホルダになる
+        assertEquals("-", CliFormat.requiredCell("\u3000\u3000", 20));
     }
 
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */

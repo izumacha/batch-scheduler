@@ -18,6 +18,47 @@ final class CliFormat {
     private static final int MAX_CAUSE_DEPTH = 5;
 
     /**
+     * エラー行に載せる 1 断片（外側のメッセージ・原因 1 段・添えられた診断 1 件）の
+     * 最大文字数。
+     *
+     * <p>例外のメッセージには state ファイル由来の値がそのまま入る
+     * （{@code --rerun-failed} のバッチ名不一致は記録の {@code batchName} を本文にする）。
+     * 記録 1 件の上限は 16MiB なので、それを丸ごと 1 行で stderr へ吐けてしまう。
+     * このツールは他のあらゆる外部由来の出力を有界にしている（表のセルの切り詰め・
+     * 記録サイズの上限・一覧件数の上限）ので、ここだけ例外にしない。
+     *
+     * <p>断片ごとに切るのは、全体を切ると末尾に付く根本原因が落ちるため。段数と
+     * 添えられた診断の件数にも上限があるので、断片を有界にすれば全体も有界になる。
+     *
+     * <p>切り方は末尾からではなく中略（{@link SafeText#bounded(String, int)}）。
+     * 外部由来の値はメッセージの途中に埋め込まれ、対処に必要な説明はその後ろに来る
+     * （Jackson の {@code line:}/{@code column:}、BatchExecutor の「流用を拒否した」という
+     * 結び、errno の説明）。末尾から切ると、攻撃者が長さを選べる値を通しただけで
+     * その説明を消せてしまう。
+     *
+     * <p>1000 文字は、実際に出るメッセージ（Jackson の参照チェーン付きで 450〜600 文字）が
+     * そのまま収まり、中略が起きるのは異常な長さのときだけになる値。
+     */
+    private static final int MAX_MESSAGE_CHARS = 1000;
+
+    /**
+     * 1 段あたりに描画する「添えられた診断」({@code addSuppressed}) の上限。
+     *
+     * <p>断片ごとの長さを有界にしても、件数が無制限なら全体は有界にならない。
+     * 現状はどの経路も 1 件しか添えないが、将来「階層ごと」「リトライごと」に
+     * 添える実装が入った時点で、上限が無ければ黙って無界へ戻る。
+     */
+    private static final int MAX_SUPPRESSED_PER_LEVEL = 3;
+
+    /**
+     * {@code list} の RUN ID 列に載せる最大文字数。生成される runId は
+     * {@code yyyyMMdd-HHmmss-XXXXXX} の 22 文字なので、正規の値には十分な余裕がある。
+     * 上限を置くのは、改変された記録の runId が 16MiB まで許される（記録サイズの
+     * 上限しか効かない）ため。
+     */
+    private static final int MAX_RUN_ID_CHARS = 256;
+
+    /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
      * 出力量は増えず、循環した連鎖でも必ず止まる。
      */
@@ -31,17 +72,6 @@ final class CliFormat {
     // null の Instant と、フォーマッタの表現範囲を超えて整形できない値の両方で共用する
     // （§6: マジック文字列を避け、単一の参照元に置く）
     private static final String PLACEHOLDER = "-";
-
-    // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
-    // ASCII の "..." にしているのは DESIGN.md「ASCII-only CLI diagnostics」の不変条件のため。
-    // System.out は JVM の stdout.encoding（＝プラットフォームのネイティブ文字集合）で符号化し、
-    // LANG 未設定の C/POSIX ロケール（Docker の JDK ベースイメージや CI コンテナの既定）では
-    // それが US-ASCII になる。以前ここで使っていた省略記号「…」(U+2026) は US-ASCII で
-    // 表現できないため "?" へ潰れ、切り詰め表示が "some messag?" のように
-    // 「壊れた出力」と区別できない見た目になっていた。
-    // ジョブ出力など外部由来の文字列の符号化はプラットフォーム側の責務とし、
-    // このツール自身が足す文言だけをロケール非依存に保つ方針（DESIGN.md 参照）
-    private static final String TRUNCATION_MARK = "...";
 
     // インスタンス生成を禁止するためのプライベートコンストラクタ（ユーティリティクラス）
     private CliFormat() {
@@ -120,7 +150,12 @@ final class CliFormat {
 
     /**
      * 例外のメッセージを取得する。メッセージが null の場合は代わりに例外クラス名を返し、
-     * 診断価値の無い「error: null」表示を防ぐ。BatchCli の最終防波堤ハンドラでのみ適用されて
+     * 診断価値の無い「error: null」表示を防ぐ。
+     *
+     * <p>戻り値は 1 行へ整形され、制御文字を除かれ、{@link #MAX_MESSAGE_CHARS} 文字に
+     * 中略される。例外のメッセージには state ファイル由来の値がそのまま入りうるため
+     * （記録 1 件の上限は 16MiB）、無害化と長さの上限をこのメソッド自身が保証する。
+     * 中略は末尾ではなく中央で行うので、メッセージ末尾の説明は残る。BatchCli の最終防波堤ハンドラでのみ適用されて
      * いたこのフォールバックを、同じ問題を持つ他のエラー出力箇所（RunCommand/ListCommand の
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      *
@@ -143,7 +178,11 @@ final class CliFormat {
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        String message = SafeText.multiLine(t.getMessage());
+        // 行の構造は残す（SnakeYAML の構文エラーは該当行を引用して桁位置を "^" で
+        // 指すので、1 行へ潰すと "^" が何も指さなくなる）。そのうえで長さは切る —
+        // メッセージには state ファイル由来の値が入りうるが、記録 1 件は 16MiB まで
+        // 許されるため、上限が無いとそれを丸ごと stderr へ吐ける
+        String message = SafeText.bounded(SafeText.multiLine(t.getMessage()), MAX_MESSAGE_CHARS);
         // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
         // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
         // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
@@ -211,12 +250,17 @@ final class CliFormat {
             // 根本原因と言い切ると運用者を間違った失敗の調査へ送り出してしまう
             String label = root.getCause() == null ? "root cause: " : "deepest cause reached: ";
             appendDetail(rendered, head, label + root);
+            // 根元に添えられた診断も併記する。ここだけ落とすと、他の段では必ず出る
+            // 「なぜアトミック移動を使えなかったのか」のような判断材料が、印も付かずに
+            // 消える（appendDetail の Javadoc が「あってはならない」と書いている状態）
+            appendSuppressed(rendered, head, root);
         }
         // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
         // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が
         // 生で入り、それが端末へ出る。長さは切り詰めない — 表のセルと違って桁を揃える
         // 必要が無く、このメソッドが存在する理由そのものである根本原因が末尾にあるため
-        return sanitizeOneLine(rendered.toString());
+        // 断片ごとに切ってあるので全体も有界。ここでは 1 行へ整形するだけ
+        return SafeText.oneLine(rendered.toString());
     }
 
     /**
@@ -230,9 +274,18 @@ final class CliFormat {
      */
     private static void appendSuppressed(StringBuilder rendered, String head, Throwable throwable) {
         // 添えられた失敗を順に併記する（無ければ何もしない）
-        for (Throwable suppressed : throwable.getSuppressed()) {
+        Throwable[] suppressed = throwable.getSuppressed();
+        // 件数にも上限を置く。断片の長さだけ有界にしても、件数が無制限なら全体は
+        // 有界にならない（理由は MAX_SUPPRESSED_PER_LEVEL を参照）
+        int shownCount = Math.min(suppressed.length, MAX_SUPPRESSED_PER_LEVEL);
+        for (int i = 0; i < shownCount; i++) {
             // 主因と区別できるよう "also:" を付ける
-            appendDetail(rendered, head, "also: " + suppressed);
+            appendDetail(rendered, head, "also: " + suppressed[i]);
+        }
+        // 打ち切ったなら、その事実も残す（黙って落とさない）
+        if (suppressed.length > shownCount) {
+            rendered.append(" (...").append(suppressed.length - shownCount)
+                    .append(" more suppressed)");
         }
     }
 
@@ -256,12 +309,14 @@ final class CliFormat {
      * （{@code new UncheckedIOException(cause)} は原因の {@code toString()} を
      * そのまま detailMessage にする）と分かっている 1 ケースなので抑止してよい。
      */
-    private static void appendDetail(StringBuilder rendered, String head, String detail) {
+    private static void appendDetail(StringBuilder rendered, String head, String rawDetail) {
+        // 断片ごとに長さを切る（末尾ではなく中略。理由は MAX_MESSAGE_CHARS を参照）
+        String detail = SafeText.forDisplay(rawDetail, MAX_MESSAGE_CHARS);
         // 比較は両方とも整形した形で行う。head は safeMessage が整形済みで返す一方
         // detail は生の toString() なので、片方だけを整形した状態で比べると、
         // 原因のメッセージに前後の空白や改行が含まれるだけで一致しなくなり、
         // まったく同じ文が 2 回並ぶ（この抑止が存在する唯一の理由が消える）
-        if (!sanitizeOneLine(detail).equals(head)) {
+        if (!detail.equals(head)) {
             rendered.append(" (").append(detail).append(')');
         }
     }
@@ -286,8 +341,13 @@ final class CliFormat {
      * {@code -.json} という記録が作られることは（生成される runId の形式が
      * {@code yyyyMMdd-HHmmss-XXXXXX} である以上）まず無いこと、の 2 点による。
      *
-     * <p>値がある場合は他の列と同じ {@link #sanitizeOneLine(String)} を通す。
-     * runId は state ファイル由来の信頼できない値で、切り詰めはしない。
+     * <p>値がある場合は他の列と同じ {@link SafeText#oneLine(String)} を通したうえで、
+     * {@link #MAX_RUN_ID_CHARS} 文字に中略する。runId は state ファイル由来の
+     * 信頼できない値で、{@code ExecutionResult} は長さを検証しない。記録 1 件の上限は
+     * 16MiB なので、上限が無いと改変された記録 1 件で {@code list} の 1 行が
+     * 数メガバイトになる。生成される runId は {@code yyyyMMdd-HHmmss-XXXXXX} の
+     * 22 文字なので、正規の値がここで切られることはなく、
+     * {@code --rerun-failed} への貼り付けも壊れない。
      */
     static String runId(String runId) {
         // null は先に弾く（整形に渡せないため）
@@ -299,7 +359,7 @@ final class CliFormat {
         // 改変された state ファイルから来うる）が整形後に空文字となり、
         // 36 桁の空白として描画される。運用者には「表示バグ」と区別が付かず、
         // --rerun-failed へ貼るものも得られない — このメソッドが防ぐはずの行き止まり
-        String rendered = sanitizeOneLine(runId);
+        String rendered = SafeText.forDisplay(runId, MAX_RUN_ID_CHARS);
         if (rendered.isEmpty()) {
             return PLACEHOLDER;
         }
@@ -365,33 +425,26 @@ final class CliFormat {
     /**
      * テーブル表示用に null かもしれないメッセージを最大 {@code max} 文字に切り詰める。
      * ジョブ出力由来の信頼できない文字列が渡るため、空白の圧縮に加えて
-     * {@link #sanitizeOneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
+     * {@link SafeText#oneLine(String)} で端末制御文字も除去する（唯一のチョークポイント）。
      *
-     * <p>切り詰めマーカーは {@link #TRUNCATION_MARK}（ASCII）で、戻り値の長さは
+     * <p>切り詰めは {@link SafeText#truncate(String, int)} が行い、戻り値の長さは
      * 必ず {@code max} 以下に収まる（表の桁ずれを防ぐため）。
      */
     static String shortMessage(String message, int max) {
-        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は sanitizeOneLine を参照）。
+        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は SafeText.oneLine を参照）。
         // 空判定は整形の「後」に行う。前に置くと、空白ではないが整形すると消える文字
         // だけの値（bidi 制御の U+202E など）が isBlank() をすり抜けて空文字になり、
         // 呼び出し側は「値がある」と思ったまま空のセルを描くことになる
-        String oneLine = sanitizeOneLine(message);
+        String oneLine = SafeText.oneLine(message);
         // 値が無い（null・空白のみ・整形すると消える）場合は空文字を返す
         if (oneLine == null || oneLine.isEmpty()) {
             return "";
         }
-        // 最大文字数以内であればそのまま返す
-        if (oneLine.length() <= max) {
-            return oneLine;
-        }
-        // マーカーを入れる余地すら無い極端に小さい max では、マーカーを付けずに単純に切る
-        // （マーカーを足すと戻り値が max を超えて表の桁が崩れてしまうため）
-        if (max <= TRUNCATION_MARK.length()) {
-            return oneLine.substring(0, Math.max(0, max));
-        }
-        // 最大文字数を超える場合は、マーカー分を差し引いた位置で切ってマーカーを付けて返す
-        // （切り詰め後の全長がちょうど max になる）
-        return oneLine.substring(0, max - TRUNCATION_MARK.length()) + TRUNCATION_MARK;
+        // 切り詰めは SafeText へ委譲する。素の substring で切ると補助文字（絵文字など。
+        // ジョブ出力や改変された state ファイルから入りうる）の途中で切れて片割れの
+        // サロゲートが残り、端末で "?" や U+FFFD になる — マーカーを ASCII にしてまで
+        // 避けた「壊れた出力に見える」状態を、桁を揃えるために自分で作ることになる
+        return SafeText.truncate(oneLine, max);
     }
 
 }

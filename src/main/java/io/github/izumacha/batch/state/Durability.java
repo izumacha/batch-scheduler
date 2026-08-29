@@ -312,11 +312,17 @@ final class Durability {
             boolean reachedTheFlush = !(e instanceof OpenFailure);
             // 保存そのものを失敗させるべき失敗かどうかを判定する（下の表を参照）
             if (shouldFailTheSave(step, reachedTheFlush)) {
-                // 検査例外はそのまま、非検査例外は IOException に包んで伝える
+                // 検査例外でも必ず包み直す。素で投げ直すと describeFailure の文面も
+                // 対象のパスも落ち、運用者が受け取るのは
+                // 「failed to save execution result 'run1' ... (IOException: Invalid argument)」
+                // だけになる — fsync が失敗したことも、どのファイルなのかも分からない。
+                // このクラスは「文面は describeFailure から出す」と決めているので、
+                // 伝播する側だけ例外にしない
                 // （shouldFailTheSave が true を返すのは reachedTheFlush が true の
                 // ときだけなので、ここで e が OpenFailure であることはない＝
                 // 内部マーカー型が呼び出し元へ出ることもない）
-                throw e instanceof IOException io ? io : new IOException(describeFailure(step, true), e);
+                throw new IOException(describeFailure(step, true)
+                        + " for '" + SafeText.forLog(path) + "'", e);
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
@@ -337,7 +343,7 @@ final class Durability {
         // fsync は成功しても痕跡を残さないので、このログが「どこまで確定したか」を
         // 後から追える唯一の手がかりになる。Supplier 版なので FINE が無効なときは
         // 文字列の組み立て自体が起きない
-        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + SafeText.oneLine(path.toString()) + "'");
+        LOGGER.fine(() -> "Durability step " + step.name() + " completed for '" + SafeText.forLog(path) + "'");
         // ここまで来た＝確定した
         return true;
     }
@@ -487,7 +493,7 @@ final class Durability {
             // 手がかりを何も渡さないメッセージになってしまう
             LOGGER.warning(() -> total + " directory levels created for the state directory "
                     + "could not be confirmed durable, starting with '"
-                    + SafeText.oneLine(String.valueOf(first))
+                    + SafeText.forLog(first)
                     + "'; each may not survive a power loss, taking every record in it");
         }
     }
@@ -608,8 +614,8 @@ final class Durability {
                 // 後から追えず、FIFO でぶら下がったときに「なぜ守れなかったのか」が
                 // どこにも無い状態になる（§6 エラーを握り潰さない）
                 LOGGER.fine(() -> "could not determine the file type of '"
-                        + SafeText.oneLine(path.toString())
-                        + "' (" + SafeText.oneLine(String.valueOf(statFailed)) + "); letting the open report the reason");
+                        + SafeText.forLog(path)
+                        + "' (" + SafeText.forLog(statFailed) + "); letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
                 throw new IOException("refusing to sync '" + path
@@ -689,8 +695,8 @@ final class Durability {
         // 警告に内部クラス名を混ぜても運用者の役に立たないので、中身へ置き換える
         Throwable shown = cause instanceof OpenFailure ? cause.getCause() : cause;
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
-        LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.oneLine(path.toString()) + "': "
-                + reason + " (" + SafeText.oneLine(String.valueOf(shown)) + "); " + step.consequence
+        LOGGER.warning("Durability step " + step.name() + " skipped for '" + SafeText.forLog(path) + "': "
+                + reason + " (" + SafeText.forLog(shown) + "); " + step.consequence
                 + ". This warning is reported once per step, per store.");
     }
 }
