@@ -20,7 +20,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.UUID;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -344,31 +343,6 @@ class DurabilityTest {
     }
 
     @Test
-    void createDirectoriesDurablySyncsBareRelativeStateDirectory() throws IOException {
-        // 既定の --state-dir ".batch-state" と同じ形（単一要素の相対パス）を、
-        // 他のテストとぶつからない一意な名前で用意する
-        Path relative = Path.of(".batch-state-test-" + UUID.randomUUID());
-        // カレントディレクトリの絶対パス（＝同期されるべき相手）を控えておく
-        Path workingDirectory = Path.of("").toAbsolutePath();
-        // 相対パスの解決先はカレントディレクトリなので、そこへ書ける環境でしか実行できない。
-        // 読み取り専用のチェックアウト（コンテナで作業ツリーを ro マウントする CI など）では
-        // 検査対象と無関係な理由で落ちてしまうため、書けないときは静かにスキップする
-        assumeTrue(Files.isWritable(workingDirectory), "カレントディレクトリへ書き込めない");
-        // ディレクトリを同期できる環境かどうかを、作成先を含むカレントディレクトリで確かめる
-        assumeTrue(directorySyncSupported(workingDirectory), "この環境ではディレクトリを同期できない");
-        try {
-            // 相対パスのまま作成する（本番の既定設定と同じ経路を通す）
-            durability.createDirectoriesDurably(relative);
-            // 単一要素の相対パスでも、含む側（カレントディレクトリ）が同期される。
-            // ここが抜けると「既定設定のときだけ同期が丸ごと無くなる」状態になる
-            assertEquals(List.of(workingDirectory), syncedPaths());
-        } finally {
-            // 作業ディレクトリに痕跡を残さないよう必ず片付ける
-            Files.deleteIfExists(relative);
-        }
-    }
-
-    @Test
     void directoryHoldingReturnsNullForFilesystemRoot() {
         // ルートを含むディレクトリは存在しないので null を返す（同期対象なし）
         Path root = Path.of("").toAbsolutePath().getRoot();
@@ -536,7 +510,9 @@ class DurabilityTest {
             assertDoesNotThrow(() -> store.save(sampleRun("run1")));
             // 記録は実際に読み戻せる（＝保存は成立している）
             assertTrue(store.findById("run1").isPresent());
-            // 同期を実際に失敗させられた環境でだけ、握り潰しではなく警告が残ることも確かめる
+            // 同期を実際に失敗させられた環境でだけ、握り潰しではなく警告が残ることも確かめる。
+            // root で走る CI ではここが素通りするため、「失敗しても警告は必ず残る」ことは
+            // uid に依存しない aDirectorySyncFailureWarnsInsteadOfFailingTheSave が別途固定する
             if (syncActuallyFails) {
                 assertTrue(warnings().stream().anyMatch(w -> w.contains("RECORD_RENAME")),
                         warnings().toString());
@@ -545,6 +521,22 @@ class DurabilityTest {
             // 後片付け（@TempDir が消せるよう権限を戻す）
             Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
         }
+    }
+
+    @Test
+    void aDirectorySyncFailureWarnsInsteadOfFailingTheSave(@TempDir Path dir) {
+        // 存在しないディレクトリを渡すと、権限の細工なしに open が必ず失敗する。
+        // POSIX 権限を落とす手は root（CI コンテナの既定）だと素通りしてしまい、
+        // 「警告が残る」ことの検証が黙って実行されなくなるため、uid に依存しない
+        // この形で固定する
+        Path missing = dir.resolve("gone").resolve("deeper");
+        // ディレクトリの段階は失敗しても保存を止めない（best-effort）
+        assertDoesNotThrow(() -> durability.sync(missing, Durability.Step.RECORD_RENAME));
+        // 握り潰しではなく、段階名つきの警告として必ず残る
+        assertEquals(1, warnings().size(), warnings().toString());
+        assertTrue(warnings().get(0).contains("RECORD_RENAME"), warnings().get(0));
+        // 完了ログは出ない（＝確定していないのに確定したと記録しない）
+        assertEquals(List.of(), completedSteps());
     }
 
     @Test

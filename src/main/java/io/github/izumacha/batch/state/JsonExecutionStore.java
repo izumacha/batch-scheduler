@@ -544,11 +544,16 @@ public final class JsonExecutionStore implements ExecutionStore {
      * the check just established that {@code target} really is inside it;
      * re-resolving {@code baseDir} could follow a directory swapped in since.
      *
-     * <p>The rename sync sits in a {@code catch} rather than a {@code finally}
-     * because a {@code finally} that throws silently replaces the exception in
-     * flight. That cannot happen today -- {@link Durability.Step#RECORD_RENAME}
-     * is a directory step and directory steps never rethrow -- but that fact
-     * lives in another class, invisible from here, so the safety is made local.
+     * <p>The rename sync runs as a plain statement guarded by its own
+     * {@code try}/{@code catch}, deliberately not inside a {@code finally}
+     * wrapped around the re-flush: a {@code finally} that throws silently
+     * replaces the exception in flight, discarding the "published but not
+     * confirmed durable" wording that is the only thing telling the operator
+     * the record may still be readable. That cannot happen today --
+     * {@link Durability.Step#RECORD_RENAME} is a directory step and directory
+     * steps never rethrow -- but that fact lives in another class, invisible
+     * from here, so the safety is made local. The {@code catch} merges rather
+     * than replaces for the same reason.
      *
      * <p>Package-private so a test can pin the wiring: {@code save} cannot
      * reach the fallback on the default provider (temp file and target share a

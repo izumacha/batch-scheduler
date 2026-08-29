@@ -7,13 +7,6 @@ dependency-reduced-pom.xml
 .batch-state/
 runs/
 
-# DurabilityTest creates a bare relative state dir here to cover the default
-# ".batch-state" shape (a single-element relative path, whose getParent() is
-# null). It deletes it in a finally block, but an interrupted build -- Ctrl-C,
-# a CI timeout, an OOM kill -- can leave one behind, and a stray untracked
-# directory in the repo root should not show up in git status.
-.batch-state-test-*/
-
 # IDE
 .idea/
 *.iml

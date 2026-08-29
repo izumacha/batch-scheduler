@@ -41,7 +41,7 @@ java -jar target/batch-scheduler.jar list                        # 過去の実�
 - `config/` — YAML/JSON のロードと検証。`BatchConfigLoader.java`（YAML→`Batch`、資源枯渇対策の bounded parsing）、`ConfigException` / `ValidationException`。
 - `core/` — 実行エンジンと依存グラフ。`BatchExecutor.java`（実行オーケストレーション・runId 生成）、`DependencyGraph.java`（DAG 検証・トポロジカルソート）、`JobRunner.java`（個別ジョブの起動・監視）、`BatchExecutionException`。
 - `model/` — 不変 record。`Job`（id, command, dependsOn, retries, timeout, env, workingDir）、`Batch`、`ExecutionResult`、`JobResult`、`JobStatus`（enum）。
-- `state/` — 永続化。`ExecutionStore`（IF）、`JsonExecutionStore`（実行ごとに 1 JSON）、`InMemoryExecutionStore`（テスト用）、`Durability`（保存を電源断から守る fsync。中身・改名・作成したディレクトリ階層の 3 段階を確定させる。原子性と耐久性の違いと段階ごとの失敗時の扱いは `docs/DESIGN.md` の「Record durability」が正本）。
+- `state/` — 永続化。`ExecutionStore`（IF）、`JsonExecutionStore`（実行ごとに 1 JSON）、`InMemoryExecutionStore`（テスト用）、`Durability`（保存を電源断から守る fsync。作成したディレクトリ階層・改名前の中身・非アトミック移動時の公開後の中身・改名の 4 段階（`Durability.Step`）を確定させる。原子性と耐久性の違いと段階ごとの失敗時の扱いは `docs/DESIGN.md` の「Record durability」が正本）。
 
 ### データフロー
 

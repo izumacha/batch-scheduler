@@ -242,25 +242,30 @@ final class Durability {
         // 開いて force(true) するところまでを試す
         try {
             flush(path, step);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // 検査例外と非検査例外を 1 つの catch にまとめているのは、方針（保存を
+            // 失敗させるか）を通る道が 1 本しかないことを構造で保証するため。分けると、
+            // 非検査例外の側だけ shouldFailTheSave を通さない書き方が自然に成立して
+            // しまい、「バイト列が届いていないのに保存成功と報告する」という、
+            // failureFailsTheSave がまさに防ぐために存在する逆転が復活する。
+            // 非検査例外は既定以外のファイルシステムプロバイダが force / close で
+            // 宣言に反して投げる場合を想定した保険（開く段階の失敗は種別によらず
+            // flush が OpenFailure に包むので、ここへは来ない）。
+            //
             // 「書き戻しまで到達したか」を 1 度だけ判定し、方針の決定と文面の決定の
             // 両方に同じ答えを渡す。2 か所で別々に判定すると、片方だけ直したときに
             // 「本物のエラーなのに環境の制約として説明する」ずれが生まれる
             boolean reachedTheFlush = !(e instanceof OpenFailure);
             // 保存そのものを失敗させるべき失敗かどうかを判定する（下の表を参照）
             if (shouldFailTheSave(step, reachedTheFlush)) {
-                throw e;
+                // 検査例外はそのまま、非検査例外は IOException に包んで伝える
+                // （shouldFailTheSave が true を返すのは reachedTheFlush が true の
+                // ときだけなので、ここで e が OpenFailure であることはない＝
+                // 内部マーカー型が呼び出し元へ出ることもない）
+                throw e instanceof IOException io ? io : new IOException(describeFailure(step, true), e);
             }
             // そうでなければ、確定できなかったことを警告として残すだけにする
             warnOnce(path, step, e, describeFailure(step, reachedTheFlush));
-            // 失敗したので完了は記録しない
-            return;
-        } catch (RuntimeException e) {
-            // ここへ来るのは書き戻し（force / close）が非検査例外で落ちた場合だけ。
-            // 開く段階の失敗は種別によらず OpenFailure として上の分岐へ回っている。
-            // したがって「書き戻しまで到達した」として文面を選ぶ — false を渡すと、
-            // 本物の同期エラーを「この環境では開けない」と説明してしまう
-            warnOnce(path, step, e, describeFailure(step, true));
             // 失敗したので完了は記録しない
             return;
         }

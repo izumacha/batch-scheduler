@@ -285,10 +285,16 @@ malicious resource exhaustion and against tampering with the state directory:
   that record back to decide which jobs already succeeded — without it the
   operator must re-run the whole batch, re-executing jobs that had already
   succeeded, which is precisely what `--rerun-failed` exists to avoid.
-  `Durability` therefore flushes three things: each directory level
+  `Durability` therefore flushes four things — one `Durability.Step` each, so
+  that adding a flush point forces a decision about its target and its failure
+  policy rather than inheriting someone else's: each directory level
   `ensureBaseDirectory()` newly creates (syncing each level's *parent*, since
   that is what holds the entry), the temp file's contents before the rename,
-  and the base directory after the rename — the last one only once
+  the published file's contents again when the rename had to fall back to a
+  non-atomic copy-and-delete (a separate step because it re-flushes bytes the
+  fallback wrote at a *new* location, and carries its own warning budget and
+  operator wording), and the base directory after the rename — the last one
+  only once
   `verifyWroteUnderExpectedBase` has passed, so a *rename* the symlink check is
   about to reject is never committed first. This ordering deliberately covers
   the directory entry only: the record's own bytes are flushed before the check
