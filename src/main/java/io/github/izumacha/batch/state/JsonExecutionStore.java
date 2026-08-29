@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.izumacha.batch.model.ExecutionResult;
+import io.github.izumacha.batch.text.SafeText;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -305,7 +306,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 Throwable cleanupFailed = deleteQuietly(tmp);
                 // 消せなかったときは警告に留める（進行中の失敗を差し替えないため）
                 if (cleanupFailed != null) {
-                    LOGGER.warning("failed to remove the temporary file '" + tmp + "': "
+                    LOGGER.warning("failed to remove the temporary file '" + SafeText.oneLine(tmp.toString()) + "': "
                             + cleanupFailed + "; it will be left behind in the state directory");
                 }
             }
@@ -375,7 +376,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 候補が安全上限を超えている場合は、ファイル名（=時系列）の新しい順に絞り込んでから
         // パースする（全件の内容パースによる資源枯渇を避ける。MAX_UNBOUNDED_RESULTS 参照）
         if (candidates.size() > MAX_UNBOUNDED_RESULTS) {
-            LOGGER.warning("State directory " + baseDir + " has " + candidates.size()
+            LOGGER.warning("State directory " + SafeText.oneLine(baseDir.toString()) + " has " + candidates.size()
                     + " execution results, exceeding the unbounded-list safety ceiling ("
                     + MAX_UNBOUNDED_RESULTS + "); returning only the " + MAX_UNBOUNDED_RESULTS
                     + " most recent by filename. Use 'list --limit N' for a bounded view.");
@@ -857,7 +858,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         try {
             realFile = file.toRealPath();
         } catch (IOException e) {
-            LOGGER.warning("Skipping execution result file '" + file
+            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
                     + "': failed to resolve its real path (" + e.getMessage() + ")");
             return Optional.empty();
         }
@@ -866,7 +867,7 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 読み込みは baseDir の差し替えに一切影響されない実体パスを直接使うことになる
         // （このメソッドの Javadoc 参照）
         if (!expectedRealBase.equals(realFile.getParent())) {
-            LOGGER.warning("Skipping execution result file '" + file
+            LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
                     + "': resolved outside the expected state directory "
                     + "(baseDir may have been swapped to a symlink)");
             return Optional.empty();
@@ -904,7 +905,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                 byte[] bytes = in.readNBytes((int) MAX_RECORD_BYTES + 1);
                 // 読み込めたバイト数が上限を超えていれば、壊れたファイルと同様に読み飛ばす
                 if (bytes.length > MAX_RECORD_BYTES) {
-                    LOGGER.warning("Skipping oversized execution result file '" + file + "' (>"
+                    LOGGER.warning("Skipping oversized execution result file '" + SafeText.oneLine(file.toString()) + "' (>"
                             + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
                     return Optional.empty();
                 }
@@ -915,7 +916,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
             // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
             // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
-            LOGGER.warning("Skipping unreadable execution result file '" + file + "': " + e.getMessage());
+            LOGGER.warning("Skipping unreadable execution result file '" + SafeText.oneLine(file.toString())
+                    + "': " + SafeText.oneLine(e.getMessage()));
             return Optional.empty();
         }
     }

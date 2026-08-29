@@ -181,6 +181,30 @@ class CliFormatTest {
     }
 
     /**
+     * 整形すると空になるメッセージでも、クラス名へ落ちて「error: 」だけの行に
+     * ならないことを確認する。判定を整形の前に置くと、非 null だが表示すると
+     * 消えるメッセージがフォールバックを素通りし、診断価値の無い表示を防ぐという
+     * このメソッドの存在理由そのものが消える。
+     */
+    @Test
+    void safeMessage_messageThatSanitizesToEmpty_fallsBackToClassName() {
+        // 空白ではないが整形すると消える文字だけのメッセージ（bidi 制御）
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("\u202E")));
+        // 空白のみのメッセージも同じ
+        assertEquals("IllegalStateException",
+                CliFormat.safeMessage(new IllegalStateException("   ")));
+    }
+
+    /** ステータスが無い記録では "null" ではなくプレースホルダ "-" を返すことを確認する */
+    @Test
+    void status_missingValue_returnsPlaceholder() {
+        assertEquals("-", CliFormat.status(null));
+        assertEquals("SUCCEEDED",
+                CliFormat.status(io.github.izumacha.batch.model.JobStatus.SUCCEEDED));
+    }
+
+    /**
      * 原因を持つ例外では、外側のメッセージに「 (原因)」が併記されることを確認する。
      * JsonExecutionStore.save は「記録は公開済みだが耐久性を確認できなかった」という
      * 区別を原因側にしか持たせていないため、ここが落ちると運用者には

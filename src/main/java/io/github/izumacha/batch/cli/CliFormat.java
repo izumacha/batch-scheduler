@@ -1,11 +1,13 @@
 package io.github.izumacha.batch.cli;
 
+import io.github.izumacha.batch.model.JobStatus;
+import io.github.izumacha.batch.text.SafeText;
+
 import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.regex.Pattern;
 
 /**
  * CLI コマンドが共通して使う null 安全な整形ユーティリティメソッド群。
@@ -29,34 +31,6 @@ final class CliFormat {
     // null の Instant と、フォーマッタの表現範囲を超えて整形できない値の両方で共用する
     // （§6: マジック文字列を避け、単一の参照元に置く）
     private static final String PLACEHOLDER = "-";
-
-    // 端末表示から取り除く制御文字のパターン（§6: 意図のある値は名前付き定数に置く）。
-    // \p{Cntrl} は ASCII の C0 制御文字（ESC=0x1B・BEL=0x07 など）と DEL（0x7F）、
-    // U+0080〜U+009F は C1 制御文字（CSI=0x9B など）、\p{Cf} は Unicode の
-    // フォーマット文字（カテゴリ Cf。双方向テキスト制御の RLO=U+202E や
-    // U+202A〜U+202E・分離制御の U+2066〜U+2069 など）。ジョブの出力は信頼できない
-    // 実行時データ（DESIGN.md の信頼モデル参照）なので、生の制御文字を端末へ
-    // そのまま流すとタイトル偽装・文字消去・カーソル操作などの端末乗っ取りを許して
-    // しまい、bidi（双方向）制御文字は run/list のサマリー表の文字列を視覚的に
-    // 並べ替えて表示内容を偽装できてしまう。改行・タブ等の空白系は shortMessage が
-    // 先にスペースへ圧縮するため、ここでは「空白圧縮後に残る非表示文字」をまとめて削除する
-    private static final Pattern CONTROL_CHARS_PATTERN =
-            Pattern.compile("[\\p{Cntrl}\\u0080-\\u009F\\p{Cf}]");
-
-    // 1 行へ圧縮するときに「区切り」として扱う空白の集合（§6: 意図のある値は名前付き定数に置く）。
-    // Java の \s は [ \t\n\x0B\f\r] だけで、U+0085 (NEL)・U+2028 (LS)・U+2029 (PS) を
-    // 含まない。3 文字とも、圧縮側に足す前は別々の壊れ方をしていた:
-    //   - U+0085 (NEL) は CONTROL_CHARS_PATTERN の \u0080〜\u009F に当たるため「削除」され、
-    //     前後の単語が "line onefile not found" のように繋がって別語へ化けていた。
-    //   - U+2028/U+2029 は Unicode カテゴリ Zl/Zp で、\p{Cntrl} にも \u0080〜\u009F にも
-    //     \p{Cf} にも当たらない。つまり圧縮も除去もされず、生の行区切りとして端末へ届き、
-    //     1 記録 1 行という表の前提を壊していた。
-    // 外部由来の文字列（OS のエラー文・非 UTF-8 ロケールのデコード結果・改変された
-    // state ファイル）は実際にこれらを含みうるので、区切りとして扱う側へ明示的に足す。
-    // ここから外すと、CONTROL_CHARS_PATTERN は Zl/Zp を拾わないので後者は素通りに戻る
-    private static final Pattern WHITESPACE_PATTERN =
-            Pattern.compile("[\\s\\u0085\\u2028\\u2029]+");
-
 
     // 表のセルを切り詰めたことを示すマーカー（§6: マジック文字列を避け単一の参照元に置く）。
     // ASCII の "..." にしているのは DESIGN.md「ASCII-only CLI diagnostics」の不変条件のため。
@@ -151,14 +125,20 @@ final class CliFormat {
      * 個別 catch 節）でも再利用できるよう共通ユーティリティに切り出したもの（§6 DRY）。
      */
     static String safeMessage(Throwable t) {
-        // メッセージがあればそれを、無ければクラスの単純名（パッケージ名を含まない）を選ぶ
-        String message = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
-        // 選んだ文字列は必ず整形して返す。例外のメッセージには外部由来の値が入りうる
+        // メッセージを整形する。例外のメッセージには外部由来の値が入りうる
         // （--rerun-failed のバッチ名不一致は state ファイルの batchName を、
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        return sanitizeOneLine(message);
+        String message = sanitizeOneLine(t.getMessage());
+        // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
+        // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
+        // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
+        // 診断価値の無い表示を防ぐという、このメソッドが存在する理由そのものが消える
+        if (message == null || message.isEmpty()) {
+            return t.getClass().getSimpleName();
+        }
+        return message;
     }
 
     /**
@@ -309,6 +289,26 @@ final class CliFormat {
     }
 
     /**
+     * 表示用に実行ステータスを整形する。値が無い場合は {@link #instant(Instant)} /
+     * {@link #duration(Duration)} / {@link #runId(String)} と同じプレースホルダ
+     * {@code "-"} を返す。
+     *
+     * <p>{@code status} を欠いた state ファイルは、{@code runId} を欠いたものと
+     * 同じように読み込める（{@code ExecutionResult} の正規コンストラクタが既定値を
+     * 与えるのは {@code jobResults} だけ）。整形せずに {@code printf} へ渡すと
+     * 文字列 {@code "null"} が列に並び、「値が無い」ことを表す表記がこのクラスの
+     * 他の列と食い違う（§6 一元管理）。
+     */
+    static String status(JobStatus status) {
+        // 値が無い場合はプレースホルダを返す
+        if (status == null) {
+            return PLACEHOLDER;
+        }
+        // enum の名前をそのまま返す（外部由来の文字列ではないので整形は要らない）
+        return status.name();
+    }
+
+    /**
      * 端末へ出す文字列を 1 行へ整形し、制御文字を取り除く。
      *
      * <p>順序が肝で、必ず「空白の圧縮 → 制御文字の除去」で行う。逆にすると改行・タブは
@@ -320,18 +320,10 @@ final class CliFormat {
      * もう片方のテストが緑のまま通ってしまう。
      */
     static String sanitizeOneLine(String text) {
-        // null はそのまま返す（stripControlChars と同じ null 扱いに揃える）。
-        // ここを落とすと、runId を欠いた state ファイル 1 件で list の描画ループが
-        // NPE で止まり、残りの正常な記録まで表示されなくなる — このクラスが
-        // instant / duration で守っている「壊れた 1 件で一覧を巻き込まない」
-        // fail-safe（§9）と正反対になる
-        if (text == null) {
-            return null;
-        }
-        // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
-        String oneLine = WHITESPACE_PATTERN.matcher(text).replaceAll(" ").trim();
-        // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
-        return stripControlChars(oneLine);
+        // 実装は text パッケージの共有ユーティリティへ委譲する。state パッケージの
+        // ログ出力も同じ規則を通す必要があり（既定の ConsoleHandler は CLI と同じ
+        // stderr へ出す）、そちらから cli を参照させると層が逆転するため
+        return SafeText.oneLine(text);
     }
 
     /**
@@ -369,11 +361,7 @@ final class CliFormat {
      * 直前のサニタイズとして使う（§9: 出力もエスケープする）。null は null のまま返す。
      */
     static String stripControlChars(String value) {
-        // null はそのまま返す（呼び出し元の null 扱いを変えないため）
-        if (value == null) {
-            return null;
-        }
-        // 定数パターンに一致する制御文字をすべて削除した文字列を返す
-        return CONTROL_CHARS_PATTERN.matcher(value).replaceAll("");
+        // 実装は text パッケージの共有ユーティリティへ委譲する（唯一の実装を保つ）
+        return SafeText.stripControlChars(value);
     }
 }

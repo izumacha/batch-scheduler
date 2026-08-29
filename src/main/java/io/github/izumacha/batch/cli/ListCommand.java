@@ -95,7 +95,7 @@ public final class ListCommand implements Callable<Integer> {
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
                     CliFormat.runId(run.runId()),
                     CliFormat.shortMessage(run.batchName(), 20),
-                    run.status(),
+                    CliFormat.status(run.status()),
                     CliFormat.instant(run.startedAt()),
                     CliFormat.duration(run.duration()));
         }

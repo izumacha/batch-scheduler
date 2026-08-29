@@ -35,6 +35,11 @@ The code is organized into five packages, each with a single responsibility:
   `fsync` on the write path — see "Record durability" below).
 - `cli` — the picocli-based command-line interface (`Main`, `BatchCli`, and the
   `run` / `validate` / `list` sub-commands).
+- `text` — `SafeText`, the single implementation of "neutralize untrusted text
+  before it reaches a terminal". It sits in its own package because both `cli`
+  (table cells and error lines) and `state` (the warnings naming files it
+  skipped, which the JDK's default `ConsoleHandler` sends to the same stderr)
+  must apply the same rule, and `state` must not depend on `cli`.
 
 ### Data flow
 

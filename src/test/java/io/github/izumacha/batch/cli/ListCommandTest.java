@@ -244,10 +244,11 @@ class ListCommandTest {
     @Test
     void listKeepsGoingWhenARecordHasNoRunId(@TempDir Path stateDir) throws Exception {
         // runId フィールドを持たない記録を直接置く（保存経路では作れない形）
+        // runId に加えて status も欠いた記録にする。どちらの列も「値が無い」ことを
+        // 表す表記はこのクラスで 1 つ（"-"）に揃っている必要がある
         String json = """
                 {
                   "batchName" : "etl",
-                  "status" : "SUCCEEDED",
                   "startedAt" : "2026-01-03T03:04:05Z",
                   "finishedAt" : "2026-01-03T03:04:06Z",
                   "jobResults" : [ ]
@@ -270,9 +271,9 @@ class ListCommandTest {
                 .findFirst()
                 .orElse(null);
         assertTrue(brokenRow != null, out);
-        // "null" ではなくプレースホルダで表示される（"null" という ID の実行と
-        // 見分けが付かなくなるのを防ぐ）
-        assertFalse(out.contains("null "), out);
+        // runId・status とも "null" ではなくプレースホルダで表示される
+        // （"null" という ID の実行と見分けが付かなくなるのを防ぐ）
+        assertFalse(out.contains("null"), out);
         // 例外がそのまま漏れていない
         assertFalse(out.contains("Cannot invoke"), out);
     }
