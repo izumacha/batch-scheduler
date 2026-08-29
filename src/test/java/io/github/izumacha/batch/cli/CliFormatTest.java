@@ -2,6 +2,7 @@ package io.github.izumacha.batch.cli;
 
 // アサーション（assertEquals 等）を静的インポートする
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 // 正規表現マッチのアサーションに使う
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -194,6 +195,26 @@ class CliFormatTest {
         assertTrue(rendered.contains("failed to save execution result"), rendered);
         assertTrue(rendered.contains("could not be confirmed durable"), rendered);
         assertTrue(rendered.contains("No space left on device"), rendered);
+    }
+
+    /**
+     * 原因の連鎖が上限より深い場合に、打ち切ったことが出力に残ることを確認する。
+     * 黙って落とすと、このメソッドが直したはずの「根本原因が消えているのに、
+     * 消えたことも分からない」状態に戻る。
+     */
+    @Test
+    void safeMessageWithCause_marksThatItTruncatedALongChain() {
+        // 上限（5 段）を超える深さの連鎖を作る
+        Throwable deepest = new IllegalStateException("root");
+        Throwable current = deepest;
+        for (int i = 0; i < 8; i++) {
+            current = new IllegalStateException("layer" + i, current);
+        }
+        // 打ち切った事実が出力に含まれる
+        String rendered = CliFormat.safeMessageWithCause(current);
+        assertTrue(rendered.contains("further causes omitted"), rendered);
+        // 一番深い原因は出ていない（＝実際に打ち切られている）
+        assertFalse(rendered.contains("root"), rendered);
     }
 
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */

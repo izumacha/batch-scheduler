@@ -564,6 +564,9 @@ class DurabilityTest {
         assertDoesNotThrow(() -> durability.sync(link, Durability.Step.PUBLISHED_RECORD_CONTENT));
         // 同期できなかったことは警告として残る
         assertEquals(1, warnings().size());
+        // 内部の目印クラス（OpenFailure）の名前ではなく、実際の原因が出ている。
+        // 段階ごとに 1 回きりの警告に内部の型名を混ぜても運用者の役には立たない
+        assertFalse(warnings().get(0).contains("OpenFailure"), warnings().get(0));
         // 完了ログは出ない＝リンク先を開いて fsync してはいない。ここが追従すると、
         // state ディレクトリの外のファイルを書き込みモードで開くことになる
         assertEquals(List.of(), completedSteps());

@@ -490,9 +490,14 @@ final class Durability {
         if (!claimWarningBudget(step)) {
             return;
         }
+        // OpenFailure は「開く段階で失敗した」ことを内部で伝えるためだけの目印で、
+        // その toString() は包んだ原因を繰り返すだけ（IOException(Throwable) は
+        // 原因の toString() を detailMessage に採用する）。段階ごとに 1 回きりの
+        // 警告に内部クラス名を混ぜても運用者の役に立たないので、中身へ置き換える
+        Throwable shown = cause instanceof OpenFailure ? cause.getCause() : cause;
         // 何が確定できなかったのか、省略すると何が起こりうるのかをまとめて記録する
         LOGGER.warning("Durability step " + step.name() + " skipped for '" + path + "': "
-                + reason + " (" + cause + "); " + step.consequence
+                + reason + " (" + shown + "); " + step.consequence
                 + ". This warning is reported once per step, per store.");
     }
 }

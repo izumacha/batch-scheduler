@@ -162,6 +162,11 @@ final class CliFormat {
             // 次の段（さらに内側の原因）へ進む
             cause = cause.getCause();
         }
+        // 上限で打ち切った場合は、その事実を残す。黙って落とすと、このメソッドが直した
+        // はずの「根本原因が消えているのに、消えたことも分からない」状態に戻ってしまう
+        if (cause != null) {
+            rendered.append(" (...further causes omitted)");
+        }
         // 1 行にまとめた文字列を返す
         return rendered.toString();
     }

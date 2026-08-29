@@ -319,7 +319,13 @@ malicious resource exhaustion and against tampering with the state directory:
   could not be attempted rather than that a write was lost, and the bytes were
   written and the stream closed before it ran, so it warns even on a
   record-content step. Failing a save because an antivirus held the file open
-  would be the same inversion in the other direction. That rule covers the non-atomic fallback too:
+  would be the same inversion in the other direction. That rule covers the non-atomic fallback too (which, on the default
+  filesystem provider, `save()` cannot currently reach: the temp file and the
+  target sit in the same directory, so `rename()` never fails with `EXDEV` and
+  `ATOMIC_MOVE` therefore never degrades. The fallback branch predates this
+  change and is kept consistent rather than left as the one publish path
+  without durability, so that it does not become a hole the moment it becomes
+  reachable):
   when `Files.move` copies rather than renames, the destination is a freshly
   allocated file whose bytes the earlier temp-file flush never touched, so its
   re-sync is a record-content flush like any other and fails the save the same

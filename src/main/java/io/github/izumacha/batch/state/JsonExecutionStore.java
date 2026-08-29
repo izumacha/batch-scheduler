@@ -272,15 +272,24 @@ public final class JsonExecutionStore implements ExecutionStore {
                 if (publishedWithoutAtomicity) {
                     syncPublishedRecord(target);
                 }
-            } finally {
-                // 上が失敗しても改名だけは確定させる。その場合の報告は「記録は公開済みだが
+            } catch (IOException publishFailed) {
+                // 失敗しても改名だけは確定させる。その場合の報告は「記録は公開済みだが
                 // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく。
-                // この同期はディレクトリ対象なので、同期の失敗そのものでは例外にならない
-                // （Durability の shouldFailTheSave 参照）＝元の例外を隠さない。
-                // 例外を投げうるのはログハンドラが投げた場合だけで、それはこのリポジトリの
-                // どのログ呼び出しにも等しく当てはまる前提であり、ここ固有の話ではない
-                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+                // finally ではなく catch で書いているのは、finally が例外を投げると
+                // 元の失敗が黙って差し替わるため。今はディレクトリ対象の同期が投げない
+                // ことで成り立っているが、その保証は別クラスの分類に依存していて
+                // ここからは見えない。取りこぼしても分かるよう addSuppressed に寄せる
+                try {
+                    durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+                } catch (IOException renameFailed) {
+                    // 改名の確定にも失敗したら、運用者に伝えるべき主因は公開側なので添える
+                    publishFailed.addSuppressed(renameFailed);
+                }
+                // 公開側の失敗をそのまま伝える（案内の文面はこちらが持っている）
+                throw publishFailed;
             }
+            // 検証を通ってはじめて改名（ディレクトリエントリ）をディスクへ確定させる
+            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
