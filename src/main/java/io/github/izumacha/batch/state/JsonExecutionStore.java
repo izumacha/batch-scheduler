@@ -572,11 +572,21 @@ public final class JsonExecutionStore implements ExecutionStore {
      * the record when the non-atomic fallback published it, and committing the
      * rename.
      *
-     * <p>The rename sync is deliberately last and deliberately reached on both
-     * paths. Committing it before the symlink check would persist a directory
-     * entry the check is about to reject; skipping it when the re-flush fails
-     * would leave the entry uncommitted for a record whose failure message
-     * tells the operator it may still be readable.
+     * <p>The rename sync is deliberately last, and deliberately conditional.
+     * Committing it before the symlink check would persist a directory entry
+     * the check is about to reject. Committing it when the record's contents
+     * were never confirmed durable would build the worse of the two crash
+     * outcomes on purpose -- a durable entry pointing at unflushed bytes,
+     * which comes back garbled, is skipped by {@code tryRead}, and so vanishes
+     * from {@code list} while {@code --rerun-failed} reports it missing. So it
+     * runs only when the contents are known durable, and on the non-atomic
+     * fallback that knowledge comes from the re-flush of the published file
+     * alone: the temp file is a different inode that has already been
+     * unlinked, so its flush says nothing about the bytes now on disk.
+     *
+     * <p>Skipping the rename does not skip the report. A failed re-flush is
+     * still thrown, because the operator needs to know the kernel reported a
+     * write error for a record that is nonetheless visible.
      *
      * <p>{@code expectedRealBase} rather than {@code baseDir} is synced because
      * the check just established that {@code target} really is inside it;

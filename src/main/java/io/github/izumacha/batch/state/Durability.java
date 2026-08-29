@@ -75,6 +75,18 @@ import java.util.logging.Logger;
  * nor {@code WARNING} is one whose flush failed and failed the save -- the
  * absence is the signal, not evidence that the flush was fine.
  *
+ * <p>One step has a third outcome that this class cannot report, because the
+ * decision is not made here: {@link Step#RECORD_RENAME} is <em>withheld</em>
+ * by {@link JsonExecutionStore#commitPublishedRecord} when the record's
+ * contents were never confirmed durable, so committing the entry would leave
+ * it pointing at unflushed bytes. That produces neither a {@code FINE} nor a
+ * {@code WARNING} on this logger; the note explaining it is logged at
+ * {@code FINE} by {@code JsonExecutionStore}. The two loggers share the
+ * {@code io.github.izumacha.batch.state} prefix, so enable {@code FINE} on the
+ * package rather than on this class to see the whole picture -- otherwise a
+ * withheld rename is indistinguishable from a failed one, and the two call for
+ * opposite responses (re-run the batch versus investigate the disk).
+ *
  * <p><b>Platform limits.</b> Directory syncing needs to open a directory as a
  * channel, which POSIX allows and Windows does not; there the sync is skipped
  * and the rename's durability is left to the filesystem. macOS
@@ -518,8 +530,12 @@ final class Durability {
                 attributes = Files.readAttributes(
                         path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
             } catch (IOException | RuntimeException statFailed) {
-                // 種別が分からないだけなので、下の open に本当の失敗を語らせる
-                attributes = null;
+                // 種別が分からないだけ。attributes は代入が完了していないので null のまま。
+                // ここで拒否せず、下の open に本当の失敗（NoSuchFile / AccessDenied 等）を
+                // 語らせる — 自前の文面で上書きすると、段階につき 1 回きりの警告が
+                // 実際の原因ではなく「パイプを探せ」になってしまう
+                LOGGER.fine(() -> "could not determine the file type of '" + path
+                        + "'; letting the open report the reason");
             }
             if (attributes != null && attributes.isOther()) {
                 throw new IOException("refusing to sync '" + path

@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -600,21 +601,27 @@ class DurabilityTest {
     }
 
     @Test
-    void aFallbackPublishWhoseFlushFailsStillReportsTheFailure(@TempDir Path dir) throws IOException {
-        // 公開先を用意し、そのディレクトリの権限を落として同期を失敗させる…のではなく、
-        // 中身が未確定でも例外の伝播が止まらないことを、公開側の失敗を作って確かめる。
-        // 公開先が存在しなければ PUBLISHED_RECORD_CONTENT は open に失敗して警告どまり
-        // （＝伝播しない）になるので、ここで検証するのは「未確定でも return で
-        // 握り潰さない」構造の方: 未確定かつ失敗なしなら例外は出ない
-        Path missing = dir.resolve("run1.json");
-        JsonExecutionStore store = new JsonExecutionStore(dir);
-        // 公開先が無いので同期は警告どまり。改名も抑止されるが、例外にはならない
-        assertDoesNotThrow(() -> store.commitPublishedRecord(missing, dir, true, true));
-        // 未確定なので改名は確定していない
-        assertFalse(completedSteps().contains(Durability.Step.RECORD_RENAME), completedSteps().toString());
-        // 握り潰しではなく警告として残っている
-        assertTrue(warnings().stream().anyMatch(w -> w.contains("PUBLISHED_RECORD_CONTENT")),
-                warnings().toString());
+    void aFallbackPublishWhoseFlushFailsStillReportsTheFailure() {
+        // procfs のファイルは通常ファイルとして開けるが fsync は EINVAL で失敗する。
+        // 「開けたのに書き戻しに失敗した」＝保存を失敗させるべき側の失敗を、モックを
+        // 使わず実物で再現できる数少ない経路（存在しないファイルや FIFO では open の
+        // 段階で落ちてしまい、警告どまりになってこの分岐を踏めない）
+        Path published = Path.of("/proc/self/comm");
+        assumeTrue(Files.isRegularFile(published), "procfs が無いので書き戻しの失敗を再現できない");
+        // 公開先はベース + ファイル名で組み立てられるので、そうなる形で渡す
+        JsonExecutionStore store = new JsonExecutionStore(published.getParent());
+        // 非アトミック公開の中身の同期が失敗したら、保存は失敗として報告される。
+        // ここを握り潰すと、カーネルが書き込みエラーを報告した記録に対して
+        // 「State saved to ...」と出して終了コード 0 を返してしまう
+        IOException reported = assertThrows(IOException.class, () ->
+                store.commitPublishedRecord(published, published.getParent(), true, true));
+        // 文面は「公開はされたが耐久性を確認できなかった」で、原因も添えられている
+        assertTrue(reported.getMessage().contains("could not be confirmed durable"),
+                reported.getMessage());
+        assertNotNull(reported.getCause());
+        // 中身が未確定なので改名は確定させていない
+        assertFalse(completedSteps().contains(Durability.Step.RECORD_RENAME),
+                completedSteps().toString());
     }
 
     @Test
