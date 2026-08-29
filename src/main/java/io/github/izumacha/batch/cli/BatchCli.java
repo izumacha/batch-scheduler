@@ -91,7 +91,7 @@ public final class BatchCli implements Callable<Integer> {
             // メッセージを持たない例外（例: new IllegalStateException()）だと "error: null" と
             // 表示されて診断価値が無いため、その場合は例外クラス名を代わりに表示する
             // （このフォールバックは CliFormat.safeMessage に共通化されている。§6 DRY）
-            String message = CliFormat.safeMessage(ex);
+            String message = CliFormat.safeMessageWithCause(ex);
             // 1 行のサニタイズ済みメッセージだけを標準エラーへ出力する
             System.err.println("error: " + message);
             // 個々のコマンドが自前で catch していた場合と同じ EXIT_CONFIG を返す

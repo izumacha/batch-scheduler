@@ -165,12 +165,15 @@ final class CliFormat {
         // NoSuchFile / AccessDenied はオフェンディングパスをそのまま本文にする）。
         // 呼び出し側で掛け忘れると生の ESC / BEL が端末へ届くので、名前が約束している
         // 「安全なメッセージ」をこのメソッド自身が満たすようにしておく
-        String message = SafeText.bounded(SafeText.oneLine(t.getMessage()), MAX_MESSAGE_CHARS);
+        // null は forDisplay に渡さない — あちらは表示する値として "null" という
+        // 文字列を描くので、下のクラス名へのフォールバックが効かなくなる
+        String message = t.getMessage() == null
+                ? "" : SafeText.forDisplay(t.getMessage(), MAX_MESSAGE_CHARS);
         // 整形した結果が空なら（メッセージが無い／空白のみ／整形すると消える文字だけ）
         // クラスの単純名へ落とす。判定を整形の「前」に置くと、非 null だが整形後に
         // 空になるメッセージがフォールバックを素通りし、"error: " だけの行になる —
         // 診断価値の無い表示を防ぐという、このメソッドが存在する理由そのものが消える
-        if (message == null || message.isEmpty()) {
+        if (message.isEmpty()) {
             return t.getClass().getSimpleName();
         }
         return message;
@@ -289,7 +292,7 @@ final class CliFormat {
      */
     private static void appendDetail(StringBuilder rendered, String head, String rawDetail) {
         // 断片ごとに長さを切る（末尾ではなく中略。理由は MAX_MESSAGE_CHARS を参照）
-        String detail = SafeText.bounded(SafeText.oneLine(rawDetail), MAX_MESSAGE_CHARS);
+        String detail = SafeText.forDisplay(rawDetail, MAX_MESSAGE_CHARS);
         // 比較は両方とも整形した形で行う。head は safeMessage が整形済みで返す一方
         // detail は生の toString() なので、片方だけを整形した状態で比べると、
         // 原因のメッセージに前後の空白や改行が含まれるだけで一致しなくなり、
@@ -337,7 +340,7 @@ final class CliFormat {
         // 改変された state ファイルから来うる）が整形後に空文字となり、
         // 36 桁の空白として描画される。運用者には「表示バグ」と区別が付かず、
         // --rerun-failed へ貼るものも得られない — このメソッドが防ぐはずの行き止まり
-        String rendered = SafeText.bounded(SafeText.oneLine(runId), MAX_RUN_ID_CHARS);
+        String rendered = SafeText.forDisplay(runId, MAX_RUN_ID_CHARS);
         if (rendered.isEmpty()) {
             return PLACEHOLDER;
         }

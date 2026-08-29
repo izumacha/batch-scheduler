@@ -183,6 +183,12 @@ class CliFormatTest {
         // 空白セルになっていた
         assertEquals("-", CliFormat.runId("\u2060 \u2060"));
         assertEquals("-", CliFormat.runId("\u0007\t\u0007"));
+        // Unicode の空白（全角空白・NBSP など）だけの値も同じ。Java の \s は ASCII
+        // しか拾わず、制御文字のパターンもカテゴリ Z を拾わないため、圧縮側で
+        // 明示的に \p{Z} を含めないと「空ではない空白」として素通りする
+        assertEquals("-", CliFormat.runId("\u3000\u3000\u3000"));
+        assertEquals("-", CliFormat.runId("\u00A0"));
+        assertEquals("-", CliFormat.runId("\u2003\u1680"));
         // 値があるときは 1 行へ整形して返す（切り詰めはしない）
         assertEquals("run1 bbb", CliFormat.runId("run1\nbbb"));
     }
@@ -635,6 +641,19 @@ class CliFormatTest {
     void safeMessage_messageOfOnlyFormatCharsAndSpaces_fallsBackToClassName() {
         assertEquals("IllegalStateException",
                 CliFormat.safeMessage(new IllegalStateException("\u2060 \u2060")));
+    }
+
+    /**
+     * 表のセル向けの切り詰めでも、Unicode の空白だけの値が空白セルにならないことを
+     * 確認する。以前は isBlank() で弾いていたので通っていた経路で、圧縮側が
+     * ASCII の空白しか見ないと退行する。
+     */
+    @Test
+    void shortMessage_unicodeSpacesOnly_returnsEmpty() {
+        assertEquals("", CliFormat.shortMessage("\u3000\u3000", 20));
+        assertEquals("", CliFormat.shortMessage("\u2003", 20));
+        // 必須の列ではプレースホルダになる
+        assertEquals("-", CliFormat.requiredCell("\u3000\u3000", 20));
     }
 
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */

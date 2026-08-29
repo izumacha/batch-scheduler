@@ -91,6 +91,33 @@ class BatchCliTest {
                 "stack trace must not leak to stderr, got: " + stderr);
     }
 
+    /**
+     * 最終防波堤のハンドラでも原因が併記されることを確認する。
+     *
+     * <p>ここへ来るのは個々のコマンドが捕まえ損ねた例外で、その中には
+     * {@code new UncheckedIOException("failed to list execution results under ...", e)} の
+     * ように、外側のメッセージが「何をしようとして失敗したか」しか語らないものがある。
+     * 原因を落とすと、権限不足なのか消えたのか実 I/O エラーなのかが分からなくなる。
+     */
+    @Test
+    void executionExceptionHandlerAppendsTheCause() throws Exception {
+        BatchCli.SanitizingExecutionExceptionHandler handler =
+                new BatchCli.SanitizingExecutionExceptionHandler();
+        // 外側は「何をしようとしたか」だけ、理由は原因側にしかない形
+        RuntimeException wrapped = new java.io.UncheckedIOException(
+                "failed to list execution results under .batch-state",
+                new java.nio.file.AccessDeniedException(".batch-state"));
+
+        handler.handleExecutionException(wrapped, null, null);
+
+        String stderr = capturedErr.toString();
+        // 外側のメッセージだけでなく、理由（原因）も 1 行に含まれる
+        assertTrue(stderr.contains("failed to list execution results"), stderr);
+        assertTrue(stderr.contains("AccessDenied"), stderr);
+        // スタックトレースは出さない（§9）
+        assertFalse(stderr.contains("\tat "), stderr);
+    }
+
     // メッセージを持たない例外（getMessage() が null）でも「error: null」ではなく
     // 例外クラス名が表示され、最低限の診断情報が残ることを検証する
     @Test

@@ -91,7 +91,9 @@ public final class ListCommand implements Callable<Integer> {
             // SafeText.oneLine（空白を圧縮してから制御文字を除去）を通す。
             // stripControlChars だけを掛けていた頃は、改行が「削除」されて
             // "run1\nbbb" が "run1bbb" という実在しない ID に見え、それを
-            // --rerun-failed に貼ると「見つからない」になっていた（切り詰めはしない）
+            // --rerun-failed に貼ると「見つからない」になっていた。長さも 256 文字で中略する
+            // （改変された記録は 16MiB まで許されるため。生成される ID は 22 文字なので
+            // 正規の値はそのまま貼れる）
             System.out.printf("%-36s  %-20s  %-9s  %-19s  %10s%n",
                     CliFormat.runId(run.runId()),
                     CliFormat.requiredCell(run.batchName(), 20),

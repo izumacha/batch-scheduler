@@ -1,6 +1,5 @@
 package io.github.izumacha.batch.cli;
 
-
 import io.github.izumacha.batch.config.BatchConfigLoader;
 import io.github.izumacha.batch.config.ConfigException;
 import io.github.izumacha.batch.config.ValidationException;

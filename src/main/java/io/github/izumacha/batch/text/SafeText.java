@@ -42,7 +42,7 @@ public final class SafeText {
     //     1 記録 1 行という表の前提を壊す。
     // ここから外すと、CONTROL_CHARS は Zl/Zp を拾わないので後者は素通りに戻る
     private static final Pattern WHITESPACE =
-            Pattern.compile("[\\s\\u0085\\u2028\\u2029]+");
+            Pattern.compile("[\\s\\p{Z}\\u0085]+");
 
     // 中略したことを示すマーカー。ASCII なのは、LANG 未設定の C/POSIX ロケールでは
     // stdout が US-ASCII になり「…」(U+2026) が "?" へ潰れて壊れた出力と区別が
@@ -74,8 +74,30 @@ public final class SafeText {
      * @return 1 行に整形し、制御文字を除き、長さを切り詰めた文字列
      */
     public static String forLog(Object value) {
+        // ログ用の上限で表示用の整形を行う
+        return forDisplay(value, MAX_LOG_CHARS);
+    }
+
+    /**
+     * 端末へ出す値を、無害化したうえで指定した長さに収めて返す。
+     *
+     * <p>{@link #oneLine(String)} と {@link #bounded(String, int)} を正しい順序で
+     * 呼ぶ組を 1 か所に持つためのもの。上限が場所ごとに違う（エラー行・run ID・
+     * ログ行）ので、値と上限だけを受け取る。書き写す形にしていると、新しい表示箇所で
+     * 1 段抜けたときに生の ESC/BEL や数メガバイトの 1 行が端末へ届き、
+     * しかもそれを検出する仕組みが無い。
+     *
+     * <p>末尾を落とす切り詰め（表のセル）は形が違うので
+     * {@link #truncate(String, int)} を別に持つ。中略と切り詰めのどちらが正しいかは
+     * 「続きに意味があるか」で決まり、機械的には選べない。
+     *
+     * @param value 表示する値（{@code null} 可。{@code "null"} として描画される）
+     * @param max 戻り値の最大文字数
+     * @return 1 行に整形し、制御文字を除き、中略して長さを収めた文字列
+     */
+    public static String forDisplay(Object value, int max) {
         // 文字列化してから、1 行への整形と長さの上限を順に適用する
-        return bounded(oneLine(String.valueOf(value)), MAX_LOG_CHARS);
+        return bounded(oneLine(String.valueOf(value)), max);
     }
 
     /**
@@ -205,7 +227,7 @@ public final class SafeText {
         // （runId / requiredCell / safeMessage）が空でないと見なして通し、
         // 36 桁の空白セルや "error: " だけの行になる — どれも、それらの判定が
         // 防ぐために存在する行き止まりそのもの
-        return WHITESPACE.matcher(stripped).replaceAll(" ").trim();
+        return WHITESPACE.matcher(stripped).replaceAll(" ").strip();
     }
 
     /**
