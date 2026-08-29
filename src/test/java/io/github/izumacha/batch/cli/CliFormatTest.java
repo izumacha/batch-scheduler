@@ -278,6 +278,23 @@ class CliFormatTest {
         assertFalse(rendered.contains("\t"), rendered);
     }
 
+    /**
+     * 重複の判定が「完全一致」で行われ、部分一致では行われないことを確認する。
+     * 外側が内側の文言を引用したうえで説明を足す包み方をすると、内側の原因は
+     * 外側の部分文字列になる。含有で判定していると別物である内側が黙って消え、
+     * しかも打ち切りの印も付かないため「根本原因が消えたことも分からない」状態に戻る。
+     */
+    @Test
+    void safeMessageWithCause_dedupesByExactMatchNotContainment() {
+        // 内側の文言をそのまま含み、さらに説明を足したメッセージで包む
+        Exception inner = new java.io.IOException("could not sync the file");
+        Exception outer = new java.io.UncheckedIOException(
+                new java.io.IOException("could not sync the file at /srv/state", inner));
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        // 内側の原因が「部分文字列だから」という理由で落とされていない
+        assertTrue(rendered.contains("(java.io.IOException: could not sync the file)"), rendered);
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {

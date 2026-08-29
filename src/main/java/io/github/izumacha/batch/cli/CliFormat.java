@@ -5,6 +5,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * CLI コマンドが共通して使う null 安全な整形ユーティリティメソッド群。
@@ -143,9 +145,15 @@ final class CliFormat {
      */
     static String safeMessageWithCause(Throwable t) {
         // 外側の例外のメッセージ（無ければクラス名）から組み立てを始める
-        StringBuilder rendered = new StringBuilder(safeMessage(t));
+        String head = safeMessage(t);
+        StringBuilder rendered = new StringBuilder(head);
+        // 既に出した詳細を覚えておき、同じものを繰り返さないための集合。
+        // 冒頭のメッセージも「出したもの」として最初から入れておく（メッセージを渡さずに
+        // 包んだ例外はここが原因の toString() と完全一致するため）
+        Set<String> emitted = new HashSet<>();
+        emitted.add(head);
         // 外側に添えられた診断（addSuppressed）も併記する
-        appendSuppressed(rendered, t);
+        appendSuppressed(rendered, emitted, t);
         // 原因を根元までたどって併記する。1 段だけだと、途中で説明を足して包み直した
         // 経路（保存の「記録は公開済みだが耐久性を確認できなかった」がこれ）で
         // 肝心の理由（ENOSPC 等）が落ちる。説明を足した経路ほど理由が消える逆転になる
@@ -153,9 +161,9 @@ final class CliFormat {
         // 万一 getCause() が循環していても止まるよう、たどる深さに上限を設ける
         for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
             // この段の表現（クラス名とメッセージ）を併記する
-            appendDetail(rendered, cause.toString());
+            appendDetail(rendered, emitted, cause.toString());
             // その段に添えられた診断も併記する
-            appendSuppressed(rendered, cause);
+            appendSuppressed(rendered, emitted, cause);
             // 次の段（さらに内側の原因）へ進む
             cause = cause.getCause();
         }
@@ -164,16 +172,11 @@ final class CliFormat {
         if (cause != null) {
             rendered.append(" (...further causes omitted)");
         }
-        // 改行や連続する空白を 1 つのスペースに圧縮してから制御文字を落とす。順序が逆だと
-        // 改行・タブは \p{Cntrl} に含まれるため「削除」され、前後の単語が
-        // "line onefile not found" のように繋がって別語に化ける（shortMessage が
-        // 圧縮してから除去しているのと同じ理由・同じ順序に揃えている）
-        String oneLine = rendered.toString().replaceAll("\\s+", " ").trim();
-        // 端末制御文字を取り除いてから返す。原因のメッセージにはパス（NoSuchFile /
-        // AccessDenied はオフェンディングパスをそのままメッセージにする）が生で入り、
-        // それが端末へ出る。このクラスは stripControlChars を「唯一のチョークポイント」と
-        // 位置づけているので、端末へ向かう新しい経路もそこを通す
-        return stripControlChars(oneLine);
+        // 1 行へ整形し、端末制御文字を取り除いてから返す。原因のメッセージにはパス
+        // （NoSuchFile / AccessDenied はオフェンディングパスをそのままメッセージにする）が
+        // 生で入り、それが端末へ出る。長さは切り詰めない — 表のセルと違って桁を揃える
+        // 必要が無く、このメソッドが存在する理由そのものである根本原因が末尾にあるため
+        return sanitizeOneLine(rendered.toString());
     }
 
     /**
@@ -185,11 +188,11 @@ final class CliFormat {
      * 判断する材料はそちらにしかない。ここで描画しなければ、集めているだけで
      * 誰にも届かない情報になる。
      */
-    private static void appendSuppressed(StringBuilder rendered, Throwable throwable) {
+    private static void appendSuppressed(StringBuilder rendered, Set<String> emitted, Throwable throwable) {
         // 添えられた失敗を順に併記する（無ければ何もしない）
         for (Throwable suppressed : throwable.getSuppressed()) {
             // 主因と区別できるよう "also:" を付ける
-            appendDetail(rendered, "also: " + suppressed);
+            appendDetail(rendered, emitted, "also: " + suppressed);
         }
     }
 
@@ -199,12 +202,37 @@ final class CliFormat {
      * <p>メッセージを渡さずに包んだ例外（{@code new UncheckedIOException(cause)}）は
      * {@code Throwable} が原因の {@code toString()} をそのまま detailMessage に
      * 採用するため、無条件に足すとまったく同じ文が 2 回並ぶ。
+     *
+     * <p>判定は「これまでに出した詳細と完全一致するか」で行い、組み立て済みの文字列に
+     * 部分文字列として含まれるかでは判定しない。含有で判定すると、原因の文言を引用した
+     * うえで説明を足す包み方（{@code "... could not sync the file at /x"} が
+     * {@code "... could not sync the file"} を含む）をしたときに、別物である内側の
+     * 原因が黙って消える。しかも打ち切りの印も付かないので、このメソッドが直したはずの
+     * 「根本原因が消えているのに、消えたことも分からない」状態がそのまま戻る。
      */
-    private static void appendDetail(StringBuilder rendered, String detail) {
-        // 既に出ている文言は繰り返さない
-        if (rendered.indexOf(detail) < 0) {
+    private static void appendDetail(StringBuilder rendered, Set<String> emitted, String detail) {
+        // まだ出していない詳細のときだけ追記する（add は初出なら true を返す）
+        if (emitted.add(detail)) {
             rendered.append(" (").append(detail).append(')');
         }
+    }
+
+    /**
+     * 端末へ出す文字列を 1 行へ整形し、制御文字を取り除く。
+     *
+     * <p>順序が肝で、必ず「空白の圧縮 → 制御文字の除去」で行う。逆にすると改行・タブは
+     * {@code \p{Cntrl}} に含まれるため「削除」され、前後の単語が
+     * {@code "line onefile not found"} のように繋がって別語へ化ける。
+     *
+     * <p>この 2 手をメソッドに切り出しているのは、順序の不変条件を 1 か所へ集めるため
+     * （§6 DRY）。両方の呼び出し元に書き写すと、片方だけ順序を入れ替えても
+     * もう片方のテストが緑のまま通ってしまう。
+     */
+    private static String sanitizeOneLine(String text) {
+        // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
+        String oneLine = text.replaceAll("\\s+", " ").trim();
+        // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
+        return stripControlChars(oneLine);
     }
 
     /**
@@ -220,10 +248,8 @@ final class CliFormat {
         if (message == null || message.isBlank()) {
             return "";
         }
-        // 改行や連続する空白を 1 つのスペースに圧縮して 1 行に整形する
-        String oneLine = message.replaceAll("\\s+", " ").trim();
-        // 空白圧縮後に残った ESC・BEL などの制御文字を取り除き、端末への注入を防ぐ
-        oneLine = stripControlChars(oneLine);
+        // 1 行へ整形し、端末制御文字を取り除く（順序の理由は sanitizeOneLine を参照）
+        String oneLine = sanitizeOneLine(message);
         // 最大文字数以内であればそのまま返す
         if (oneLine.length() <= max) {
             return oneLine;
