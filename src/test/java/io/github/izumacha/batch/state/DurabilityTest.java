@@ -19,10 +19,8 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,9 +43,6 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class DurabilityTest {
 
-    // Durability が使うロガー（テスト中だけ FINE まで拾えるように設定を差し替える）
-    private static final Logger DURABILITY_LOGGER = Logger.getLogger(Durability.class.getName());
-
     // 環境がディレクトリを同期できるかを調べるときに借りる段階。ディレクトリを対象に
     // する段階ならどれでもよく、判定で出たログと使った予算は直後に元へ戻すため、
     // どの検査の期待値にも影響しない
@@ -57,61 +52,23 @@ class DurabilityTest {
     private static final List<Path> OTHER_FILE_STORE_CANDIDATES =
             List.of(Path.of("/dev/shm"), Path.of("/run/shm"));
 
-    // このテストが取り付けたハンドラ（後片付けで取り外すために保持する）
-    private Handler handler;
-    // 取り付けたハンドラが記録したログの一覧
-    private List<LogRecord> records;
-    // 差し替える前のログレベル（後片付けで元に戻すために保持する）
-    private Level originalLevel;
-    // 差し替える前の親ロガーへの伝播設定（同上）
-    private boolean originalUseParentHandlers;
+    // Durability のログを捕まえる（取り付けと後片付けは共有ヘルパーが持つ）
+    private LogCapture logs;
     // テストごとに新しく作る同期担当（予算がインスタンス単位なので自然に独立する）
     private Durability durability;
 
     @BeforeEach
     void attachLogCapture() {
-        // 記録先のリストを新しくして、テストごとに独立させる
-        records = new ArrayList<>();
-        // ログを受け取ってリストへ溜めるだけのハンドラを組み立てる
-        handler = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                // 受け取ったログをそのままリストへ追加する
-                records.add(record);
-            }
-
-            @Override
-            public void flush() {
-                // 溜め込むだけなので書き出す先は無い
-            }
-
-            @Override
-            public void close() {
-                // 解放すべき資源を持たない
-            }
-        };
-        // FINE も含めてすべて受け取るようハンドラ側のしきい値を下げる
-        handler.setLevel(Level.ALL);
-        // 元のログレベルと伝播設定を控えておく（後片付けで戻すため）
-        originalLevel = DURABILITY_LOGGER.getLevel();
-        originalUseParentHandlers = DURABILITY_LOGGER.getUseParentHandlers();
-        // ロガー側のしきい値も下げて FINE のログが捨てられないようにする
-        DURABILITY_LOGGER.setLevel(Level.ALL);
-        // 親ロガーへ流さないことで、想定した警告がテスト出力を汚すのを防ぐ
-        DURABILITY_LOGGER.setUseParentHandlers(false);
-        // 組み立てたハンドラを取り付ける
-        DURABILITY_LOGGER.addHandler(handler);
+        // ログの捕捉を開始する（レベル・伝播設定の退避と復元はヘルパーの責務）
+        logs = LogCapture.of(Durability.class);
         // 予算はインスタンスが持つので、新しく作るだけでテストごとに独立する
         durability = new Durability();
     }
 
     @AfterEach
     void detachLogCapture() {
-        // 取り付けたハンドラを外す
-        DURABILITY_LOGGER.removeHandler(handler);
-        // ログレベルと伝播設定を元に戻し、他のテストへ影響を残さない
-        DURABILITY_LOGGER.setLevel(originalLevel);
-        DURABILITY_LOGGER.setUseParentHandlers(originalUseParentHandlers);
+        // 捕捉を終え、ロガーを元の設定へ戻す
+        logs.close();
     }
 
     /** 完了した段階を、記録された順番どおりに取り出す。 */
@@ -119,7 +76,7 @@ class DurabilityTest {
         // 見つけた段階を記録順に積んでいく入れ物を用意する
         List<Durability.Step> steps = new ArrayList<>();
         // 捕まえたログを古い順に 1 件ずつ調べる
-        for (LogRecord record : records) {
+        for (LogRecord record : logs.records()) {
             // 完了ログ以外（警告など）は数えない
             if (!record.getMessage().contains("completed")) {
                 continue;
@@ -146,7 +103,7 @@ class DurabilityTest {
         // 見つけたパスを記録順に積んでいく入れ物を用意する
         List<Path> paths = new ArrayList<>();
         // 捕まえたログを古い順に 1 件ずつ調べる
-        for (LogRecord record : records) {
+        for (LogRecord record : logs.records()) {
             // 完了ログ以外（警告など）は対象にしない
             if (!record.getMessage().contains(" completed for '")) {
                 continue;
@@ -167,7 +124,7 @@ class DurabilityTest {
         // 警告の本文を記録順に集めるための入れ物を用意する
         List<String> messages = new ArrayList<>();
         // 捕まえたログを古い順に 1 件ずつ調べる
-        for (LogRecord record : records) {
+        for (LogRecord record : logs.records()) {
             // WARNING のものだけを対象にする（FINE の完了ログは数えない）
             if (record.getLevel() == Level.WARNING) {
                 // 警告の本文をそのまま積む
@@ -201,7 +158,7 @@ class DurabilityTest {
         // 完了ログが出ていればこの環境でディレクトリを同期できたということ
         boolean supported = completedSteps().contains(PROBE_STEP);
         // 判定のために出したログは、この後の検査が数える対象から取り除く
-        records.clear();
+        logs.clear();
         // 判定結果を返す
         return supported;
     }
@@ -395,7 +352,7 @@ class DurabilityTest {
         assertEquals(afterAtomic, completedSteps());
 
         // 記録を消して次の観測に備える
-        records.clear();
+        logs.clear();
         // コピー→削除で公開された場合は、移動先を同期し直してから改名を確定させる。
         // ここが繋がっていないと、アトミック移動を持たない配備でだけ
         // 「エントリは確定・中身は未確定」の記録が公開される
@@ -576,7 +533,7 @@ class DurabilityTest {
         assertEquals(List.of(Durability.Step.RECORD_RENAME), completedSteps());
 
         // 記録を取り直して、確定できなかった場合を試す
-        records.clear();
+        logs.clear();
         // 中身が未確定なら改名も確定させない。ここで改名だけ確定させると
         // 「エントリは耐久・中身は非耐久」という最悪の組み合わせを自分で作ってしまう
         new JsonExecutionStore(dir).commitPublishedRecord(target, dir, false, false);

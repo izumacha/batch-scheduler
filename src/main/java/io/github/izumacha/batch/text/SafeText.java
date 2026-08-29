@@ -88,8 +88,21 @@ public final class SafeText {
         int budget = max - ELLIPSIS.length();
         int tail = budget / 2;
         int head = budget - tail;
-        // 先頭 + マーカー + 末尾 で組み立てる（全長はちょうど max）
-        return text.substring(0, head) + ELLIPSIS + text.substring(text.length() - tail);
+        // 切る位置がサロゲートペアの途中にならないよう内側へ寄せる。Java の String は
+        // UTF-16 の符号単位で添字を取るので、補助文字（絵文字・CJK 拡張 B など。
+        // ジョブ出力や改変された batchName から実際に入りうる）の真ん中で切ると
+        // 片割れのサロゲートが残る。これは Unicode カテゴリ Cs で、制御文字の除去でも
+        // 落ちないため端末で "?" や U+FFFD になり、ASCII のマーカーをわざわざ選んで
+        // 避けた「壊れた出力に見える」状態をここで作ってしまう
+        if (head > 0 && Character.isHighSurrogate(text.charAt(head - 1))) {
+            head--;
+        }
+        int tailStart = text.length() - tail;
+        if (tailStart < text.length() && Character.isLowSurrogate(text.charAt(tailStart))) {
+            tailStart++;
+        }
+        // 先頭 + マーカー + 末尾 で組み立てる（全長は max 以下）
+        return text.substring(0, head) + ELLIPSIS + text.substring(tailStart);
     }
 
     /**

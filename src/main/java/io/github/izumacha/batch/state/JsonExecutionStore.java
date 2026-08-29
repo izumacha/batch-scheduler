@@ -110,7 +110,8 @@ public final class JsonExecutionStore implements ExecutionStore {
      * パスを丸ごと本文に持つため（それぞれ PATH_MAX まで）、上限が無いと
      * 「この保存先ではこの経路が普通なのか」を調べるために FINE を入れた運用者へ
      * 数キロバイトの 1 行を返すことになる。CLI 側のエラー行を有界にしているのと
-     * 同じ理由（表示経路は 1 つ）。
+     * 同じ理由（表示経路は 1 つ）。既定のしきい値でも出る WARNING の側にこそ効く
+     * 必要があるので、FINE の 1 件だけでなく、例外の表現を載せる全箇所へ掛ける。
      */
     private static final int MAX_LOGGED_DETAIL_CHARS = 500;
 
@@ -319,7 +320,8 @@ public final class JsonExecutionStore implements ExecutionStore {
                 if (cleanupFailed != null) {
                     LOGGER.warning("failed to remove the temporary file '"
                             + SafeText.oneLine(tmp.toString()) + "': "
-                            + SafeText.oneLine(String.valueOf(cleanupFailed))
+                            + SafeText.bounded(SafeText.oneLine(String.valueOf(cleanupFailed)),
+                                    MAX_LOGGED_DETAIL_CHARS)
                             + "; it will be left behind in the state directory");
                 }
             }
@@ -889,7 +891,7 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 見落としを防いでいる
             LOGGER.warning("Skipping execution result file '" + SafeText.oneLine(file.toString())
                     + "': failed to resolve its real path ("
-                    + SafeText.oneLine(e.getMessage()) + ")");
+                    + SafeText.bounded(SafeText.oneLine(e.getMessage()), MAX_LOGGED_DETAIL_CHARS) + ")");
             return Optional.empty();
         }
         // 解決した実体パスの親ディレクトリが、呼び出し開始時に確認した実体ディレクトリ
@@ -947,7 +949,8 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 返す（fail-safe）。クラスの Javadoc が「壊れたファイルは読み飛ばす」と約束しており、
             // 途中書き込みや手動改変で壊れた JSON が 1 件残っていても呼び出し側をクラッシュさせないため。
             LOGGER.warning("Skipping unreadable execution result file '" + SafeText.oneLine(file.toString())
-                    + "': " + SafeText.oneLine(e.getMessage()));
+                    + "': " + SafeText.bounded(SafeText.oneLine(e.getMessage()),
+                            MAX_LOGGED_DETAIL_CHARS));
             return Optional.empty();
         }
     }

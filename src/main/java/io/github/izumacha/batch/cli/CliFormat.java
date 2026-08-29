@@ -51,6 +51,14 @@ final class CliFormat {
     private static final int MAX_SUPPRESSED_PER_LEVEL = 3;
 
     /**
+     * {@code list} の RUN ID 列に載せる最大文字数。生成される runId は
+     * {@code yyyyMMdd-HHmmss-XXXXXX} の 22 文字なので、正規の値には十分な余裕がある。
+     * 上限を置くのは、改変された記録の runId が 16MiB まで許される（記録サイズの
+     * 上限しか効かない）ため。
+     */
+    private static final int MAX_RUN_ID_CHARS = 256;
+
+    /**
      * 打ち切り後に根元を探しに行くときの歩数上限。表示するのは 1 段だけなので
      * 出力量は増えず、循環した連鎖でも必ず止まる。
      */
@@ -318,8 +326,13 @@ final class CliFormat {
      * {@code -.json} という記録が作られることは（生成される runId の形式が
      * {@code yyyyMMdd-HHmmss-XXXXXX} である以上）まず無いこと、の 2 点による。
      *
-     * <p>値がある場合は他の列と同じ {@link SafeText#oneLine(String)} を通す。
-     * runId は state ファイル由来の信頼できない値で、切り詰めはしない。
+     * <p>値がある場合は他の列と同じ {@link SafeText#oneLine(String)} を通したうえで、
+     * {@link #MAX_RUN_ID_CHARS} 文字に中略する。runId は state ファイル由来の
+     * 信頼できない値で、{@code ExecutionResult} は長さを検証しない。記録 1 件の上限は
+     * 16MiB なので、上限が無いと改変された記録 1 件で {@code list} の 1 行が
+     * 数メガバイトになる。生成される runId は {@code yyyyMMdd-HHmmss-XXXXXX} の
+     * 22 文字なので、正規の値がここで切られることはなく、
+     * {@code --rerun-failed} への貼り付けも壊れない。
      */
     static String runId(String runId) {
         // null は先に弾く（整形に渡せないため）
@@ -331,7 +344,7 @@ final class CliFormat {
         // 改変された state ファイルから来うる）が整形後に空文字となり、
         // 36 桁の空白として描画される。運用者には「表示バグ」と区別が付かず、
         // --rerun-failed へ貼るものも得られない — このメソッドが防ぐはずの行き止まり
-        String rendered = SafeText.oneLine(runId);
+        String rendered = SafeText.bounded(SafeText.oneLine(runId), MAX_RUN_ID_CHARS);
         if (rendered.isEmpty()) {
             return PLACEHOLDER;
         }

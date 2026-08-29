@@ -531,6 +531,50 @@ class CliFormatTest {
         assertTrue(rendered.contains("..."), rendered);
     }
 
+    /**
+     * 中略がサロゲートペアの途中で切らないことを確認する。片割れのサロゲートは
+     * Unicode カテゴリ Cs で制御文字の除去でも落ちないため、端末で "?" や U+FFFD に
+     * なり、ASCII のマーカーをわざわざ選んで避けた「壊れた出力に見える」状態を
+     * 自分で作ってしまう。
+     */
+    @Test
+    void bounded_neverSplitsASurrogatePair() {
+        // 補助文字（絵文字）だけを並べ、どこで切ってもペアの境界に当たりうる形にする
+        String emoji = "\uD83D\uDE00";
+        // 切る位置が 1 文字ずつずれるよう、いろいろな上限で試す
+        for (int max = 4; max <= 40; max++) {
+            String bounded = SafeText.bounded(emoji.repeat(50), max);
+            // 片割れのサロゲートが残っていない
+            for (int i = 0; i < bounded.length(); i++) {
+                char c = bounded.charAt(i);
+                if (Character.isHighSurrogate(c)) {
+                    assertTrue(i + 1 < bounded.length()
+                            && Character.isLowSurrogate(bounded.charAt(i + 1)),
+                            "lone high surrogate at " + i + " for max=" + max);
+                } else if (Character.isLowSurrogate(c)) {
+                    assertTrue(i > 0 && Character.isHighSurrogate(bounded.charAt(i - 1)),
+                            "lone low surrogate at " + i + " for max=" + max);
+                }
+            }
+            // 上限は超えない
+            assertTrue(bounded.length() <= max, "max=" + max + " got " + bounded.length());
+        }
+    }
+
+    /**
+     * RUN ID 列にも長さの上限があることを確認する。ExecutionResult は runId の長さを
+     * 検証せず、記録 1 件は 16MiB まで許されるので、上限が無いと改変された記録 1 件で
+     * list の 1 行が数メガバイトになる。
+     */
+    @Test
+    void runId_isBounded() {
+        String rendered = CliFormat.runId("a".repeat(100_000));
+        assertTrue(rendered.length() <= 256, "length was " + rendered.length());
+        assertTrue(rendered.contains("..."), rendered);
+        // 生成される runId（22 文字）はそのまま通る
+        assertEquals("20260102-030405-abcdef", CliFormat.runId("20260102-030405-abcdef"));
+    }
+
     /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
     @Test
     void safeMessageWithCause_withoutCause_returnsMessageOnly() {
