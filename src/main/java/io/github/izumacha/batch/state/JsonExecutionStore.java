@@ -253,7 +253,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // 上記の「読者が半端なファイルを読まない」保証はこの経路には及ばない。ただし
                     // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
                     // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    moveWithoutAtomicity(tmp, target);
                 }
             } finally {
                 // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
@@ -267,8 +267,10 @@ public final class JsonExecutionStore implements ExecutionStore {
             // 先に永続化してしまう。同期先に baseDir ではなく expectedRealBase を使うのは、
             // 「target が確かにこの中にある」ことを直前の検証が示した実体パスだからで、
             // ここで baseDir をもう一度たどると差し替え後のディレクトリを同期しかねない。
-            // 直前の finally が一時ファイルを削除しているため、この 1 回で改名と削除の
-            // 両方のエントリ変更がまとめて確定する
+            // なお、ここに到達する経路では移動が成功しているため直前の finally の
+            // deleteIfExists は何もしておらず、確定するのは改名 1 件だけである
+            // （一時ファイルが実際に残るのは移動が失敗した場合だが、そのときは
+            // IOException が伝播してこの行には来ない）
             Durability.syncDirectory(expectedRealBase, Durability.Step.RECORD_RENAME);
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
@@ -474,6 +476,33 @@ public final class JsonExecutionStore implements ExecutionStore {
         // 絞り込み済みの少数件（limit 件以下）だけを最後に開始日時の降順で並べ替える
         results.sort(ExecutionResults.BY_STARTED_AT_DESC);
         return results;
+    }
+
+    /**
+     * Moves {@code tmp} onto {@code target} without requiring atomicity, then
+     * re-syncs the destination.
+     *
+     * <p>Used only when {@link StandardCopyOption#ATOMIC_MOVE} is unavailable.
+     * That fallback may internally copy-and-delete rather than rename, in
+     * which case {@code target} is a <em>different</em> file than the one
+     * {@link #save} already synced: the synced {@code tmp} gets unlinked and
+     * the destination is left holding fresh pages that have never been
+     * flushed. Syncing only the directory afterwards would then publish a
+     * durable entry pointing at non-durable bytes -- precisely the failure
+     * {@link Durability} exists to prevent. Re-syncing the destination closes
+     * that hole; when the fallback did perform a plain rename it is the same
+     * inode and the extra sync is a harmless no-op.
+     *
+     * <p>Package-private so a test can exercise this branch directly: no
+     * filesystem in the test environment refuses {@code ATOMIC_MOVE}, so the
+     * only other way to reach it would be a fake {@code FileSystemProvider}.
+     * Same rationale as {@link #verifyWroteUnderExpectedBase} below.
+     */
+    static void moveWithoutAtomicity(Path tmp, Path target) throws IOException {
+        // アトミック性を要求せずに移動する（コピー→削除で実現される可能性がある）
+        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ
+        Durability.syncFile(target, Durability.Step.RECORD_CONTENT);
     }
 
     /**

@@ -168,19 +168,18 @@ final class Durability {
      * <p>Package-private and returning the levels it created so a test can
      * assert which parents were synced without racing an actual power loss.
      *
-     * @return the directories this call created, shallowest first; empty if
-     *     {@code dir} already existed
+     * @return the directories this call created, shallowest first, in the same
+     *     relative-or-absolute form as {@code dir}; empty if {@code dir}
+     *     already existed
      * @throws IOException if the directories could not be created
      */
     static List<Path> createDirectoriesDurably(Path dir) throws IOException {
-        // 走査は絶対パスで行う。既定の --state-dir が ".batch-state" のような
-        // 単一要素の相対パスで、そのままだと getParent() が null になり、
-        // 「カレントディレクトリの中の .batch-state というエントリ」を確定させる
-        // 相手を見失う（＝既定設定でだけ同期が丸ごと抜け落ちる）ため
-        Path absolute = dir.toAbsolutePath();
-        // 作成前の時点でまだ存在しない階層を、深い方から浅い方へたどって集める
+        // 作成前の時点でまだ存在しない階層を、深い方から浅い方へたどって集める。
+        // 渡されたパスの形（相対・絶対）はここでは変えない。相対パスの解決は
+        // directoryHolding() 1 箇所に寄せてあり、ここでも絶対化すると
+        // 正規化が 2 箇所に分かれて、どちらが効いているのか追えなくなる
         List<Path> missing = new ArrayList<>();
-        for (Path p = absolute; p != null && !Files.exists(p); p = p.getParent()) {
+        for (Path p = dir; p != null && !Files.exists(p); p = p.getParent()) {
             // この階層はまだ無いので「これから作られる階層」として記録する
             missing.add(p);
         }
@@ -259,9 +258,17 @@ final class Durability {
     /**
      * Clears every step's one-shot warning budget.
      *
-     * <p>The budgets are per-constant and therefore per-JVM, so without this a
-     * test that provokes a warning would silence every later test in the same
-     * fork. Test-only: production code has no reason to warn twice.
+     * <p>The budgets live on the enum constants and are therefore per-JVM,
+     * matching {@code JobRunner.KILL_UNAVAILABLE_LOGGED}, the existing
+     * warn-once in this codebase. The cost of that choice is this method:
+     * Surefire reuses forks, so a test that provokes a warning would otherwise
+     * silence that step for every later test in the same fork.
+     *
+     * <p><b>Any test that asserts on a durability warning must call this
+     * first</b> (see {@code DurabilityTest}'s {@code @BeforeEach}). A test that
+     * forgets will observe zero warnings and pass without checking anything,
+     * which is the one way this global state can hide a regression rather than
+     * merely annoy.
      */
     static void resetWarningBudgetsForTest() {
         // すべての段階の「1 回だけ」予算を未使用の状態へ戻す

@@ -9,11 +9,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -23,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Covers {@link Durability} and its wiring into {@link JsonExecutionStore}.
@@ -129,6 +133,45 @@ class DurabilityTest {
         return messages;
     }
 
+    /**
+     * この環境でディレクトリを同期できるかどうかを実際に試して判定する。
+     *
+     * <p>ディレクトリをチャネルとして開けるのは POSIX だけで Windows では失敗する
+     * （{@link Durability} の Javadoc 参照）。その差を定数や {@code os.name} で
+     * 決め打ちにせず本物の操作で確かめるのは、CLAUDE.md §11 の「特定 OS でしか
+     * 通らないテストを作らない」を守りつつ、判定の根拠を実挙動に置くため。
+     */
+    private static boolean directorySyncSupported(Path probeDir) {
+        // 実際に開いて force(true) まで通るかどうかを試す
+        try (FileChannel channel = FileChannel.open(probeDir, StandardOpenOption.READ)) {
+            channel.force(true);
+            // 例外なく通ったのでこの環境ではディレクトリを同期できる
+            return true;
+        } catch (IOException e) {
+            // 開けない環境（Windows 等）ではディレクトリの同期段階は記録されない
+            return false;
+        }
+    }
+
+    /**
+     * ディレクトリを同期できない環境では、期待する段階の並びからディレクトリ側の
+     * 段階を落とす。落とした環境でも残りの段階と順序は変わらず検証できる。
+     */
+    private static List<Durability.Step> expectedSteps(Path probeDir, Durability.Step... steps) {
+        // 同期できる環境ではすべての段階がそのまま記録される
+        if (directorySyncSupported(probeDir)) {
+            return List.of(steps);
+        }
+        // 同期できない環境ではファイル側の段階（RECORD_CONTENT）だけが残る
+        List<Durability.Step> reduced = new ArrayList<>();
+        for (Durability.Step step : steps) {
+            if (step == Durability.Step.RECORD_CONTENT) {
+                reduced.add(step);
+            }
+        }
+        return List.copyOf(reduced);
+    }
+
     /** テスト用の最小限の実行結果を組み立てる。 */
     private static ExecutionResult sampleRun(String runId) {
         // 開始時刻を固定して結果を組み立てる（内容はこのテストの関心事ではない）
@@ -147,7 +190,8 @@ class DurabilityTest {
         store.save(sampleRun("run1"));
         // 中身を確定させてから改名を確定させる、という順序どおりであることを確認する
         // （改名を先に確定させると、中身が空のまま記録が「存在する」状態になりうる）
-        assertEquals(List.of(Durability.Step.RECORD_CONTENT, Durability.Step.RECORD_RENAME),
+        assertEquals(
+                expectedSteps(dir, Durability.Step.RECORD_CONTENT, Durability.Step.RECORD_RENAME),
                 completedSteps());
     }
 
@@ -159,7 +203,7 @@ class DurabilityTest {
         // 実行結果を保存する（保存先ディレクトリはこの中で作成される）
         store.save(sampleRun("run1"));
         // 作成した 2 階層ぶんの確定が先に来て、そのあとに記録の中身と改名が続く
-        assertEquals(List.of(
+        assertEquals(expectedSteps(dir,
                 Durability.Step.BASE_DIRECTORY,
                 Durability.Step.BASE_DIRECTORY,
                 Durability.Step.RECORD_CONTENT,
@@ -201,10 +245,49 @@ class DurabilityTest {
     }
 
     @Test
+    void createDirectoriesDurablySyncsBareRelativeStateDirectory() throws IOException {
+        // 既定の --state-dir ".batch-state" と同じ形（単一要素の相対パス）を、
+        // 他のテストとぶつからない一意な名前で用意する
+        Path relative = Path.of(".batch-state-test-" + UUID.randomUUID());
+        // ディレクトリを同期できる環境かどうかを、作成先を含むカレントディレクトリで確かめる
+        boolean supported = directorySyncSupported(Path.of("").toAbsolutePath());
+        try {
+            // 相対パスのまま作成する（本番の既定設定と同じ経路を通す）
+            List<Path> created = Durability.createDirectoriesDurably(relative);
+            // 作成した階層は渡した形（相対）のまま 1 件返る
+            assertEquals(List.of(relative), created);
+            // 単一要素の相対パスでも、含む側（カレントディレクトリ）の同期がきちんと行われる。
+            // ここが抜けると「既定設定のときだけ同期が丸ごと無くなる」状態になる
+            assertEquals(supported ? List.of(Durability.Step.BASE_DIRECTORY) : List.of(),
+                    completedSteps());
+        } finally {
+            // 作業ディレクトリに痕跡を残さないよう必ず片付ける
+            Files.deleteIfExists(relative);
+        }
+    }
+
+    @Test
     void directoryHoldingReturnsNullForFilesystemRoot() {
         // ルートを含むディレクトリは存在しないので null を返す（同期対象なし）
         Path root = Path.of("").toAbsolutePath().getRoot();
         assertNull(Durability.directoryHolding(root));
+    }
+
+    @Test
+    void nonAtomicMoveFallbackSyncsTheDestinationNotJustTheTempFile(@TempDir Path dir) throws IOException {
+        // 一時ファイルと移動先を用意する
+        Path tmp = dir.resolve("run-1.tmp");
+        Path target = dir.resolve("run1.json");
+        Files.writeString(tmp, "{}");
+        // アトミック移動が使えない環境で通る経路を直接呼ぶ
+        JsonExecutionStore.moveWithoutAtomicity(tmp, target);
+        // 中身は移動先へ移っている
+        assertEquals("{}", Files.readString(target));
+        assertTrue(Files.notExists(tmp));
+        // 移動「先」に対する同期が行われている。コピー→削除だった場合、同期済みの
+        // 一時ファイルは消えて移動先は未同期のページになるため、ここを飛ばすと
+        // 「エントリは確定・中身は未確定」という防ごうとしている状態を自分で作ってしまう
+        assertEquals(List.of(Durability.Step.RECORD_CONTENT), completedSteps());
     }
 
     @Test
@@ -240,6 +323,9 @@ class DurabilityTest {
 
     @Test
     void syncSucceedsOnRealFileAndDirectory(@TempDir Path dir) throws IOException {
+        // ディレクトリを同期できない環境では「警告ゼロ」を期待できないので飛ばす
+        // （この検査の主題はディレクトリ同期が実際に成功することそのもの）
+        assumeTrue(directorySyncSupported(dir), "この環境ではディレクトリを同期できない");
         // 実在するファイルを用意する
         Path file = dir.resolve("real.json");
         Files.writeString(file, "{}");

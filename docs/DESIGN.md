@@ -289,8 +289,20 @@ malicious resource exhaustion and against tampering with the state directory:
   `ensureBaseDirectory()` newly creates (syncing each level's *parent*, since
   that is what holds the entry), the temp file's contents before the rename,
   and the base directory after the rename — the last one only once
-  `verifyWroteUnderExpectedBase` has passed, so a file that the symlink check
-  is about to reject is never made durable first. Every step is best-effort:
+  `verifyWroteUnderExpectedBase` has passed, so a *rename* the symlink check is
+  about to reject is never committed first. This ordering deliberately covers
+  the directory entry only: the record's own bytes are flushed before the check
+  runs, so a write misdirected by a mid-sequence symlink swap may already have
+  reached the attacker-controlled directory. Withholding the content flush
+  would not change that (the bytes are written either way, flushed or not);
+  what the check does about it is unlink the misdirected file via
+  `Files.deleteIfExists(target)` and reject the save. Note also that the
+  non-atomic `Files.move` fallback re-syncs the *destination* rather than
+  relying on the earlier sync of the temp file: that fallback may internally
+  copy-and-delete, in which case the synced temp file is unlinked and the
+  destination holds fresh, unflushed pages — syncing only the directory there
+  would recreate the exact "durable entry, non-durable contents" failure this
+  section exists to prevent. Every step is best-effort:
   it logs and returns rather than throwing, because a sync failure arrives
   *after* the write itself succeeded, and propagating it would report "failed
   to save execution result" for a run whose record is on disk. Successful steps
