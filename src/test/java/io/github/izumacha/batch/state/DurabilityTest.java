@@ -334,20 +334,18 @@ class DurabilityTest {
 
     @Test
     void nonAtomicMoveFallbackSyncsTheDestinationNotJustTheTempFile(@TempDir Path dir) throws IOException {
-        // 一時ファイルと移動先を用意する
-        Path tmp = dir.resolve("run-1.tmp");
+        // 公開済みの記録に見立てたファイルを用意する
         Path target = dir.resolve("run1.json");
-        Files.writeString(tmp, "{}");
+        Files.writeString(target, "{}");
         // アトミック移動が使えない環境で通る経路を、ストア自身のインスタンスから呼ぶ
-        new JsonExecutionStore(dir).moveWithoutAtomicity(tmp, target);
-        // 中身は移動先へ移っている
-        assertEquals("{}", Files.readString(target));
-        assertTrue(Files.notExists(tmp));
+        new JsonExecutionStore(dir).syncPublishedRecord(target);
         // 移動「先」に対する同期が行われている。コピー→削除だった場合、同期済みの
         // 一時ファイルは消えて移動先は未同期のページになるため、ここを飛ばすと
         // 「エントリは確定・中身は未確定」という防ごうとしている状態を自分で作ってしまう。
         // 段階が RECORD_CONTENT と別なのは、警告予算を一時ファイル側と分けるため
         assertEquals(List.of(Durability.Step.PUBLISHED_RECORD_CONTENT), completedSteps());
+        // 同期しただけなので、公開済みの記録はそのまま残る
+        assertEquals("{}", Files.readString(target));
     }
 
     @Test

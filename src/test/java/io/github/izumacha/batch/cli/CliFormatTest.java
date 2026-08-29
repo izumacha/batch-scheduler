@@ -142,6 +142,31 @@ class CliFormatTest {
     }
 
     /**
+     * 原因を持つ例外では、外側のメッセージに「 (原因)」が併記されることを確認する。
+     * JsonExecutionStore.save は「記録は公開済みだが耐久性を確認できなかった」という
+     * 区別を原因側にしか持たせていないため、ここが落ちると運用者には
+     * 「保存できなかった」としか伝わらず、実際には残っている記録に対して
+     * バッチ全体の再実行へ誘導してしまう。
+     */
+    @Test
+    void safeMessageWithCause_appendsTheCause() {
+        // 原因付きの例外を組み立てる（save が投げる形と同じ入れ子）
+        Exception cause = new java.io.IOException("record published but unconfirmed");
+        Exception outer = new java.io.UncheckedIOException(
+                "failed to save execution result", (java.io.IOException) cause);
+        // 外側のメッセージと原因の両方が 1 行に含まれる
+        String rendered = CliFormat.safeMessageWithCause(outer);
+        assertTrue(rendered.contains("failed to save execution result"), rendered);
+        assertTrue(rendered.contains("record published but unconfirmed"), rendered);
+    }
+
+    /** 原因を持たない例外では、メッセージだけがそのまま返ることを確認する */
+    @Test
+    void safeMessageWithCause_withoutCause_returnsMessageOnly() {
+        assertEquals("boom", CliFormat.safeMessageWithCause(new IllegalStateException("boom")));
+    }
+
+    /**
      * セキュリティ回帰テスト: ジョブ出力由来のメッセージに含まれる端末制御文字
      * （ESC・BEL・CSI 等）が除去され、生の 0x1B / 0x07 が表示文字列へ漏れないこと
      * （旧実装は空白しか圧縮せず、タイトル偽装・文字消去などの端末注入を許していた）。

@@ -229,6 +229,8 @@ public final class JsonExecutionStore implements ExecutionStore {
         try {
             // runId から書き込み先のファイルパスを計算する
             Path target = fileFor(result.runId());
+            // アトミック移動が使えず、コピー→削除で公開された可能性があるかどうか
+            boolean publishedWithoutAtomicity = false;
             // Write to a temp file in the same directory, then move atomically
             // so readers never observe a half-written file.
             // Prefix is independent of runId: createTempFile requires >= 3 chars,
@@ -265,7 +267,7 @@ public final class JsonExecutionStore implements ExecutionStore {
                     // tryRead() がパース失敗時にそのファイルを読み飛ばす設計のため、実害はクラッシュ
                     // ではなく該当行が一覧・検索から一時的に欠落する程度に限定される）
                     try {
-                        moveWithoutAtomicity(tmp, target);
+                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
                     } catch (IOException fallbackFailed) {
                         // フォールバックも失敗した場合、報告されるのはこちらの例外になる。
                         // アトミック移動が使えなかった理由の方が「この保存先ではこの経路を
@@ -273,6 +275,10 @@ public final class JsonExecutionStore implements ExecutionStore {
                         fallbackFailed.addSuppressed(atomicFailed);
                         throw fallbackFailed;
                     }
+                    // コピー→削除で公開された可能性があるので、あとで移動先を同期し直す。
+                    // 同期をこの場で行わないのは、下の検証（誤配置なら削除して拒否する）より
+                    // 前に例外を投げると、その後始末に到達できなくなるため
+                    publishedWithoutAtomicity = true;
                 }
             } finally {
                 // 何があっても一時ファイルを削除してゴミファイルが残らないようにする
@@ -290,7 +296,18 @@ public final class JsonExecutionStore implements ExecutionStore {
             // deleteIfExists は何もしておらず、確定するのは改名 1 件だけである
             // （一時ファイルが実際に残るのは移動が失敗した場合だが、そのときは
             // IOException が伝播してこの行には来ない）
-            durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            try {
+                // コピー→削除で公開された場合だけ、移動先そのものを同期し直す
+                if (publishedWithoutAtomicity) {
+                    syncPublishedRecord(target);
+                }
+            } finally {
+                // 上が失敗しても改名だけは確定させる。その場合の報告は「記録は公開済みだが
+                // 耐久性を確認できなかった」なので、せめてエントリは残るようにしておく。
+                // この同期はディレクトリ対象＝失敗しても例外にならない（Durability の
+                // shouldFailTheSave 参照）ため、finally に置いても元の例外を隠さない
+                durability.sync(expectedRealBase, Durability.Step.RECORD_RENAME);
+            }
         } catch (IOException e) {
             // IO 例外をチェックなし例外に包んで投げる
             throw new UncheckedIOException(
@@ -498,32 +515,33 @@ public final class JsonExecutionStore implements ExecutionStore {
     }
 
     /**
-     * Moves {@code tmp} onto {@code target} without requiring atomicity, then
-     * re-syncs the destination.
+     * Re-flushes a record that was published by the non-atomic fallback.
      *
-     * <p>Used only when {@link StandardCopyOption#ATOMIC_MOVE} is unavailable.
-     * That fallback may internally copy-and-delete rather than rename, in
-     * which case {@code target} is a <em>different</em> file than the one
-     * {@link #save} already synced: the synced {@code tmp} gets unlinked and
-     * the destination is left holding fresh pages that have never been
+     * <p>Needed only when {@link StandardCopyOption#ATOMIC_MOVE} is
+     * unavailable. That fallback may internally copy-and-delete rather than
+     * rename, in which case {@code target} is a <em>different</em> file than
+     * the one {@link #save} already synced: the synced temp file gets unlinked
+     * and the destination is left holding fresh pages that have never been
      * flushed. Syncing only the directory afterwards would then publish a
      * durable entry pointing at non-durable bytes -- precisely the failure
-     * {@link Durability} exists to prevent. Re-syncing the destination closes
-     * that hole; when the fallback did perform a plain rename it is the same
-     * inode and the extra sync is a harmless no-op.
+     * {@link Durability} exists to prevent. When the fallback did perform a
+     * plain rename it is the same inode and this is a harmless no-op.
      *
-     * <p>Package-private so a test can exercise this branch directly: no
-     * filesystem in the test environment refuses {@code ATOMIC_MOVE}, so the
-     * only other way to reach it would be a fake {@code FileSystemProvider}.
-     * An instance method rather than a static one taking the collaborator as
-     * an argument, so the store's own {@link Durability} -- and with it the
-     * per-store warn-once budget -- is the only one that can be used here.
+     * <p>Called <em>after</em> {@link #verifyWroteUnderExpectedBase}, not
+     * inside the fallback branch: it can throw, and a throw before that check
+     * would skip the check's own cleanup, leaving a misdirected record in
+     * place instead of unlinking it.
+     *
+     * <p>Package-private so a test can exercise this directly: no filesystem
+     * in the test environment refuses {@code ATOMIC_MOVE}, so the only other
+     * way to reach it would be a fake {@code FileSystemProvider}. An instance
+     * method rather than a static one taking the collaborator as an argument,
+     * so the store's own {@link Durability} -- and with it the per-store
+     * warn-once budget -- is the only one that can be used here.
      * ({@link #verifyWroteUnderExpectedBase} stays static for a different
      * reason: it touches no instance state at all.)
      */
-    void moveWithoutAtomicity(Path tmp, Path target) throws IOException {
-        // アトミック性を要求せずに移動する（コピー→削除で実現される可能性がある）
-        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+    void syncPublishedRecord(Path target) throws IOException {
         // 移動先そのものを同期し直して、中身が未確定のまま公開されるのを防ぐ。
         // 段階を RECORD_CONTENT と分けているのは警告予算を独立させるため
         // （共有すると、捨てられる一時ファイル側の失敗がこちらの警告を黙らせる）

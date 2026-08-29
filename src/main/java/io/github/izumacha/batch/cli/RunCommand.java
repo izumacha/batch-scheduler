@@ -135,12 +135,10 @@ public final class RunCommand implements Callable<Integer> {
             //  場合にディレクトリだけが副作用として残るのを防ぐため）
             store.ensureBaseDirectory();
         } catch (RuntimeException e) {
-            // 失敗の根本原因（例: 既存ファイルと衝突・権限不足）を取り出す
-            Throwable cause = e.getCause();
-            // 原因がある場合は「 (原因)」の形で 1 行に併記する（スタックトレースは出さない）
-            String detail = cause != null ? " (" + cause + ")" : "";
             // 保存先が使えない場合はエラーメッセージを標準エラーに出力して終了する
-            System.err.println("error: failed to prepare state directory: " + CliFormat.safeMessage(e) + detail);
+            // （原因の併記は CliFormat に集約している。§6 DRY）
+            System.err.println("error: failed to prepare state directory: "
+                    + CliFormat.safeMessageWithCause(e));
             return BatchCli.EXIT_CONFIG;
         }
 
@@ -173,8 +171,11 @@ public final class RunCommand implements Callable<Integer> {
             // 実行結果を状態ディレクトリに JSON ファイルとして保存する
             store.save(result);
         } catch (RuntimeException e) {
-            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する
-            System.err.println("error: failed to persist run state: " + CliFormat.safeMessage(e));
+            // 保存に失敗した場合はエラーメッセージを標準エラーに出力する。原因まで出すのは、
+            // 「記録は公開済みだが耐久性を確認できなかった」という区別が原因側にしか無く、
+            // 外側だけだと残っている記録に対して全ジョブの再実行へ誘導してしまうため
+            System.err.println("error: failed to persist run state: "
+                    + CliFormat.safeMessageWithCause(e));
             // 保存先は事前検証済みなのでここに来るのは稀（実行中のディスク満杯など）。
             // バッチ自体が失敗している場合は、記録漏れ（3）よりもバッチ失敗（1）の方が
             // ラッパースクリプトの分岐にとって重要な情報なので EXIT_FAILED を優先して返す。
