@@ -16,7 +16,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -99,12 +98,12 @@ class JsonExecutionStoreTest {
     }
 
     @Test
-    void findAllSkipsFileContainingJsonNullWithoutHidingValidRuns(@TempDir Path dir) {
+    void findAllSkipsFileContainingJsonNullWithoutHidingValidRuns(@TempDir Path dir) throws Exception {
         // 正常な実行記録を 1 件保存しておく
         JsonExecutionStore store = new JsonExecutionStore(dir);
         store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
         // そこへ `null` と書かれたファイルを 1 件混ぜる（手動改変や途中書き込みで起こりうる）
-        assertDoesNotThrow(() -> Files.writeString(dir.resolve("nulled.json"), "null"));
+        Files.writeString(dir.resolve("nulled.json"), "null");
 
         // 壊れた 1 件は読み飛ばし、正常な記録は従来どおり返ること。
         // 修正前はここで NullPointerException になり、`list` が 1 件も表示できず exit 3 になっていた
