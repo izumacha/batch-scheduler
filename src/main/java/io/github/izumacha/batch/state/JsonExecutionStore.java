@@ -927,8 +927,14 @@ public final class JsonExecutionStore implements ExecutionStore {
                             + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
                     return Optional.empty();
                 }
-                // 上限内に収まったバイト列を ExecutionResult に変換し、Optional でラップして返す
-                return Optional.of(mapper.readValue(bytes, ExecutionResult.class));
+                // 上限内に収まったバイト列を ExecutionResult に変換し、Optional でラップして返す。
+                // ofNullable なのは、JSON リテラルの `null` だけが例外ではなく null を返すため。
+                // of だと NullPointerException になり、これは IOException ではないので下の
+                // catch をすり抜けて呼び出し元まで伝播する ——「壊れたファイルは読み飛ばす」と
+                // 約束しているこのクラスで、`null` と書かれた 1 件だけが list や
+                // --rerun-failed を丸ごと落とす (他の正常な記録も 1 件も表示されなくなる)。
+                // 空ファイルや壊れた JSON は IOException 系になるので元から正しくスキップされる。
+                return Optional.ofNullable(mapper.readValue(bytes, ExecutionResult.class));
             }
         } catch (IOException e) {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を
