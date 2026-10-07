@@ -927,8 +927,25 @@ public final class JsonExecutionStore implements ExecutionStore {
                             + MAX_RECORD_BYTES + " bytes, limit " + MAX_RECORD_BYTES + ")");
                     return Optional.empty();
                 }
-                // 上限内に収まったバイト列を ExecutionResult に変換し、Optional でラップして返す
-                return Optional.of(mapper.readValue(bytes, ExecutionResult.class));
+                // 上限内に収まったバイト列を ExecutionResult に変換する
+                ExecutionResult parsed = mapper.readValue(bytes, ExecutionResult.class);
+                // JSON リテラルの `null` だけは、例外ではなく null が返る。
+                // ここで Optional.of に渡すと NullPointerException になり、これは
+                // IOException ではないので下の catch をすり抜けて呼び出し元まで伝播する
+                // ——「壊れたファイルは読み飛ばす」と約束しているこのクラスで、`null` と
+                // 書かれた 1 件だけが list や --rerun-failed を丸ごと落とす
+                // (他の正常な記録も 1 件も表示されなくなる)。
+                // 空ファイルや壊れた JSON は IOException 系になるので元から正しくスキップされる。
+                if (parsed == null) {
+                    // 他のスキップ経路 (サイズ超過・パース失敗・ディレクトリ外) と同じく痕跡を残す。
+                    // ここだけ無言だと「壊れ方によって診断の質が変わる」状態になり、
+                    // 運用者は list から消えた実行記録の理由をどこからも辿れない (§6 握り潰さない)
+                    LOGGER.warning("Skipping execution result file '" + SafeText.forLog(file)
+                            + "': document is JSON null");
+                    return Optional.empty();
+                }
+                // 正常に読めた実行記録を返す
+                return Optional.of(parsed);
             }
         } catch (IOException e) {
             // パースに失敗した（またはサイズ確認中に消えた）ファイルはスキップして空 Optional を

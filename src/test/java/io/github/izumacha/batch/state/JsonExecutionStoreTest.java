@@ -86,6 +86,33 @@ class JsonExecutionStoreTest {
     }
 
     @Test
+    void findByIdSkipsFileContainingJsonNull(@TempDir Path dir) throws Exception {
+        // JSON リテラルの `null` だけが「パースは成功するが結果が null」という他と違う形になる。
+        // Optional.of だとここで NullPointerException になり、IOException を捕まえる catch を
+        // すり抜けて呼び出し元まで伝播する（壊れた JSON や空ファイルは IOException 系なので通らない道）
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        Files.writeString(dir.resolve("nulled.json"), "null");
+
+        // 他の壊れたファイルと同じく、例外を投げずに空を返すべき（クラス Javadoc の fail-safe 契約）
+        assertTrue(store.findById("nulled").isEmpty());
+    }
+
+    @Test
+    void findAllSkipsFileContainingJsonNullWithoutHidingValidRuns(@TempDir Path dir) throws Exception {
+        // 正常な実行記録を 1 件保存しておく
+        JsonExecutionStore store = new JsonExecutionStore(dir);
+        store.save(sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS)));
+        // そこへ `null` と書かれたファイルを 1 件混ぜる（手動改変や途中書き込みで起こりうる）
+        Files.writeString(dir.resolve("nulled.json"), "null");
+
+        // 壊れた 1 件は読み飛ばし、正常な記録は従来どおり返ること。
+        // 修正前はここで NullPointerException になり、`list` が 1 件も表示できず exit 3 になっていた
+        List<ExecutionResult> all = store.findAll();
+        assertEquals(1, all.size());
+        assertEquals("run1", all.get(0).runId());
+    }
+
+    @Test
     void findAllReturnsSavedRun(@TempDir Path dir) {
         JsonExecutionStore store = new JsonExecutionStore(dir);
         ExecutionResult run = sampleRun("run1", Instant.now().truncatedTo(ChronoUnit.MILLIS));
